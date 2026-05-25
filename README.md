@@ -9,24 +9,48 @@
 - **LLM**：支持官方 Anthropic API 及兼容 Anthropic Messages API 的第三方服务（tool use + SSE 流式）
 - **部署**：本地单机，`./start.sh` 同时拉起后端 8000 + 前端 3000
 
-## 快速启动
+## 首次安装
 
-macOS 可直接双击项目根目录或桌面快捷方式：
+> 需要：macOS、Python 3.11+、Node.js 18+
+
+**1. 克隆仓库**
+
+```bash
+git clone https://github.com/wangzuoyuan/-Exam-Performance-Analysis.git
+cd -Exam-Performance-Analysis
+```
+
+**2. 配置 API Key**
+
+```bash
+cp backend/.env.example backend/.env
+```
+
+用文本编辑器打开 `backend/.env`，填入你的 API Key。对话助手默认使用 Anthropic API，也支持切换为任意 OpenAI 兼容服务（见下方「对话助手配置」）。
+
+**3. 初始化依赖**
+
+双击 `初始化成绩分析.command`，脚本会自动创建 Python 虚拟环境并安装前端依赖，等待完成后按任意键关闭。
+
+**4. 启动应用**
+
+双击 `启动成绩分析.command`，稍等片刻后浏览器会自动打开 http://localhost:3000。
+
+---
+
+## 日常使用
 
 - `启动成绩分析.command`：启动后端 8000 + 前端 3000，并打开浏览器
-- `停止成绩分析.command`：停止后端 8000 + 前端 3000
-- `初始化成绩分析.command`：全新初始化应用，会清空 `~/.exam-tracker` 下的数据库、上传文件、日志和备份，并重建依赖环境
+- `停止成绩分析.command`：停止所有服务
+- `初始化成绩分析.command`：全新初始化，会清空 `~/.exam-tracker` 下的数据库、上传文件和日志，并重建依赖环境
 
 命令行启动：
 
 ```bash
-cd 成绩分析webapp
 ./start.sh
 ```
 
 访问 http://localhost:3000
-
-首次使用需在 `backend/.env` 填写 API Key（见下方「对话助手配置」）。
 
 ## 页面功能
 
