@@ -1,21 +1,7 @@
 #!/bin/bash
 set -u
-
-APP_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-cd "$APP_DIR" || {
-  echo "无法进入应用目录: $APP_DIR"
-  echo ""
-  read -n 1 -s -r -p "按任意键关闭窗口..."
-  echo ""
-  exit 1
-}
-
-if [ ! -x "./start.sh" ]; then
-  chmod +x "./start.sh"
-fi
-
-./start.sh
+cd "$(dirname "$0")" || exit 1
+python3 run.py start
 status=$?
 
 echo ""
@@ -27,7 +13,6 @@ else
   echo "  $HOME/.exam-tracker/backend.log"
   echo "  $HOME/.exam-tracker/frontend.log"
 fi
-
 echo ""
 read -n 1 -s -r -p "按任意键关闭窗口..."
 echo ""
