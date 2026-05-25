@@ -7,11 +7,11 @@
 - **后端**：Python 3.11+ / FastAPI / SQLAlchemy / SQLite
 - **前端**：Next.js 14 (App Router) + TypeScript + Tailwind + Recharts + shadcn/ui
 - **LLM**：支持官方 Anthropic API 及兼容 Anthropic Messages API 的第三方服务（tool use + SSE 流式）
-- **部署**：本地单机，`./start.sh` 同时拉起后端 8000 + 前端 3000
+- **部署**：本地单机，跨平台支持 macOS 与 Windows，启动后同时拉起后端 8000 + 前端 3000
 
 ## 首次安装
 
-> 需要：macOS、Python 3.11+、Node.js 18+
+> 需要：Python 3.11+、Node.js 18+，macOS 或 Windows 10/11
 
 **1. 克隆仓库**
 
@@ -22,33 +22,43 @@ cd -Exam-Performance-Analysis
 
 **2. 配置 API Key**
 
-```bash
-cp backend/.env.example backend/.env
-```
-
-用文本编辑器打开 `backend/.env`，填入你的 API Key。对话助手默认使用 Anthropic API，也支持切换为任意 OpenAI 兼容服务（见下方「对话助手配置」）。
+复制 `backend/.env.example` 为 `backend/.env`，用文本编辑器填入 API Key。对话助手默认使用 Anthropic API，也支持切换为任意 OpenAI 兼容服务（见下方「对话助手配置」）。
 
 **3. 初始化依赖**
 
-双击 `初始化成绩分析.command`，脚本会自动创建 Python 虚拟环境并安装前端依赖，等待完成后按任意键关闭。
+- **macOS**：双击 `初始化成绩分析.command`
+- **Windows**：双击 `初始化成绩分析.bat`（首次需安装 Python 3.11+ 时勾选「Add to PATH」，并安装 Node.js LTS）
+
+脚本会自动创建 Python 虚拟环境并安装前端依赖。
 
 **4. 启动应用**
 
-双击 `启动成绩分析.command`，稍等片刻后浏览器会自动打开 http://localhost:3000。
+- **macOS**：双击 `启动成绩分析.command`
+- **Windows**：双击 `启动成绩分析.bat`
+
+稍等片刻后浏览器会自动打开 http://localhost:3000。
 
 ---
 
 ## 日常使用
 
-- `启动成绩分析.command`：启动后端 8000 + 前端 3000，并打开浏览器
-- `停止成绩分析.command`：停止所有服务
-- `初始化成绩分析.command`：全新初始化，会清空 `~/.exam-tracker` 下的数据库、上传文件和日志，并重建依赖环境
+双击桌面/项目目录里的脚本即可：
 
-命令行启动：
+| 操作 | macOS | Windows |
+|------|-------|---------|
+| 启动 | `启动成绩分析.command` | `启动成绩分析.bat` |
+| 停止 | `停止成绩分析.command` | `停止成绩分析.bat` |
+| 全新初始化（清空本地应用数据并重建依赖） | `初始化成绩分析.command` | `初始化成绩分析.bat` |
+
+所有脚本底层都调用 `run.py`，也可直接命令行使用：
 
 ```bash
-./start.sh
+python run.py start    # 启动
+python run.py stop     # 停止
+python run.py init     # 全新初始化
 ```
+
+> 「全新初始化」会清空 `~/.exam-tracker`（Windows 上是 `%USERPROFILE%\.exam-tracker`）下的数据库、上传文件和日志。
 
 访问 http://localhost:3000
 
@@ -99,10 +109,14 @@ cp backend/.env.example backend/.env
 │   │   └── ToolCallCard.tsx     # 工具调用折叠卡（对话抽屉内）
 │   ├── package.json
 │   └── tailwind.config.js
-├── start.sh                     # 启动脚本（含端口检测 + venv 初始化）
+├── run.py                       # 跨平台启动器（start/stop/init），所有脚本最终都调它
+├── start.sh                     # macOS 命令行启动入口
 ├── 启动成绩分析.command          # macOS 双击启动
 ├── 停止成绩分析.command          # macOS 双击停止
-└── 初始化成绩分析.command        # macOS 双击全新初始化（会清空本地应用数据）
+├── 初始化成绩分析.command        # macOS 双击全新初始化
+├── 启动成绩分析.bat              # Windows 双击启动
+├── 停止成绩分析.bat              # Windows 双击停止
+└── 初始化成绩分析.bat            # Windows 双击全新初始化
 ```
 
 ## 数据模型（SQLite，存于 `~/.exam-tracker/db.sqlite`）
@@ -184,8 +198,8 @@ npx tsc --noEmit
 # 后端测试
 cd backend && pip install pytest && pytest tests/
 
-# 关停服务
-kill $(lsof -t -i:8000) $(lsof -t -i:3000)
+# 关停服务（跨平台）
+python run.py stop
 ```
 
-日志写到 `~/.exam-tracker/{backend,frontend}.log`。完全重置可双击 `初始化成绩分析.command`，或手动删除 `~/.exam-tracker/`。
+日志写到 `~/.exam-tracker/{backend,frontend}.log`（Windows 上是 `%USERPROFILE%\.exam-tracker\`）。完全重置可双击对应平台的「初始化成绩分析」脚本，或手动删除该目录。
