@@ -1,0 +1,1814 @@
+'use client'
+
+import { Fragment, useEffect, useMemo, useState } from 'react'
+import type { ReactNode, TdHTMLAttributes, ThHTMLAttributes } from 'react'
+import Link from 'next/link'
+import { useParams } from 'next/navigation'
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
+import {
+  AlertCircle,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  BarChart3,
+  BookOpen,
+  ChevronLeft,
+  Download,
+  Hash,
+  Search,
+  TrendingUp,
+  Users,
+} from 'lucide-react'
+
+import { cn } from '@/lib/utils'
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import { Input } from '@/components/ui/input'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
+import { RankBandStackedBar } from '@/components'
+import { formatGradeLabel } from '@/lib/labels'
+
+interface ExamDetail {
+  id: number
+  name: string
+  grade: number
+  semester?: string | null
+  exam_date: string
+  exam_type?: string | null
+}
+
+interface ClassAverage {
+  class_num: number
+  class_type?: string | null
+  teacher_name?: string | null
+  subject_averages?: Record<string, number | null> | null
+  total_averages?: Record<string, number | null> | null
+}
+
+interface ExamStats {
+  total_students?: number | null
+  avg_main_total?: number | null
+  max_total?: number | null
+  min_total?: number | null
+  rank_min?: number | null
+  rank_max?: number | null
+  by_total_type?: Record<string, TotalTypeStats | undefined> | null
+}
+
+interface TotalTypeStats {
+  count?: number | null
+  avg?: number | null
+  max?: number | null
+  min?: number | null
+  rank_min?: number | null
+  rank_max?: number | null
+}
+
+interface ExamApiResponse {
+  exam: ExamDetail
+  class_averages?: ClassAverage[]
+  stats?: ExamStats
+  // 下面这些后端目前不返回，预留兼容
+  focus_list?: FocusStudent[]
+  students?: StudentRow[]
+  rank_bands?: RankBandEntry[]
+  rank_distribution?: RankDistributionEntry[]
+}
+
+interface FocusStudent {
+  student_id: string
+  name: string
+  class_num?: number | null
+  xueji_rank?: number | null
+  total_score?: number | null
+  issues?: string[]
+  issue?: string
+}
+
+interface StudentRow {
+  student_id: string
+  name: string
+  class_num?: number | null
+  xueji?: number | null
+  subject_scores?: Record<string, number | null> | null
+  subject_grade_scores?: Record<string, number | null> | null
+  subject_percentiles?: Record<string, number | null> | null
+  total_scores?: Record<
+    string,
+    {
+      score?: number | null
+      rank?: number | null
+      percentile?: number | null
+      xueji_rank?: number | null
+      grade_rank?: number | null
+    } | undefined
+  > | null
+  total_score?: number | null
+  grade_rank?: number | null
+}
+
+interface RankBandEntry {
+  total_type?: string
+  class_num: number
+  high_score: number
+  critical: number
+  weak: number
+}
+
+interface RankDistributionEntry {
+  band: string
+  [key: string]: string | number
+}
+
+type IssueTone = 'danger' | 'warning' | 'purple' | 'slate' | 'outline'
+
+const SUBJECT_KEYS: { key: string; label: string }[] = [
+  { key: '语文', label: '语' },
+  { key: '数学', label: '数' },
+  { key: '英语', label: '英' },
+  { key: '物理', label: '物' },
+  { key: '化学', label: '化' },
+  { key: '生物', label: '生' },
+  { key: '政治', label: '政' },
+  { key: '历史', label: '史' },
+  { key: '地理', label: '地' },
+]
+
+const BASE_AVERAGE_SUBJECTS = ['语文', '数学', '英语'] as const
+const ELECTIVE_AVERAGE_SUBJECTS = ['物理', '化学', '生物', '政治', '历史', '地理'] as const
+const ALL_AVERAGE_SUBJECTS = [
+  ...BASE_AVERAGE_SUBJECTS,
+  ...ELECTIVE_AVERAGE_SUBJECTS,
+] as const
+
+type AverageSummaryKind = '平均' | '最高' | '最低'
+type AverageMetric =
+  | { source: 'subject'; key: string }
+  | { source: 'total'; key: string }
+  | { source: 'rank'; key: string }
+
+const RANK_DISTRIBUTION_COLORS = ['#4098ff', '#55d6c2', '#ff6b6b']
+
+function classifyIssue(label: string): IssueTone {
+  if (/退步|下滑/.test(label)) return 'danger'
+  if (/波动/.test(label)) return 'warning'
+  if (/偏科/.test(label)) return 'purple'
+  if (/薄弱|低位/.test(label)) return 'slate'
+  return 'outline'
+}
+
+function issueToneClass(tone: IssueTone): string {
+  switch (tone) {
+    case 'danger':
+      return 'bg-danger-50 text-danger-500 border-transparent'
+    case 'warning':
+      return 'bg-warning-50 text-warning-500 border-transparent'
+    case 'purple':
+      return 'bg-purple-500 text-white border-transparent'
+    case 'slate':
+      return 'bg-slate-200 text-slate-700 border-transparent'
+    case 'outline':
+    default:
+      return 'border-slate-200 text-slate-700 bg-white'
+  }
+}
+
+function getInitial(name: string): string {
+  if (!name) return '?'
+  return name.trim().charAt(0)
+}
+
+function formatNumber(n: number | null | undefined, digits = 1): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return '—'
+  return Number(n).toFixed(digits)
+}
+
+function formatTableNumber(n: number | null | undefined): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return ''
+  return Number(n)
+    .toFixed(2)
+    .replace(/\.00$/, '')
+    .replace(/(\.\d)0$/, '$1')
+}
+
+function formatInt(n: number | null | undefined): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return '—'
+  return String(Math.round(Number(n)))
+}
+
+function formatPercentile(n: number | null | undefined): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return '—'
+  const value = Math.abs(n) <= 1 ? n * 100 : n
+  return `${value.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1')}%`
+}
+
+function metricId(metric: AverageMetric): string {
+  return `${metric.source}:${metric.key}`
+}
+
+function getTotalAverage(
+  row: ClassAverage,
+  key: string,
+): number | null | undefined {
+  if (key === '五门') {
+    return row.total_averages?.['五门'] ?? row.total_averages?.['五门总分']
+  }
+  if (key === '九门') {
+    return row.total_averages?.['九门'] ?? row.total_averages?.['九门总分']
+  }
+  if (key === '3+3') {
+    return (
+      row.total_averages?.['3+3'] ??
+      row.total_averages?.['3+3总分'] ??
+      row.total_averages?.['所有总分']
+    )
+  }
+  return row.total_averages?.[key]
+}
+
+function getClassAverageMetricValue(
+  row: ClassAverage,
+  metric: AverageMetric,
+): number | null | undefined {
+  if (metric.source === 'subject') {
+    if (metric.key.endsWith('_原始')) {
+      const subject = metric.key.replace('_原始', '')
+      return row.subject_averages?.[metric.key] ?? row.subject_averages?.[subject]
+    }
+    return row.subject_averages?.[metric.key]
+  }
+  if (metric.source === 'total') return getTotalAverage(row, metric.key)
+  return null
+}
+
+function classRankKey(classType: string, classNum: number, totalKey: string) {
+  return `${classType}::${classNum}::${totalKey}`
+}
+
+function numericAverageValues(rows: ClassAverage[], metric: AverageMetric): number[] {
+  return rows
+    .map((row) => getClassAverageMetricValue(row, metric))
+    .filter(
+      (value): value is number =>
+        typeof value === 'number' && !Number.isNaN(value) && value !== 0,
+    )
+}
+
+function getClassAverageMetrics(grade: number): AverageMetric[] {
+  if (grade === 1) {
+    return [
+      ...ALL_AVERAGE_SUBJECTS.map((key) => ({ source: 'subject' as const, key })),
+      { source: 'total', key: '主三门' },
+      { source: 'rank', key: '主三门' },
+      { source: 'total', key: '五门' },
+      { source: 'rank', key: '五门' },
+      { source: 'total', key: '九门' },
+      { source: 'rank', key: '九门' },
+    ]
+  }
+
+  return [
+    ...BASE_AVERAGE_SUBJECTS.map((key) => ({ source: 'subject' as const, key })),
+    ...ELECTIVE_AVERAGE_SUBJECTS.flatMap((subject) => [
+      { source: 'subject' as const, key: `${subject}_原始` },
+      { source: 'subject' as const, key: `${subject}_等级` },
+    ]),
+    { source: 'total', key: '+3' },
+    { source: 'total', key: '主三门' },
+    { source: 'rank', key: '主三门' },
+    { source: 'total', key: '3+3' },
+    { source: 'rank', key: '3+3' },
+  ]
+}
+
+function getRankDistributionKeys(grade: number): string[] {
+  return grade === 1 ? ['主三门', '五门', '九门'] : ['主三门', '+3', '3+3']
+}
+
+function getStudentSubjectScore(
+  row: StudentRow,
+  subject: string,
+  kind: 'raw' | 'grade' = 'raw',
+): number | null {
+  const source = kind === 'grade' ? row.subject_grade_scores : row.subject_scores
+  const value = source?.[subject]
+  return typeof value === 'number' && !Number.isNaN(value) ? value : null
+}
+
+function getStudentSubjectPercentile(row: StudentRow, subject: string): number | null {
+  const value = row.subject_percentiles?.[subject]
+  return typeof value === 'number' && !Number.isNaN(value) ? value : null
+}
+
+function getStudentTotalScore(row: StudentRow, totalType: string): number | null {
+  if (totalType === '主三门') {
+    return row.total_scores?.[totalType]?.score ?? row.total_score ?? null
+  }
+  return row.total_scores?.[totalType]?.score ?? null
+}
+
+function getStudentTotalPercentile(row: StudentRow, totalType: string): number | null {
+  return row.total_scores?.[totalType]?.percentile ?? null
+}
+
+function getStudentTotalRank(row: StudentRow, totalType: string): number | null {
+  if (totalType === '主三门') {
+    return row.total_scores?.[totalType]?.rank ?? row.grade_rank ?? null
+  }
+  return row.total_scores?.[totalType]?.rank ?? null
+}
+
+function getStudentTotalXuejiRank(row: StudentRow, totalType: string): number | null {
+  return row.total_scores?.[totalType]?.xueji_rank ?? null
+}
+
+function getStudentTotalGradeRank(row: StudentRow, totalType: string): number | null {
+  if (totalType === '主三门') {
+    return row.total_scores?.[totalType]?.grade_rank ?? row.grade_rank ?? null
+  }
+  return row.total_scores?.[totalType]?.grade_rank ?? null
+}
+
+function getRankBandsByType(
+  rows: RankBandEntry[],
+  grade: number,
+): Array<{ key: string; label: string; rows: RankBandEntry[] }> {
+  const keys = grade === 1 ? ['主三门'] : ['主三门', '3+3']
+  return keys.map((key) => ({
+    key,
+    label: key === '主三门' ? '语数英三门' : '3+3总分',
+    rows: rows
+      .filter((row) => (row.total_type || '主三门') === key)
+      .map((row) => ({ ...row, total_type: key })),
+  }))
+}
+
+function getExamKpis(
+  grade: number,
+  stats: ExamStats,
+  focusCount: number,
+): Array<{
+  icon: ReactNode
+  title: string
+  value: string
+  hint: string
+}> {
+  const byType = stats.by_total_type || {}
+  const main = byType['主三门']
+  const five = byType['五门']
+  const plus3 = byType['+3']
+  const total33 = byType['3+3']
+  const mainAvg = main?.avg ?? stats.avg_main_total
+  const mainRankMin = main?.rank_min ?? stats.rank_min
+  const mainRankMax = main?.rank_max ?? stats.rank_max
+
+  if (grade === 1) {
+    return [
+      {
+        icon: <BookOpen className="h-4 w-4" />,
+        title: '主三门班均',
+        value: formatNumber(mainAvg),
+        hint: main?.count ? `语数英排名主口径 · ${main.count} 人` : '语数英总分排名主口径',
+      },
+      {
+        icon: <TrendingUp className="h-4 w-4" />,
+        title: '主三门名次区间',
+        value:
+          mainRankMin != null || mainRankMax != null
+            ? `${formatInt(mainRankMin)} - ${formatInt(mainRankMax)}`
+            : '—',
+        hint: '本班学籍排名',
+      },
+      {
+        icon: <Hash className="h-4 w-4" />,
+        title: '五门班均',
+        value: formatNumber(five?.avg),
+        hint: '语数英物化总分辅助口径',
+      },
+      {
+        icon: <AlertCircle className="h-4 w-4" />,
+        title: '重点关注',
+        value: String(focusCount),
+        hint: '主三门 + 学籍排名口径',
+      },
+    ]
+  }
+
+  return [
+    {
+      icon: <BookOpen className="h-4 w-4" />,
+      title: '主三门班均',
+      value: formatNumber(mainAvg),
+      hint: main?.count ? `语数英总分 · ${main.count} 人` : '语数英总分',
+    },
+    {
+      icon: <TrendingUp className="h-4 w-4" />,
+      title: '+3班均',
+      value: formatNumber(plus3?.avg),
+      hint: '选科三门总分',
+    },
+    {
+      icon: <Hash className="h-4 w-4" />,
+      title: '3+3班均',
+      value: formatNumber(total33?.avg),
+      hint: '语数英 + 选科总分',
+    },
+    {
+      icon: <AlertCircle className="h-4 w-4" />,
+      title: '重点关注',
+      value: String(focusCount),
+      hint: '主三门 + 学籍排名口径',
+    },
+  ]
+}
+
+function buildClassAverageRanks(rows: ClassAverage[], metrics: AverageMetric[]) {
+  const groups = groupClassAverages(rows)
+  const rankMap = new Map<string, number>()
+  const rankKeys = metrics
+    .filter((metric): metric is { source: 'rank'; key: string } => metric.source === 'rank')
+    .map((metric) => metric.key)
+
+  groups.forEach((group) => {
+    rankKeys.forEach((totalKey) => {
+      const sorted = group.rows
+        .map((row) => ({
+          row,
+          value: getTotalAverage(row, totalKey),
+        }))
+        .filter(
+          (entry): entry is { row: ClassAverage; value: number } =>
+            typeof entry.value === 'number' &&
+            !Number.isNaN(entry.value) &&
+            entry.value !== 0,
+        )
+        .sort((a, b) => b.value - a.value)
+
+      sorted.forEach((entry, index) => {
+        rankMap.set(
+          classRankKey(group.type, entry.row.class_num, totalKey),
+          index + 1,
+        )
+      })
+    })
+  })
+
+  return rankMap
+}
+
+function getRankValue(
+  row: ClassAverage,
+  classType: string,
+  metric: AverageMetric,
+  rankMap: Map<string, number>,
+): number | null {
+  if (metric.source !== 'rank') return null
+  return rankMap.get(classRankKey(classType, row.class_num, metric.key)) ?? null
+}
+
+function groupClassAverages(rows: ClassAverage[]) {
+  const groupMap = new Map<string, ClassAverage[]>()
+
+  rows.forEach((row) => {
+    const type = row.class_type || '未分组'
+    if (!groupMap.has(type)) groupMap.set(type, [])
+    groupMap.get(type)?.push(row)
+  })
+
+  return Array.from(groupMap.entries()).map(([type, groupRows]) => ({
+    type,
+    rows: [...groupRows].sort((a, b) => a.class_num - b.class_num),
+  }))
+}
+
+function getClassAverageSummaryValue(
+  rows: ClassAverage[],
+  metric: AverageMetric,
+  kind: AverageSummaryKind,
+): number | null {
+  if (metric.source === 'rank') return null
+  const values = numericAverageValues(rows, metric)
+  if (!values.length) return null
+  if (kind === '最高') return Math.max(...values)
+  if (kind === '最低') return Math.min(...values)
+  return values.reduce((sum, value) => sum + value, 0) / values.length
+}
+
+function exportClassAverageCsv(rows: ClassAverage[], examName: string, grade: number) {
+  const metrics = getClassAverageMetrics(grade)
+  const rankMap = buildClassAverageRanks(rows, metrics)
+  const headers = [
+    '班级类型',
+    '班级',
+    '班主任',
+    ...metrics.map((metric) => {
+      if (metric.source === 'rank') return `${metric.key}排名`
+      if (metric.source === 'total') return `${metric.key}分数`
+      return metric.key.replace('_', '')
+    }),
+  ]
+  const lines = [
+    headers,
+    ...groupClassAverages(rows).flatMap((group) =>
+      group.rows.map((row) =>
+        [
+          group.type,
+          `${String(row.class_num).padStart(2, '0')}班`,
+          row.teacher_name || '',
+          ...metrics.map((metric) =>
+            metric.source === 'rank'
+              ? String(getRankValue(row, group.type, metric, rankMap) ?? '')
+              : formatTableNumber(getClassAverageMetricValue(row, metric)),
+          ),
+        ].map((cell) => `"${String(cell).replace(/"/g, '""')}"`),
+      ),
+    ),
+  ]
+  const csv = lines.map((line) => line.join(',')).join('\n')
+  const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `${examName || '班级均分'}-班级均分.csv`
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+function heatmapClass(score: number | null | undefined, min: number, max: number): string {
+  if (score === null || score === undefined || Number.isNaN(score)) {
+    return 'bg-slate-50 text-slate-400'
+  }
+  if (max <= min) return 'bg-white text-slate-700'
+  // 分数越高 = 颜色越绿；分数越低 = 颜色越红
+  const ratio = (score - min) / (max - min)
+  // 反转后用 0..1 上色：0 深绿 → 1 深红
+  const inv = 1 - ratio
+  if (inv <= 0.2) return 'bg-green-200 text-green-900'
+  if (inv <= 0.4) return 'bg-green-50 text-green-800'
+  if (inv <= 0.6) return 'bg-white text-slate-700'
+  if (inv <= 0.8) return 'bg-red-50 text-red-700'
+  return 'bg-red-200 text-red-900'
+}
+
+type SortDirection = 'asc' | 'desc' | null
+
+export default function ExamDetailPage() {
+  const params = useParams<{ id: string }>()
+  const examId = params?.id
+
+  const [exam, setExam] = useState<ExamDetail | null>(null)
+  const [classAverages, setClassAverages] = useState<ClassAverage[]>([])
+  const [stats, setStats] = useState<ExamStats>({})
+  const [students, setStudents] = useState<StudentRow[]>([])
+  const [rankBands, setRankBands] = useState<RankBandEntry[]>([])
+  const [rankDistribution, setRankDistribution] = useState<RankDistributionEntry[]>([])
+  const [focusList, setFocusList] = useState<FocusStudent[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const [focusQuery, setFocusQuery] = useState('')
+  const [studentQuery, setStudentQuery] = useState('')
+  const [studentSortKey, setStudentSortKey] = useState<string | null>(null)
+  const [studentSortDir, setStudentSortDir] = useState<SortDirection>(null)
+
+  useEffect(() => {
+    if (!examId) return
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+
+    const examReq = fetch(`/api/exams/${examId}`).then(async (r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      return (await r.json()) as ExamApiResponse
+    })
+    const focusReq = fetch(`/api/focus-list/${examId}`)
+      .then(async (r) => (r.ok ? await r.json() : { focus_list: [] }))
+      .catch(() => ({ focus_list: [] }))
+
+    Promise.all([examReq, focusReq])
+      .then(([examData, focusData]) => {
+        if (cancelled) return
+        setExam(examData.exam)
+        setClassAverages(examData.class_averages || [])
+        setStats(examData.stats || {})
+        setStudents(examData.students || [])
+        setRankBands(examData.rank_bands || [])
+        setRankDistribution(examData.rank_distribution || [])
+        // focusData 来自 /api/focus-list；examData.focus_list 兼容（如果后端某天合并）
+        const list: FocusStudent[] =
+          (focusData?.focus_list as FocusStudent[]) || examData.focus_list || []
+        setFocusList(list)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        console.error(err)
+        setError(err?.message || '加载失败')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [examId])
+
+  // 重点关注：搜索过滤
+  const filteredFocus = useMemo(() => {
+    const q = focusQuery.trim().toLowerCase()
+    if (!q) return focusList
+    return focusList.filter(
+      (s) =>
+        (s.name || '').toLowerCase().includes(q) ||
+        (s.student_id || '').toLowerCase().includes(q),
+    )
+  }, [focusList, focusQuery])
+
+  // 学生成绩：科目 min/max（用于热力图）
+  const subjectRange = useMemo(() => {
+    const range: Record<string, { min: number; max: number }> = {}
+    SUBJECT_KEYS.forEach(({ key }) => {
+      const values = students
+        .map((s) => s.subject_scores?.[key])
+        .filter((v): v is number => typeof v === 'number' && !Number.isNaN(v))
+      if (values.length) {
+        range[key] = { min: Math.min(...values), max: Math.max(...values) }
+      }
+    })
+    return range
+  }, [students])
+
+  const examKpis = useMemo(
+    () => (exam ? getExamKpis(exam.grade, stats, focusList.length) : []),
+    [exam, stats, focusList.length],
+  )
+
+  // 学生成绩：过滤 + 排序
+  const visibleStudents = useMemo(() => {
+    const q = studentQuery.trim().toLowerCase()
+    let list = q
+      ? students.filter(
+          (s) =>
+            (s.name || '').toLowerCase().includes(q) ||
+            (s.student_id || '').toLowerCase().includes(q),
+        )
+      : students.slice()
+
+    if (studentSortKey && studentSortDir) {
+      const dir = studentSortDir === 'asc' ? 1 : -1
+      list = list.slice().sort((a, b) => {
+        const av = getSortValue(a, studentSortKey)
+        const bv = getSortValue(b, studentSortKey)
+        if (av === null && bv === null) return 0
+        if (av === null) return 1
+        if (bv === null) return -1
+        if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir
+        return String(av).localeCompare(String(bv)) * dir
+      })
+    }
+    return list
+  }, [students, studentQuery, studentSortKey, studentSortDir])
+
+  function toggleSort(key: string) {
+    if (studentSortKey !== key) {
+      setStudentSortKey(key)
+      setStudentSortDir('asc')
+      return
+    }
+    if (studentSortDir === 'asc') setStudentSortDir('desc')
+    else if (studentSortDir === 'desc') {
+      setStudentSortDir(null)
+      setStudentSortKey(null)
+    } else setStudentSortDir('asc')
+  }
+
+  if (loading) {
+    return (
+      <div className="space-y-6">
+        <Skeleton className="h-9 w-72" />
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} className="h-28 w-full" />
+          ))}
+        </div>
+        <Skeleton className="h-10 w-80" />
+        <div className="space-y-2">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <Skeleton key={i} className="h-12 w-full" />
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (error || !exam) {
+    return (
+      <Card>
+        <CardContent className="flex flex-col items-center justify-center gap-3 py-16 text-center">
+          <AlertCircle className="h-10 w-10 text-danger-500" />
+          <div className="text-base font-medium text-slate-900">加载失败</div>
+          <div className="text-sm text-slate-500">
+            {error || '未找到该考试'}
+          </div>
+          <Link href="/">
+            <Button variant="outline" size="sm">
+              <ChevronLeft className="mr-1 h-4 w-4" /> 返回首页
+            </Button>
+          </Link>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="space-y-3">
+        <Link
+          href="/"
+          className="inline-flex items-center text-sm text-slate-500 hover:text-slate-900"
+        >
+          <ChevronLeft className="mr-1 h-4 w-4" /> 返回
+        </Link>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-semibold text-slate-900">{exam.name}</h1>
+            <p className="mt-1 text-sm text-slate-500">
+              分析时间口径来自 EXAM_ORDER
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="default">{formatGradeLabel(exam.grade)}</Badge>
+            <Badge variant="secondary">{exam.exam_date || '—'}</Badge>
+            {exam.exam_type ? (
+              <Badge variant="outline">{exam.exam_type}</Badge>
+            ) : null}
+          </div>
+        </div>
+      </div>
+
+      {/* KPI */}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {examKpis.map((kpi) => (
+          <KpiCard
+            key={kpi.title}
+            icon={kpi.icon}
+            title={kpi.title}
+            value={kpi.value}
+            hint={kpi.hint}
+          />
+        ))}
+      </div>
+
+      {rankDistribution.length > 0 ? (
+        <Card>
+          <CardContent className="px-4 py-3">
+            <RankDistributionChart
+              data={rankDistribution}
+              keys={getRankDistributionKeys(exam.grade)}
+            />
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {/* Tabs */}
+      <Tabs defaultValue="averages" className="space-y-4">
+        <TabsList>
+          <TabsTrigger value="averages">
+            班级均分表
+          </TabsTrigger>
+          <TabsTrigger value="scores">
+            学生成绩明细表
+          </TabsTrigger>
+          <TabsTrigger value="bands">
+            班级名次段位表
+          </TabsTrigger>
+          <TabsTrigger value="focus">
+            <AlertCircle className="mr-1.5 h-4 w-4" /> 重点关注
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="averages">
+          {classAverages.length > 0 ? (
+            <Card className="overflow-hidden">
+              <CardHeader className="flex flex-row items-center justify-end space-y-0 border-b border-slate-200 bg-white px-4 py-3">
+                <Button
+                  size="sm"
+                  className="h-8 gap-1.5"
+                  onClick={() =>
+                    exportClassAverageCsv(
+                      classAverages,
+                      exam?.name || '',
+                      exam?.grade || 1,
+                    )
+                  }
+                >
+                  <Download className="h-4 w-4" />
+                  导出数据
+                </Button>
+              </CardHeader>
+              <CardContent className="p-4">
+                <ClassAverageDingTable rows={classAverages} grade={exam.grade} />
+              </CardContent>
+            </Card>
+          ) : (
+            <Card>
+              <CardContent>
+                <EmptyState
+                  icon={<BarChart3 className="h-8 w-8 text-slate-400" />}
+                  title="该考试无班级均分表"
+                  desc="请先上传对应考试的班级均分 Excel。"
+                />
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
+
+        {/* Tab 1: Focus */}
+        <TabsContent value="focus">
+          <Card>
+            <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <CardTitle>重点关注名单</CardTitle>
+                <CardDescription>
+                  基于主三门 + 学籍排名口径筛选；五门作辅证，九门不进。
+                </CardDescription>
+              </div>
+              <div className="relative w-full sm:w-72">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <Input
+                  value={focusQuery}
+                  onChange={(e) => setFocusQuery(e.target.value)}
+                  placeholder="按姓名 / 学号搜索"
+                  className="pl-9"
+                />
+              </div>
+            </CardHeader>
+            <CardContent>
+              {filteredFocus.length === 0 ? (
+                <EmptyState
+                  icon={<AlertCircle className="h-8 w-8 text-success-500" />}
+                  title={focusQuery ? '没有匹配的学生' : '暂无重点关注'}
+                  desc={
+                    focusQuery
+                      ? '换个关键词试试'
+                      : '本场考试主三门 + 学籍排名口径下无需特别关注。'
+                  }
+                />
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-32">学号</TableHead>
+                      <TableHead>学生</TableHead>
+                      <TableHead className="w-24">班级</TableHead>
+                      <TableHead>问题</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {filteredFocus.map((s) => {
+                      const issues =
+                        s.issues && s.issues.length
+                          ? s.issues
+                          : s.issue
+                          ? [s.issue]
+                          : []
+                      return (
+                        <TableRow key={s.student_id}>
+                          <TableCell className="font-mono text-xs text-slate-600">
+                            {s.student_id}
+                          </TableCell>
+                          <TableCell>
+                            <Link
+                              href={`/student/${s.student_id}`}
+                              className="inline-flex items-center gap-2 text-slate-900 hover:text-brand-600"
+                            >
+                              <Avatar className="h-7 w-7">
+                                <AvatarFallback className="bg-brand-50 text-xs text-brand-700">
+                                  {getInitial(s.name)}
+                                </AvatarFallback>
+                              </Avatar>
+                              <span className="font-medium">{s.name}</span>
+                            </Link>
+                          </TableCell>
+                          <TableCell className="text-sm text-slate-600">
+                            {s.class_num != null ? `${s.class_num}班` : '—'}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex flex-wrap gap-1">
+                              {issues.length === 0 ? (
+                                <span className="text-sm text-slate-400">—</span>
+                              ) : (
+                                issues.map((label, i) => (
+                                  <Badge
+                                    key={i}
+                                    variant="outline"
+                                    className={cn(
+                                      'border',
+                                      issueToneClass(classifyIssue(label)),
+                                    )}
+                                  >
+                                    {label}
+                                  </Badge>
+                                ))
+                              )}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )
+                    })}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Tab 2: Student scores */}
+        <TabsContent value="scores">
+          <Card>
+            <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <CardTitle>学生成绩明细</CardTitle>
+                <CardDescription>
+                  分数按各科相对名次配色，缺考显示「—」。
+                </CardDescription>
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <div className="relative w-full sm:w-72">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <Input
+                    value={studentQuery}
+                    onChange={(e) => setStudentQuery(e.target.value)}
+                    placeholder="按姓名 / 学号搜索"
+                    className="pl-9"
+                    disabled={students.length === 0}
+                  />
+                </div>
+                <Button variant="outline" size="sm" disabled>
+                  仅看本班
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {students.length === 0 ? (
+                <EmptyState
+                  icon={<Users className="h-8 w-8 text-slate-400" />}
+                  title="学生成绩明细暂不可用"
+                  desc="后端 /api/exams/{id} 暂未返回完整学生分数列表。"
+                />
+              ) : (
+                <StudentScoresTable
+                  grade={exam.grade}
+                  rows={visibleStudents}
+                  subjectRange={subjectRange}
+                  studentSortKey={studentSortKey}
+                  studentSortDir={studentSortDir}
+                  onSort={toggleSort}
+                />
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Tab 3: Rank bands */}
+        <TabsContent value="bands">
+          <Card>
+            <CardHeader>
+              <CardTitle>分数段分布</CardTitle>
+              <CardDescription>
+                按学籍排名口径划分：高分段 1-80、临界段 400-500、薄弱段 &gt;500。
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {rankBands.length === 0 ? (
+                <EmptyState
+                  icon={<BarChart3 className="h-8 w-8 text-slate-400" />}
+                  title="该考试无分数段数据"
+                  desc="后端未返回 rank_bands 字段；可在数据入库后再回来查看。"
+                />
+              ) : (
+                <div className="grid gap-4 lg:grid-cols-2">
+                  {getRankBandsByType(rankBands, exam.grade).map((group) =>
+                    group.rows.length > 0 ? (
+                      <div key={group.key} className="rounded-sm border border-slate-200 p-3">
+                        <div className="mb-2 text-sm font-semibold text-slate-900">
+                          {group.label}
+                        </div>
+                        <RankBandStackedBar data={group.rows} />
+                      </div>
+                    ) : null,
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+    </div>
+  )
+}
+
+function RankDistributionChart({
+  data,
+  keys,
+}: {
+  data: RankDistributionEntry[]
+  keys: string[]
+}) {
+  return (
+    <div className="h-56 w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data} margin={{ top: 8, right: 18, bottom: 0, left: 0 }}>
+          <CartesianGrid stroke="#e5e7eb" strokeDasharray="3 3" vertical={false} />
+          <XAxis
+            dataKey="band"
+            interval="preserveStartEnd"
+            tick={{ fontSize: 11, fill: '#64748b' }}
+            stroke="#e5e7eb"
+          />
+          <YAxis
+            allowDecimals={false}
+            tick={{ fontSize: 11, fill: '#64748b' }}
+            stroke="#e5e7eb"
+          />
+          <Tooltip
+            contentStyle={{
+              border: '1px solid #e2e8f0',
+              borderRadius: 6,
+              boxShadow: '0 8px 24px rgb(15 23 42 / 0.08)',
+              fontSize: 12,
+            }}
+          />
+          <Legend wrapperStyle={{ fontSize: 12 }} />
+          {keys.map((key, index) => (
+            <Bar
+              key={key}
+              dataKey={key}
+              fill={RANK_DISTRIBUTION_COLORS[index % RANK_DISTRIBUTION_COLORS.length]}
+              name={`${key}总分`}
+              radius={[2, 2, 0, 0]}
+              maxBarSize={18}
+            />
+          ))}
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+function StudentScoresTable({
+  grade,
+  rows,
+  subjectRange,
+  studentSortKey,
+  studentSortDir,
+  onSort,
+}: {
+  grade: number
+  rows: StudentRow[]
+  subjectRange: Record<string, { min: number; max: number }>
+  studentSortKey: string | null
+  studentSortDir: SortDirection
+  onSort: (key: string) => void
+}) {
+  if (grade === 1) {
+    return (
+      <div className="overflow-x-auto rounded-sm border border-slate-300 bg-white">
+        <table className="w-full min-w-[2100px] border-collapse text-center text-xs text-slate-900">
+          <thead className="bg-white text-sm font-semibold text-slate-950">
+            <tr>
+              <ScoreTitleHead colSpan={34}>学生成绩（在籍）</ScoreTitleHead>
+            </tr>
+            <tr>
+              <ScoreHead rowSpan={2} className="w-28">
+                <SortButton label="学号" sortKey="student_id" active={studentSortKey} dir={studentSortDir} onSort={onSort} />
+              </ScoreHead>
+              <ScoreHead rowSpan={2} className="w-16">
+                <SortButton label="班级" sortKey="class_num" active={studentSortKey} dir={studentSortDir} onSort={onSort} />
+              </ScoreHead>
+              <ScoreHead rowSpan={2} className="w-16">
+                <SortButton label="学籍" sortKey="xueji" active={studentSortKey} dir={studentSortDir} onSort={onSort} />
+              </ScoreHead>
+              <ScoreHead rowSpan={2} className="w-24">
+                <SortButton label="姓名" sortKey="name" active={studentSortKey} dir={studentSortDir} onSort={onSort} />
+              </ScoreHead>
+              {ALL_AVERAGE_SUBJECTS.map((subject) => (
+                <ScoreHead key={subject} colSpan={2}>
+                  {subject}
+                </ScoreHead>
+              ))}
+              {(['主三门', '五门', '九门'] as const).map((totalType) => (
+                <ScoreHead key={totalType} colSpan={4}>
+                  {totalType}
+                </ScoreHead>
+              ))}
+            </tr>
+            <tr>
+              {ALL_AVERAGE_SUBJECTS.map((subject) => (
+                <Fragment key={subject}>
+                  <ScoreHead className="w-16">
+                    <SortButton label="分数" sortKey={`subj:${subject}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
+                  </ScoreHead>
+                  <ScoreHead className="w-20">
+                    <SortButton label="年级百分位" sortKey={`pct:${subject}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
+                  </ScoreHead>
+                </Fragment>
+              ))}
+              {(['主三门', '五门', '九门'] as const).map((totalType) => (
+                <Fragment key={totalType}>
+                  <ScoreHead className="w-16">
+                    <SortButton label="总分" sortKey={`total:${totalType}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
+                  </ScoreHead>
+                  <ScoreHead className="w-20">
+                    <SortButton label="年级百分位" sortKey={`totalPct:${totalType}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
+                  </ScoreHead>
+                  <ScoreHead className="w-16">
+                    <SortButton label="学籍排名" sortKey={`xuejiRank:${totalType}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
+                  </ScoreHead>
+                  <ScoreHead className="w-16">
+                    <SortButton label="年级排名" sortKey={`gradeRank:${totalType}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
+                  </ScoreHead>
+                </Fragment>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((student) => (
+              <tr key={student.student_id} className="bg-white">
+                <ScoreCell className="font-mono text-xs text-slate-600">
+                  {student.student_id}
+                </ScoreCell>
+                <ScoreCell className="text-slate-600">
+                  {student.class_num != null ? student.class_num : '—'}
+                </ScoreCell>
+                <ScoreCell className="text-slate-600">
+                  {student.xueji ?? '—'}
+                </ScoreCell>
+                <ScoreCell className="text-left">
+                  <Link href={`/student/${student.student_id}`} className="font-medium text-slate-900 hover:text-brand-600">
+                    {student.name}
+                  </Link>
+                </ScoreCell>
+                {ALL_AVERAGE_SUBJECTS.map((subject) => (
+                  <Fragment key={subject}>
+                    <StudentScoreCell value={getStudentSubjectScore(student, subject)} range={subjectRange[subject]} />
+                    <StudentPercentileCell value={getStudentSubjectPercentile(student, subject)} />
+                  </Fragment>
+                ))}
+                {(['主三门', '五门', '九门'] as const).map((totalType) => (
+                  <Fragment key={totalType}>
+                    <StudentScoreCell value={getStudentTotalScore(student, totalType)} className="font-semibold" />
+                    <StudentPercentileCell value={getStudentTotalPercentile(student, totalType)} />
+                    <StudentScoreCell value={getStudentTotalXuejiRank(student, totalType)} />
+                    <StudentScoreCell value={getStudentTotalGradeRank(student, totalType)} />
+                  </Fragment>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
+  return (
+    <div className="overflow-x-auto rounded-sm border border-slate-300 bg-white">
+      <table className="w-full min-w-[1660px] border-collapse text-center text-xs text-slate-900">
+        <thead className="bg-[#dbe4f2] text-sm font-semibold text-slate-950">
+          <tr>
+            <ScoreHead rowSpan={2} className="w-28">
+              <SortButton label="学号" sortKey="student_id" active={studentSortKey} dir={studentSortDir} onSort={onSort} />
+            </ScoreHead>
+            <ScoreHead rowSpan={2} className="w-24">
+              <SortButton label="姓名" sortKey="name" active={studentSortKey} dir={studentSortDir} onSort={onSort} />
+            </ScoreHead>
+            <ScoreHead rowSpan={2} className="w-16">
+              <SortButton label="班级" sortKey="class_num" active={studentSortKey} dir={studentSortDir} onSort={onSort} />
+            </ScoreHead>
+            {BASE_AVERAGE_SUBJECTS.map((subject) => (
+              <ScoreHead key={subject} colSpan={2}>
+                {subject}
+              </ScoreHead>
+            ))}
+            {ELECTIVE_AVERAGE_SUBJECTS.map((subject) => (
+              <ScoreHead key={subject} colSpan={2}>
+                {subject}
+              </ScoreHead>
+            ))}
+            <ScoreHead colSpan={1}>加三均分</ScoreHead>
+            <ScoreHead colSpan={2}>主三门总分</ScoreHead>
+            <ScoreHead colSpan={2}>3+3总分</ScoreHead>
+          </tr>
+          <tr>
+            {BASE_AVERAGE_SUBJECTS.map((subject) => (
+              <Fragment key={subject}>
+                <ScoreHead className="w-16">
+                  <SortButton label="分数" sortKey={`subj:${subject}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
+                </ScoreHead>
+                <ScoreHead className="w-20">
+                  <SortButton label="年级百分位" sortKey={`pct:${subject}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
+                </ScoreHead>
+              </Fragment>
+            ))}
+            {ELECTIVE_AVERAGE_SUBJECTS.map((subject) => (
+              <Fragment key={subject}>
+                <ScoreHead className="w-16">
+                  <SortButton label="原始分" sortKey={`subj:${subject}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
+                </ScoreHead>
+                <ScoreHead className="w-16">
+                  <SortButton label="等级分" sortKey={`subjGrade:${subject}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
+                </ScoreHead>
+              </Fragment>
+            ))}
+            <ScoreHead className="w-20">
+              <SortButton label="分数" sortKey="total:+3" active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
+            </ScoreHead>
+            <ScoreHead className="w-20">
+              <SortButton label="分数" sortKey="total:主三门" active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
+            </ScoreHead>
+            <ScoreHead className="w-16">
+              <SortButton label="排名" sortKey="rank:主三门" active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
+            </ScoreHead>
+            <ScoreHead className="w-20">
+              <SortButton label="分数" sortKey="total:3+3" active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
+            </ScoreHead>
+            <ScoreHead className="w-16">
+              <SortButton label="排名" sortKey="rank:3+3" active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
+            </ScoreHead>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((student) => (
+            <tr key={student.student_id} className="bg-white">
+              <ScoreCell className="font-mono text-xs text-slate-600">
+                {student.student_id}
+              </ScoreCell>
+              <ScoreCell className="text-left">
+                <Link href={`/student/${student.student_id}`} className="font-medium text-slate-900 hover:text-brand-600">
+                  {student.name}
+                </Link>
+              </ScoreCell>
+              <ScoreCell className="text-slate-600">
+                {student.class_num != null ? `${student.class_num}班` : '—'}
+              </ScoreCell>
+              {BASE_AVERAGE_SUBJECTS.map((subject) => (
+                <Fragment key={subject}>
+                  <StudentScoreCell value={getStudentSubjectScore(student, subject)} range={subjectRange[subject]} />
+                  <StudentPercentileCell value={getStudentSubjectPercentile(student, subject)} />
+                </Fragment>
+              ))}
+              {ELECTIVE_AVERAGE_SUBJECTS.map((subject) => (
+                <Fragment key={subject}>
+                  <StudentScoreCell value={getStudentSubjectScore(student, subject)} range={subjectRange[subject]} />
+                  <StudentScoreCell value={getStudentSubjectScore(student, subject, 'grade')} />
+                </Fragment>
+              ))}
+              <StudentScoreCell value={getStudentTotalScore(student, '+3')} className="font-semibold" />
+              <StudentScoreCell value={getStudentTotalScore(student, '主三门')} className="font-semibold" />
+              <StudentScoreCell value={getStudentTotalRank(student, '主三门')} />
+              <StudentScoreCell value={getStudentTotalScore(student, '3+3')} className="font-semibold" />
+              <StudentScoreCell value={getStudentTotalRank(student, '3+3')} />
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function StudentScoreRow({
+  student,
+  subjectRange,
+}: {
+  student: StudentRow
+  subjectRange: Record<string, { min: number; max: number }>
+}) {
+  return (
+    <TableRow>
+      <TableCell className="font-mono text-xs text-slate-600">{student.student_id}</TableCell>
+      <TableCell>
+        <Link href={`/student/${student.student_id}`} className="font-medium text-slate-900 hover:text-brand-600">
+          {student.name}
+        </Link>
+      </TableCell>
+      <TableCell className="text-sm text-slate-600">
+        {student.class_num != null ? `${student.class_num}班` : '—'}
+      </TableCell>
+      {SUBJECT_KEYS.map(({ key }) => (
+        <StudentScoreCell key={key} value={getStudentSubjectScore(student, key)} range={subjectRange[key]} asTableCell />
+      ))}
+      <TableCell className="text-right text-sm font-medium tabular-nums">
+        {student.total_score == null ? '—' : formatInt(student.total_score)}
+      </TableCell>
+      <TableCell className="text-right text-sm tabular-nums text-slate-600">
+        {student.grade_rank == null ? '—' : formatInt(student.grade_rank)}
+      </TableCell>
+    </TableRow>
+  )
+}
+
+function StudentScoreCell({
+  value,
+  range,
+  className,
+  asTableCell = false,
+}: {
+  value: number | null
+  range?: { min: number; max: number }
+  className?: string
+  asTableCell?: boolean
+}) {
+  const cls = range
+    ? heatmapClass(value, range.min, range.max)
+    : value == null
+    ? 'bg-slate-50 text-slate-400'
+    : 'bg-white text-slate-700'
+  const content = value == null ? '—' : formatInt(value)
+  if (asTableCell) {
+    return (
+      <TableCell className={cn('text-center text-sm tabular-nums', cls, className)}>
+        {content}
+      </TableCell>
+    )
+  }
+  return <ScoreCell className={cn('tabular-nums', cls, className)}>{content}</ScoreCell>
+}
+
+function StudentPercentileCell({
+  value,
+  className,
+}: {
+  value: number | null
+  className?: string
+}) {
+  return (
+    <ScoreCell
+      className={cn(
+        'tabular-nums',
+        value == null ? 'bg-slate-50 text-slate-400' : 'bg-white text-slate-700',
+        className,
+      )}
+    >
+      {formatPercentile(value)}
+    </ScoreCell>
+  )
+}
+
+function ScoreTitleHead({
+  className,
+  ...props
+}: ThHTMLAttributes<HTMLTableCellElement>) {
+  return (
+    <th
+      className={cn(
+        'border-y-2 border-black bg-white px-1 py-2 text-center text-sm font-semibold text-slate-950',
+        className,
+      )}
+      {...props}
+    />
+  )
+}
+
+function ScoreHead({
+  className,
+  ...props
+}: ThHTMLAttributes<HTMLTableCellElement>) {
+  return (
+    <th
+      className={cn(
+        'border border-slate-600 px-1 py-2 align-middle whitespace-nowrap',
+        className,
+      )}
+      {...props}
+    />
+  )
+}
+
+function ScoreCell({
+  className,
+  ...props
+}: TdHTMLAttributes<HTMLTableCellElement>) {
+  return (
+    <td
+      className={cn(
+        'border border-slate-300 px-2 py-2 align-middle whitespace-nowrap',
+        className,
+      )}
+      {...props}
+    />
+  )
+}
+
+function ClassAverageDingTable({
+  rows,
+  grade,
+}: {
+  rows: ClassAverage[]
+  grade: number
+}) {
+  const groups = groupClassAverages(rows)
+  const metrics = getClassAverageMetrics(grade)
+  const rankMap = buildClassAverageRanks(rows, metrics)
+  const summaryKinds: AverageSummaryKind[] = ['平均', '最高', '最低']
+  const isGradeOne = grade === 1
+
+  return (
+    <div className="overflow-x-auto rounded-sm border border-slate-400 bg-white">
+      <table
+        className={cn(
+          'w-full table-fixed border-collapse text-center text-[10px] leading-tight text-slate-900',
+          isGradeOne ? 'min-w-[980px]' : 'min-w-[1040px]',
+        )}
+      >
+        <thead className="bg-[#dbe4f2] text-[11px] font-semibold text-slate-950">
+          <tr>
+            <AverageHead rowSpan={2} className="w-20">
+              班级类型
+            </AverageHead>
+            <AverageHead rowSpan={2} className="w-14">
+              班级
+            </AverageHead>
+            <AverageHead rowSpan={2} className="w-16">
+              班主任
+            </AverageHead>
+            {isGradeOne ? (
+              <>
+                {ALL_AVERAGE_SUBJECTS.map((subject) => (
+                  <AverageHead key={subject} rowSpan={2} className="w-16">
+                    {subject}
+                  </AverageHead>
+                ))}
+                <AverageHead colSpan={2}>主三门总分</AverageHead>
+                <AverageHead colSpan={2}>五门总分</AverageHead>
+                <AverageHead colSpan={2}>九门总分</AverageHead>
+              </>
+            ) : (
+              <>
+                {BASE_AVERAGE_SUBJECTS.map((subject) => (
+                  <AverageHead key={subject} rowSpan={2} className="w-16">
+                    {subject}
+                  </AverageHead>
+                ))}
+                {ELECTIVE_AVERAGE_SUBJECTS.map((subject) => (
+                  <AverageHead key={subject} colSpan={2}>
+                    {subject}
+                  </AverageHead>
+                ))}
+                <AverageHead colSpan={1}>加三均分</AverageHead>
+                <AverageHead colSpan={2}>主三门总分</AverageHead>
+                <AverageHead colSpan={2}>3+3总分</AverageHead>
+              </>
+            )}
+          </tr>
+          <tr>
+            {isGradeOne ? null : (
+              <>
+                {ELECTIVE_AVERAGE_SUBJECTS.map((subject) => (
+                  <Fragment key={subject}>
+                    <AverageHead className="w-14">原始分</AverageHead>
+                    <AverageHead className="w-14">等级分</AverageHead>
+                  </Fragment>
+                ))}
+                <AverageHead className="w-16">分数</AverageHead>
+              </>
+            )}
+            {(isGradeOne ? ['主三门', '五门', '九门'] : ['主三门', '3+3']).map(
+              (totalKey) => (
+                <Fragment key={totalKey}>
+                  <AverageHead className="w-16">分数</AverageHead>
+                  <AverageHead className="w-12">排名</AverageHead>
+                </Fragment>
+              ),
+            )}
+          </tr>
+        </thead>
+        <tbody>
+          {groups.map((group) => (
+            <Fragment key={group.type}>
+              {group.rows.map((row, index) => (
+                <tr key={`${group.type}-${row.class_num}`} className="bg-white">
+                  {index === 0 ? (
+                    <AverageCell
+                      rowSpan={group.rows.length}
+                      className="bg-white font-semibold"
+                    >
+                      {group.type}
+                    </AverageCell>
+                  ) : null}
+                  <AverageCell className="font-semibold text-blue-600">
+                    {String(row.class_num).padStart(2, '0')}
+                  </AverageCell>
+                  <AverageCell className="font-semibold">
+                    {row.teacher_name || ''}
+                  </AverageCell>
+                  {metrics.map((metric) => (
+                    <AverageCell
+                      key={metricId(metric)}
+                      className={cn(
+                        'tabular-nums',
+                        metric.source === 'rank' && 'font-semibold',
+                      )}
+                    >
+                      {metric.source === 'rank'
+                        ? getRankValue(row, group.type, metric, rankMap) ?? ''
+                        : formatTableNumber(
+                            getClassAverageMetricValue(row, metric),
+                          )}
+                    </AverageCell>
+                  ))}
+                </tr>
+              ))}
+              {summaryKinds.map((kind, index) => (
+                <tr key={`${group.type}-summary-${kind}`}>
+                  {index === 0 ? (
+                    <AverageCell
+                      rowSpan={summaryKinds.length}
+                      className="bg-white font-semibold"
+                    >
+                      {group.type}汇总
+                    </AverageCell>
+                  ) : null}
+                  <AverageCell className="font-semibold">{kind}</AverageCell>
+                  <AverageCell />
+                  {metrics.map((metric) => (
+                    <AverageCell
+                      key={`${kind}-${metricId(metric)}`}
+                      className={cn(
+                        'tabular-nums font-semibold',
+                        kind === '最高' && metric.source !== 'rank'
+                          ? 'bg-[#ff8f66] text-slate-950'
+                          : '',
+                        kind === '最低' && metric.source !== 'rank'
+                          ? 'bg-[#8d8d8d] text-slate-950'
+                          : '',
+                      )}
+                    >
+                      {formatTableNumber(
+                        getClassAverageSummaryValue(group.rows, metric, kind),
+                      )}
+                    </AverageCell>
+                  ))}
+                </tr>
+              ))}
+            </Fragment>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function AverageHead({
+  className,
+  ...props
+}: ThHTMLAttributes<HTMLTableCellElement>) {
+  return (
+    <th
+      className={cn(
+        'border border-slate-600 px-1 py-1.5 align-middle whitespace-nowrap',
+        className,
+      )}
+      {...props}
+    />
+  )
+}
+
+function AverageCell({
+  className,
+  ...props
+}: TdHTMLAttributes<HTMLTableCellElement>) {
+  return (
+    <td
+      className={cn(
+        'border border-slate-300 px-1 py-1.5 align-middle whitespace-nowrap',
+        className,
+      )}
+      {...props}
+    />
+  )
+}
+
+// ===== helpers =====
+
+function getSortValue(
+  row: StudentRow,
+  key: string,
+): string | number | null {
+  if (key.startsWith('subj:')) {
+    const subject = key.slice(5)
+    return getStudentSubjectScore(row, subject)
+  }
+  if (key.startsWith('subjGrade:')) {
+    const subject = key.slice(10)
+    return getStudentSubjectScore(row, subject, 'grade')
+  }
+  if (key.startsWith('pct:')) {
+    const subject = key.slice(4)
+    return getStudentSubjectPercentile(row, subject)
+  }
+  if (key.startsWith('total:')) {
+    const totalType = key.slice(6)
+    return getStudentTotalScore(row, totalType)
+  }
+  if (key.startsWith('totalPct:')) {
+    const totalType = key.slice(9)
+    return getStudentTotalPercentile(row, totalType)
+  }
+  if (key.startsWith('rank:')) {
+    const totalType = key.slice(5)
+    return getStudentTotalRank(row, totalType)
+  }
+  if (key.startsWith('xuejiRank:')) {
+    const totalType = key.slice(10)
+    return getStudentTotalXuejiRank(row, totalType)
+  }
+  if (key.startsWith('gradeRank:')) {
+    const totalType = key.slice(10)
+    return getStudentTotalGradeRank(row, totalType)
+  }
+  switch (key) {
+    case 'student_id':
+      return row.student_id || null
+    case 'name':
+      return row.name || null
+    case 'class_num':
+      return row.class_num ?? null
+    case 'xueji':
+      return row.xueji ?? null
+    case 'total_score':
+      return row.total_score ?? null
+    case 'grade_rank':
+      return row.grade_rank ?? null
+    default:
+      return null
+  }
+}
+
+interface KpiCardProps {
+  icon: React.ReactNode
+  title: string
+  value: string
+  hint?: string
+}
+
+function KpiCard({ icon, title, value, hint }: KpiCardProps) {
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+        <CardTitle className="text-sm font-medium text-slate-500">
+          {title}
+        </CardTitle>
+        <span className="text-slate-400">{icon}</span>
+      </CardHeader>
+      <CardContent>
+        <div className="text-2xl font-semibold text-slate-900 tabular-nums">
+          {value}
+        </div>
+        {hint ? (
+          <p className="mt-1 text-xs text-slate-500">{hint}</p>
+        ) : null}
+      </CardContent>
+    </Card>
+  )
+}
+
+interface EmptyStateProps {
+  icon: React.ReactNode
+  title: string
+  desc?: string
+}
+
+function EmptyState({ icon, title, desc }: EmptyStateProps) {
+  return (
+    <div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
+      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-100">
+        {icon}
+      </div>
+      <div className="text-base font-medium text-slate-900">{title}</div>
+      {desc ? <div className="text-sm text-slate-500">{desc}</div> : null}
+    </div>
+  )
+}
+
+interface SortableHeadProps {
+  label: string
+  sortKey: string
+  active: string | null
+  dir: SortDirection
+  onSort: (key: string) => void
+  className?: string
+  align?: 'left' | 'center' | 'right'
+}
+
+function SortButton({
+  label,
+  sortKey,
+  active,
+  dir,
+  onSort,
+  align = 'left',
+}: SortableHeadProps) {
+  const isActive = active === sortKey && dir
+  const Icon =
+    isActive && dir === 'asc'
+      ? ArrowUp
+      : isActive && dir === 'desc'
+      ? ArrowDown
+      : ArrowUpDown
+  const justify =
+    align === 'center'
+      ? 'justify-center'
+      : align === 'right'
+      ? 'justify-end'
+      : 'justify-start'
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSort(sortKey)}
+      className={cn(
+        'flex w-full items-center gap-1 text-xs font-semibold text-slate-900 hover:text-brand-700',
+        justify,
+      )}
+    >
+      <span>{label}</span>
+      <Icon
+        className={cn(
+          'h-3 w-3',
+          isActive ? 'text-slate-900' : 'text-slate-400',
+        )}
+      />
+    </button>
+  )
+}
+
+function SortableHead({
+  label,
+  sortKey,
+  active,
+  dir,
+  onSort,
+  className,
+  align = 'left',
+}: SortableHeadProps) {
+  const isActive = active === sortKey && dir
+  const Icon =
+    isActive && dir === 'asc'
+      ? ArrowUp
+      : isActive && dir === 'desc'
+      ? ArrowDown
+      : ArrowUpDown
+  const justify =
+    align === 'center'
+      ? 'justify-center'
+      : align === 'right'
+      ? 'justify-end'
+      : 'justify-start'
+  return (
+    <TableHead className={cn('cursor-pointer select-none', className)}>
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className={cn(
+          'flex w-full items-center gap-1 text-xs font-medium text-slate-500 hover:text-slate-900',
+          justify,
+        )}
+      >
+        <span>{label}</span>
+        <Icon
+          className={cn(
+            'h-3 w-3',
+            isActive ? 'text-slate-900' : 'text-slate-300',
+          )}
+        />
+      </button>
+    </TableHead>
+  )
+}
