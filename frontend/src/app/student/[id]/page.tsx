@@ -393,13 +393,13 @@ export default function StudentPage() {
 
     if (hasGradeOne || !hasUpperGrade) {
       specs.push(
-        { type: '主三门', scoreLabel: '语数英总分', rankLabel: '语数英排名' },
-        { type: '五门', scoreLabel: '语数英物化总分', rankLabel: '语数英物化排名' }
+        { type: '主三门', scoreLabel: '三门总分', rankLabel: '三门排名' },
+        { type: '五门', scoreLabel: '五门总分', rankLabel: '五门排名' }
       )
     }
     if (hasUpperGrade) {
       if (!specs.some((spec) => spec.type === '主三门')) {
-        specs.push({ type: '主三门', scoreLabel: '语数英总分', rankLabel: '语数英排名' })
+        specs.push({ type: '主三门', scoreLabel: '三门总分', rankLabel: '三门排名' })
       }
       specs.push(
         { type: '+3', scoreLabel: '+3总分' },
@@ -690,7 +690,7 @@ export default function StudentPage() {
         {fiveTrend.length > 0 && (
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">语数英物化总分 + 学籍年级排名趋势</CardTitle>
+              <CardTitle className="text-base">五门总分 + 学籍年级排名趋势</CardTitle>
             </CardHeader>
             <CardContent>
               <TrendLineChart

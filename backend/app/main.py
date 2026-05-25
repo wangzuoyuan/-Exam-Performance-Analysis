@@ -39,10 +39,30 @@ def get_teacher():
     db.close()
     return {
         "id": teacher.id,
+        "name": teacher.name,
         "target_class_high1": teacher.target_class_high1,
         "target_class_high2": teacher.target_class_high2,
         "target_class_high3": teacher.target_class_high3,
     }
+
+@app.patch("/api/teacher")
+async def update_teacher(request: Request):
+    """更新班主任姓名"""
+    from app.db.models import SessionLocal, Teacher
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="invalid json")
+    name = body.get("name", "").strip()
+    db = SessionLocal()
+    teacher = db.query(Teacher).first()
+    if not teacher:
+        teacher = Teacher()
+        db.add(teacher)
+    teacher.name = name or None
+    db.commit()
+    db.close()
+    return {"ok": True, "name": name or None}
 
 @app.post("/api/teacher/bind-class")
 async def bind_class(request: Request, class_num: Optional[int] = None, grade: int = 1):

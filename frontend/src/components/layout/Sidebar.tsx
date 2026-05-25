@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
+import { useRef, useState } from 'react'
 import {
   LayoutDashboard,
   Upload,
@@ -9,6 +10,9 @@ import {
   ClipboardList,
   Users,
   GraduationCap,
+  Pencil,
+  Check,
+  X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatClassLabel } from '@/lib/labels'
@@ -59,10 +63,44 @@ const NAV_ITEMS: NavItem[] = [
   },
 ]
 
-export function SidebarContent({ teacher }: { teacher: TeacherSummary | null }) {
+interface SidebarContentProps {
+  teacher: TeacherSummary | null
+  onNameChange?: (name: string) => void
+}
+
+export function SidebarContent({ teacher, onNameChange }: SidebarContentProps) {
   const pathname = usePathname() || '/'
   const classLabel =
     formatClassLabel(teacher?.current_grade, teacher?.current_class) ?? '—'
+
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  function startEdit() {
+    setDraft(teacher?.name ?? '')
+    setEditing(true)
+    setTimeout(() => inputRef.current?.focus(), 0)
+  }
+
+  async function commitEdit() {
+    const name = draft.trim()
+    setEditing(false)
+    try {
+      const res = await fetch('/api/teacher', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      })
+      if (res.ok) onNameChange?.(name)
+    } catch {
+      // silent
+    }
+  }
+
+  function cancelEdit() {
+    setEditing(false)
+  }
 
   return (
     <div className="flex h-full flex-col bg-slate-900 text-slate-100">
@@ -98,10 +136,44 @@ export function SidebarContent({ teacher }: { teacher: TeacherSummary | null }) 
       {/* Footer card */}
       <div className="border-t border-slate-800 p-3">
         <div className="rounded-md bg-slate-800/60 px-3 py-3">
-          <div className="text-xs text-slate-500">班主任</div>
-          <div className="mt-0.5 text-sm font-medium text-slate-100">
-            {teacher?.name || '—'}
+          <div className="flex items-center justify-between">
+            <div className="text-xs text-slate-500">班主任</div>
+            {!editing && (
+              <button
+                onClick={startEdit}
+                className="text-slate-600 hover:text-slate-300 transition-colors"
+                aria-label="编辑姓名"
+              >
+                <Pencil className="h-3 w-3" />
+              </button>
+            )}
           </div>
+          {editing ? (
+            <div className="mt-1 flex items-center gap-1">
+              <input
+                ref={inputRef}
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') commitEdit()
+                  if (e.key === 'Escape') cancelEdit()
+                }}
+                className="w-full rounded bg-slate-700 px-1.5 py-0.5 text-sm text-slate-100 outline-none focus:ring-1 focus:ring-brand-500"
+                placeholder="输入姓名"
+                maxLength={20}
+              />
+              <button onClick={commitEdit} className="text-success-500 hover:text-green-300">
+                <Check className="h-3.5 w-3.5" />
+              </button>
+              <button onClick={cancelEdit} className="text-slate-500 hover:text-slate-300">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ) : (
+            <div className="mt-0.5 text-sm font-medium text-slate-100">
+              {teacher?.name || '—'}
+            </div>
+          )}
           <div className="mt-2 text-xs text-slate-500">当前班级</div>
           <div className="mt-0.5 text-sm font-medium text-slate-100">{classLabel}</div>
         </div>
@@ -110,10 +182,15 @@ export function SidebarContent({ teacher }: { teacher: TeacherSummary | null }) 
   )
 }
 
-export function Sidebar({ teacher }: { teacher: TeacherSummary | null }) {
+interface SidebarProps {
+  teacher: TeacherSummary | null
+  onNameChange?: (name: string) => void
+}
+
+export function Sidebar({ teacher, onNameChange }: SidebarProps) {
   return (
     <aside className="hidden md:flex md:w-60 md:flex-col md:fixed md:inset-y-0 md:left-0 md:z-30">
-      <SidebarContent teacher={teacher} />
+      <SidebarContent teacher={teacher} onNameChange={onNameChange} />
     </aside>
   )
 }

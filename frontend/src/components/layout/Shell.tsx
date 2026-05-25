@@ -45,9 +45,13 @@ export function Shell({ children }: { children: React.ReactNode }) {
     }
   }, [])
 
+  function handleNameChange(name: string) {
+    setTeacher((prev) => prev ? { ...prev, name: name || null } : prev)
+  }
+
   return (
     <div className="min-h-screen bg-slate-50">
-      <Sidebar teacher={teacher} />
+      <Sidebar teacher={teacher} onNameChange={handleNameChange} />
       <div className="md:pl-60">
         <Topbar teacher={teacher} />
         <main>
