@@ -1,3 +1,4 @@
+from collections import Counter
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 
@@ -503,6 +504,12 @@ async def get_student(student_id: str):
         # 排名 = 严格高于本人的人数 + 1
         class_rank_by_exam[t.exam_id] = sum(1 for s in peer_scores if s > t.total_score) + 1
 
+    # 班级 / 学籍：取该生历次记录中出现最多的取值（前端头部展示与学籍徽章用）
+    class_counter = Counter(s.class_num for s in subject_scores if s.class_num is not None)
+    class_num_value = class_counter.most_common(1)[0][0] if class_counter else None
+    xueji_counter = Counter(s.xueji for s in subject_scores if s.xueji is not None)
+    xueji_code_value = xueji_counter.most_common(1)[0][0] if xueji_counter else None
+
     db.close()
 
     return {
@@ -510,6 +517,8 @@ async def get_student(student_id: str):
         "name": name,
         "has_cross_year": has_cross_year,
         "grades": sorted(list(grades)),
+        "class_num": class_num_value,
+        "xueji_code": xueji_code_value,
         "main_total_trend": [{
             "exam_id": t.exam_id,
             "exam_name": exam_map[t.exam_id].name if t.exam_id in exam_map else str(t.exam_id),

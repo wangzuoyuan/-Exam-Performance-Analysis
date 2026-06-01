@@ -71,7 +71,11 @@ export default function ChatDrawer() {
     setCurrentText('')
 
     try {
-      const res = await fetch('/api/chat', {
+      // 直连后端，绕开 Next 开发代理：代理对单条请求有 ~30s 超时，
+      // 而"谁退步大"等需要多轮工具调用的重问题常需 60~120s，经代理会被掐断成 500。
+      // 直连还避免代理缓冲 SSE，工具调用进度可实时流式显示。
+      const chatBase = process.env.NEXT_PUBLIC_CHAT_API_BASE || 'http://localhost:8000'
+      const res = await fetch(`${chatBase}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: [...messages, userMsg], context: buildPageContext() }),

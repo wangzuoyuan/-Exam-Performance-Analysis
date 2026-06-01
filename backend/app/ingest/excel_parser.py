@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import math
-import sys
 from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook
 
-SKILL_SCRIPT_DIR = Path(__file__).resolve().parents[4] / "exam-score-analysis" / "scripts"
-if str(SKILL_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SKILL_SCRIPT_DIR))
-
-from analyze_exam_scores import classify_workbook, parse_class_averages, parse_student_scores  # noqa: E402
+# 解析脚本已并入本包（原先依赖上级目录 exam-score-analysis/scripts，迁移后会断），
+# 改为包内导入，使 webapp 可独立部署。
+from app.ingest.analyze_exam_scores import (
+    classify_workbook,
+    parse_class_averages,
+    parse_student_scores,
+)
 
 
 def clean(value: Any) -> str:

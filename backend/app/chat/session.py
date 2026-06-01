@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from fastapi import APIRouter, Request
@@ -211,16 +212,25 @@ async def stream_chat(messages: list, context: dict | None = None):
     chat_messages = list(messages)
 
     for _ in range(8):
-        try:
-            response = client.messages.create(
-                model=config.model,
-                max_tokens=2048,
-                system=build_system_prompt(context),
-                messages=chat_messages,
-                tools=tools,
-            )
-        except Exception as exc:
-            yield sse({"type": "text", "delta": f"对话接口调用失败：{exc}"})
+        # MiniMax 等兼容端点偶发瞬时错误（401/429/5xx/网络抖动），读操作可安全重试
+        response = None
+        last_exc = None
+        for attempt in range(3):
+            try:
+                response = client.messages.create(
+                    model=config.model,
+                    max_tokens=2048,
+                    system=build_system_prompt(context),
+                    messages=chat_messages,
+                    tools=tools,
+                )
+                break
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 2:
+                    await asyncio.sleep(0.6 * (attempt + 1))
+        if response is None:
+            yield sse({"type": "text", "delta": f"对话接口调用失败（已重试）：{last_exc}"})
             yield sse({"type": "done"})
             return
 
