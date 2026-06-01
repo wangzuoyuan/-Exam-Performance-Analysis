@@ -501,6 +501,259 @@ def subject_progress_ranking(
     }
 
 
+def multi_exam_progress_ranking(
+    grade: int,
+    metrics: Optional[list[str]] = None,
+    exam_ids: Optional[list[int]] = None,
+    recent_count: int = 5,
+    class_num: Optional[int] = None,
+    limit: int = 10,
+    direction: str = "progress",
+    min_points: int = 2,
+) -> dict[str, Any]:
+    """多场考试合并判断进退步/趋势排行。"""
+    from app.db.models import Exam, SubjectScore, TotalScore
+    from app.db.models import get_db
+
+    total_types = {"主三门", "五门", "九门", "+3", "3+3"}
+    base_subjects = {"语文", "数学", "英语"}
+    elective_subjects = {"物理", "化学", "生物", "政治", "历史", "地理"}
+    all_subjects = base_subjects | elective_subjects
+
+    def default_metrics_for_grade() -> list[str]:
+        if grade == 1:
+            return ["主三门", "五门", "语文", "数学", "英语", "物理", "化学", "生物", "政治", "历史", "地理"]
+        return ["主三门", "3+3", "+3", "语文", "数学", "英语", "物理", "化学", "生物", "政治", "历史", "地理"]
+
+    def clean_metrics(values: Optional[list[str]]) -> list[str]:
+        seen = set()
+        cleaned = []
+        for value in values or default_metrics_for_grade():
+            metric = str(value).strip()
+            if not metric or metric in seen:
+                continue
+            if metric not in total_types and metric not in all_subjects:
+                continue
+            seen.add(metric)
+            cleaned.append(metric)
+        return cleaned
+
+    def line_fit_change(values: list[float], lower_is_better: bool) -> float:
+        n = len(values)
+        if n < 2:
+            return 0.0
+        x_avg = (n - 1) / 2
+        y_avg = sum(values) / n
+        denom = sum((i - x_avg) ** 2 for i in range(n))
+        if denom == 0:
+            return 0.0
+        slope = sum((i - x_avg) * (value - y_avg) for i, value in enumerate(values)) / denom
+        change = slope * (n - 1)
+        return -change if lower_is_better else change
+
+    def classify_trend(overall_change: float, step_changes: list[float]) -> str:
+        eps = 1e-9
+        progress_steps = sum(1 for value in step_changes if value > eps)
+        regression_steps = sum(1 for value in step_changes if value < -eps)
+        if abs(overall_change) <= eps:
+            if progress_steps and regression_steps:
+                return "波动持平"
+            return "基本稳定"
+        if overall_change > 0:
+            return "持续进步" if progress_steps == len(step_changes) else "总体进步"
+        return "持续退步" if regression_steps == len(step_changes) else "总体退步"
+
+    def build_row(
+        student_id: str,
+        metric: str,
+        metric_kind: str,
+        value_field: str,
+        lower_is_better: bool,
+        points: list[dict[str, Any]],
+        profile: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if len(points) < max(2, min_points):
+            return None
+        values = [point["value"] for point in points if isinstance(point["value"], (int, float))]
+        if len(values) < max(2, min_points):
+            return None
+
+        if lower_is_better:
+            step_changes = [values[i] - values[i + 1] for i in range(len(values) - 1)]
+            overall_change = values[0] - values[-1]
+        else:
+            step_changes = [values[i + 1] - values[i] for i in range(len(values) - 1)]
+            overall_change = values[-1] - values[0]
+
+        slope_change = line_fit_change(values, lower_is_better)
+        trend_score = round(0.7 * overall_change + 0.3 * slope_change, 4)
+        progress_steps = sum(1 for value in step_changes if value > 0)
+        regression_steps = sum(1 for value in step_changes if value < 0)
+        return {
+            "student_id": student_id,
+            "name": profile.get("name") or student_id,
+            "class_num": profile.get("class_num"),
+            "metric": metric,
+            "metric_kind": metric_kind,
+            "value_field": value_field,
+            "lower_is_better": lower_is_better,
+            "point_count": len(values),
+            "trend_label": classify_trend(overall_change, step_changes),
+            "trend_score": trend_score,
+            "overall_change": round(overall_change, 4),
+            "slope_change": round(slope_change, 4),
+            "improvement_steps": progress_steps,
+            "regression_steps": regression_steps,
+            "series": points,
+        }
+
+    db = next(get_db())
+    try:
+        selected_metrics = clean_metrics(metrics)
+        if not selected_metrics:
+            return {"error": "没有可分析的指标", "grade": grade, "metrics": []}
+
+        if exam_ids:
+            exams = (
+                db.query(Exam)
+                .filter(Exam.id.in_(exam_ids), Exam.grade == grade)
+                .order_by(Exam.exam_date, Exam.id)
+                .all()
+            )
+        else:
+            all_exams = db.query(Exam).filter(Exam.grade == grade).order_by(Exam.exam_date, Exam.id).all()
+            count = max(2, min(recent_count or 5, 12))
+            exams = all_exams[-count:]
+
+        if len(exams) < 2:
+            return {"error": "该年级可比较的考试少于2次", "grade": grade, "metrics": selected_metrics, "rows": []}
+
+        exam_ids_selected = [exam.id for exam in exams]
+        exam_payload = [
+            {"id": exam.id, "name": exam.name, "exam_date": exam.exam_date}
+            for exam in exams
+        ]
+        exam_name_by_id = {exam.id: exam.name for exam in exams}
+
+        subject_rows = db.query(SubjectScore).filter(SubjectScore.exam_id.in_(exam_ids_selected)).all()
+        profiles: dict[str, dict[str, Any]] = {}
+        allowed_by_exam: dict[int, set[str]] = {exam_id: set() for exam_id in exam_ids_selected}
+        for row in subject_rows:
+            profile = profiles.setdefault(row.student_id, {"name": row.name, "class_num": row.class_num})
+            if row.name:
+                profile["name"] = row.name
+            if row.class_num is not None:
+                profile["class_num"] = row.class_num
+            if class_num is None or row.class_num == class_num:
+                allowed_by_exam.setdefault(row.exam_id, set()).add(row.student_id)
+
+        results = []
+        for metric in selected_metrics:
+            is_total = metric in total_types
+            metric_kind = "total" if is_total else "subject"
+            if is_total:
+                rows = (
+                    db.query(TotalScore)
+                    .filter(TotalScore.exam_id.in_(exam_ids_selected), TotalScore.total_type == metric)
+                    .all()
+                )
+                grouped: dict[str, list[dict[str, Any]]] = {}
+                value_field = "total_score" if metric == "+3" else "rank_or_percentile"
+                lower_is_better = metric != "+3"
+                for row in rows:
+                    if class_num is not None and row.student_id not in allowed_by_exam.get(row.exam_id, set()):
+                        continue
+                    if metric == "+3":
+                        value = row.total_score
+                        current_field = "total_score"
+                    else:
+                        value = row.xueji_rank or row.grade_rank
+                        current_field = "rank"
+                        if value is None and row.grade_percentile is not None:
+                            value = row.grade_percentile
+                            current_field = "grade_percentile"
+                    if value is None:
+                        continue
+                    value_field = current_field if value_field == "rank_or_percentile" else value_field
+                    grouped.setdefault(row.student_id, []).append(
+                        {
+                            "exam_id": row.exam_id,
+                            "exam_name": exam_name_by_id.get(row.exam_id, str(row.exam_id)),
+                            "value": value,
+                            "value_field": current_field,
+                            "total_score": row.total_score,
+                            "xueji_rank": row.xueji_rank,
+                            "grade_rank": row.grade_rank,
+                            "grade_percentile": row.grade_percentile,
+                        }
+                    )
+            else:
+                rows = [row for row in subject_rows if row.subject == metric]
+                grouped = {}
+                lower_is_better = not (grade in {2, 3} and metric not in base_subjects)
+                value_field = "grade_score" if not lower_is_better else "grade_percentile"
+                for row in rows:
+                    if class_num is not None and row.class_num != class_num:
+                        continue
+                    value = row.grade_score if value_field == "grade_score" else row.grade_percentile
+                    if value is None:
+                        continue
+                    grouped.setdefault(row.student_id, []).append(
+                        {
+                            "exam_id": row.exam_id,
+                            "exam_name": exam_name_by_id.get(row.exam_id, str(row.exam_id)),
+                            "value": value,
+                            "value_field": value_field,
+                            "raw_score": row.raw_score,
+                            "grade_score": row.grade_score,
+                            "grade_percentile": row.grade_percentile,
+                        }
+                    )
+
+            metric_rows = []
+            for student_id, points in grouped.items():
+                ordered_points = sorted(points, key=lambda point: exam_ids_selected.index(point["exam_id"]))
+                profile = profiles.get(student_id, {})
+                row = build_row(student_id, metric, metric_kind, value_field, lower_is_better, ordered_points, profile)
+                if row:
+                    metric_rows.append(row)
+
+            reverse = direction != "regression"
+            metric_rows.sort(
+                key=lambda row: (
+                    row["trend_score"],
+                    row["overall_change"],
+                    row["improvement_steps"] - row["regression_steps"],
+                ),
+                reverse=reverse,
+            )
+            results.append(
+                {
+                    "metric": metric,
+                    "metric_kind": metric_kind,
+                    "value_field": value_field,
+                    "lower_is_better": lower_is_better,
+                    "rows": metric_rows[: max(1, min(limit, 50))],
+                }
+            )
+
+        return {
+            "grade": grade,
+            "direction": direction,
+            "class_num": class_num,
+            "exams": exam_payload,
+            "recent_count": len(exams),
+            "metrics": results,
+            "metric_note": (
+                "trend_score 综合首末变化和多点线性趋势；正数表示进步，负数表示退步。"
+                "总分优先使用学籍/年级排名，其次年级百分位；高一单科和高二/三语数英用年级百分位；"
+                "高二/三选考单科用等级分。"
+            ),
+        }
+    finally:
+        db.close()
+
+
 TOOL_FUNCTIONS = {
     "list_exams": list_exams,
     "student_lookup": student_lookup,
@@ -512,6 +765,7 @@ TOOL_FUNCTIONS = {
     "focus_list": focus_list,
     "subject_weakness": subject_weakness,
     "subject_progress_ranking": subject_progress_ranking,
+    "multi_exam_progress_ranking": multi_exam_progress_ranking,
 }
 
 
@@ -658,6 +912,32 @@ TOOLS = [
                 "direction": {"type": "string", "description": "progress=进步最大，regression=退步最大"},
             },
             "required": ["grade", "subject"],
+        },
+    },
+    {
+        "name": "multi_exam_progress_ranking",
+        "description": "把最近N次或指定多场考试合起来，按单科/主三门/五门等指标分析全体学生进步、退步和趋势排行。适合回答“最近几次谁进步最大”“两次考试单科和总分进退步”“三门五门趋势最好的是谁”。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "grade": {"type": "integer", "description": "年级(1=高一,2=高二,3=高三)"},
+                "metrics": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "要分析的指标，如['语文','数学','英语','主三门','五门']；不填时按年级返回常用总分和全部学科",
+                },
+                "exam_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "指定参与分析的考试ID；不填则使用最近 recent_count 次",
+                },
+                "recent_count": {"type": "integer", "description": "最近几次考试，默认5；用户说最近两次时传2"},
+                "class_num": {"type": "integer", "description": "只看某个班；不填表示全年级"},
+                "limit": {"type": "integer", "description": "每个指标返回人数，默认10，最多50"},
+                "direction": {"type": "string", "description": "progress=进步趋势最大，regression=退步趋势最大"},
+                "min_points": {"type": "integer", "description": "每名学生至少需要几次有效记录，默认2；做多场趋势时可设3"},
+            },
+            "required": ["grade"],
         },
     },
 ]

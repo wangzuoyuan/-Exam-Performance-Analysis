@@ -1,11 +1,17 @@
 import pytest
 
-from app.chat.tools import TOOL_FUNCTIONS, student_learning_profile, subject_progress_ranking
+from app.chat.tools import (
+    TOOL_FUNCTIONS,
+    multi_exam_progress_ranking,
+    student_learning_profile,
+    subject_progress_ranking,
+)
 
 
 def test_subject_progress_ranking_registered():
     assert TOOL_FUNCTIONS["subject_progress_ranking"] is subject_progress_ranking
     assert TOOL_FUNCTIONS["student_learning_profile"] is student_learning_profile
+    assert TOOL_FUNCTIONS["multi_exam_progress_ranking"] is multi_exam_progress_ranking
 
 
 def test_subject_progress_ranking_for_high2_chinese():
