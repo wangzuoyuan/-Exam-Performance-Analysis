@@ -1,205 +1,335 @@
 # 成绩分析 Webapp
 
-高中班主任成绩分析 Web 应用。支持多场考试成绩批量导入、跨学年学生画像、班级对比、重点关注名单，以及基于 LLM tool-use 的 AI 对话助手。
+面向高中班主任的本地成绩分析 Web 应用。项目支持多场 Excel 成绩导入、跨学年学生画像、班级横向对比、重点关注名单，以及基于 LLM tool-use 的 AI 对话助手。
+
+本项目已按 MIT License 开源，可自由使用、修改和二次分发。
+
+## 功能特性
+
+- **Excel 批量导入**：支持学生成绩明细表和班级均分表，自动从文件名识别年级、学期、考试类型和排序月份。
+- **高一 / 高二高三双口径**：高一支持主三门、五门、九门；高二高三支持主三门、+3、3+3 和选考等级分。
+- **考试详情页**：展示班级均分、学生成绩明细、名次段分布、重点关注名单。
+- **学生画像页**：展示跨学年主三门趋势、五门趋势、+3 / 3+3 趋势、单科历史和历次考试明细。
+- **班级对比页**：按总分或单科均分做多班横向对比，并高亮当前班级。
+- **AI 对话助手**：支持 Anthropic Messages API 和 OpenAI Chat Completions 兼容接口，使用只读工具查询本地成绩数据后回答。
+- **多场趋势分析**：AI 工具支持最近两次进退步，也支持最近 N 次或指定多场考试合并判断趋势排行。
+- **本地单机部署**：数据库、上传文件和日志默认存放在用户目录 `~/.exam-tracker/`。
+- **跨平台启动器**：`run.py` 统一封装 macOS / Windows 的初始化、启动和停止流程。
 
 ## 技术栈
 
-- **后端**：Python 3.11+ / FastAPI / SQLAlchemy / SQLite
-- **前端**：Next.js 14 (App Router) + TypeScript + Tailwind + Recharts + shadcn/ui
-- **LLM**：支持官方 Anthropic API 及兼容 Anthropic Messages API 的第三方服务（tool use + SSE 流式）
-- **部署**：本地单机，跨平台支持 macOS 与 Windows，启动后同时拉起后端 8000 + 前端 3000
+- **后端**：Python 3.11+ / FastAPI / SQLAlchemy / SQLite / openpyxl
+- **前端**：Next.js 14 App Router / TypeScript / Tailwind CSS / Recharts / shadcn/ui
+- **AI**：Anthropic SDK / OpenAI SDK / SSE 流式响应 / tool-use
+- **部署方式**：本地运行，后端默认 `localhost:8000`，前端默认 `localhost:3000`
 
-## 首次安装
+## 快速开始
 
-> 需要：Python 3.11+、Node.js 18+，macOS 或 Windows 10/11
+### 环境要求
 
-**1. 克隆仓库**
+- Python 3.11+
+- Node.js 18+
+- macOS 或 Windows 10/11
+
+### 1. 克隆仓库
 
 ```bash
 git clone https://github.com/wangzuoyuan/-Exam-Performance-Analysis.git
 cd -Exam-Performance-Analysis
 ```
 
-**2. 配置 API Key**
+### 2. 配置对话助手
 
-复制 `backend/.env.example` 为 `backend/.env`，用文本编辑器填入 API Key。对话助手默认使用 Anthropic API，也支持切换为任意 OpenAI 兼容服务（见下方「对话助手配置」）。
+复制示例环境变量文件：
 
-**3. 初始化依赖**
+```bash
+cp backend/.env.example backend/.env
+```
 
-- **macOS**：双击 `初始化成绩分析.command`
-- **Windows**：双击 `初始化成绩分析.bat`（首次需安装 Python 3.11+ 时勾选「Add to PATH」，并安装 Node.js LTS）
+然后在 `backend/.env` 中填入 API Key。只使用成绩分析页面时可以先不配置 Key；AI 对话助手需要有效 Key。
 
-脚本会自动创建 Python 虚拟环境并安装前端依赖。
+### 3. 初始化依赖
 
-**4. 启动应用**
+macOS：
 
-- **macOS**：双击 `启动成绩分析.command`
-- **Windows**：双击 `启动成绩分析.bat`
+```bash
+python3 run.py init
+```
 
-稍等片刻后浏览器会自动打开 http://localhost:3000。
+Windows：
 
----
+```bat
+python run.py init
+```
 
-## 日常使用
-
-双击桌面/项目目录里的脚本即可：
+也可以双击项目目录中的平台脚本：
 
 | 操作 | macOS | Windows |
 |------|-------|---------|
+| 初始化 | `初始化成绩分析.command` | `初始化成绩分析.bat` |
 | 启动 | `启动成绩分析.command` | `启动成绩分析.bat` |
 | 停止 | `停止成绩分析.command` | `停止成绩分析.bat` |
-| 全新初始化（清空本地应用数据并重建依赖） | `初始化成绩分析.command` | `初始化成绩分析.bat` |
 
-所有脚本底层都调用 `run.py`，也可直接命令行使用：
+### 4. 启动应用
 
 ```bash
-python run.py start    # 启动
-python run.py stop     # 停止
-python run.py init     # 全新初始化
+python3 run.py start
 ```
 
-> 「全新初始化」会清空 `~/.exam-tracker`（Windows 上是 `%USERPROFILE%\.exam-tracker`）下的数据库、上传文件和日志。
+启动后访问：
 
-访问 http://localhost:3000
+```text
+http://localhost:3000
+```
+
+`run.py start` 会自动启动：
+
+- FastAPI 后端：`http://localhost:8000`
+- Next.js 前端：`http://localhost:3000`
+
+停止服务：
+
+```bash
+python3 run.py stop
+```
+
+完全重置本地应用数据和依赖：
+
+```bash
+python3 run.py init
+```
+
+注意：`init` 会清空 `~/.exam-tracker/`，包括本地数据库、上传文件和日志，但不会删除项目代码和 `backend/.env`。
 
 ## 页面功能
 
 | 页面 | 路由 | 功能 |
 |------|------|------|
-| 仪表盘 | `/` | 最近考试一览、班级动态 |
-| 数据上传 | `/upload` | 上传 Excel，自动识别年级/考试类型 |
-| 考试列表 | `/exam` | 已建档考试一览，支持搜索 + 删除上传错误的考试 |
-| 考试详情 | `/exam/[id]` | 班级均分、分数段分布（并排柱状图）、重点关注 |
-| 学生详情 | `/student/[id]` | 跨学年成绩画像、主三门趋势、+3/3+3 趋势、历次明细 |
-| 班级对比 | `/compare` | 多班同次考试横向对比 |
+| 仪表盘 | `/` | 最近考试一览、班级动态、重点关注速览 |
+| 数据上传 | `/upload` | 绑定班级、上传 Excel、查看解析结果 |
+| 考试列表 | `/exam` | 已建档考试列表、搜索、删除误传考试 |
+| 考试详情 | `/exam/[id]` | 班级均分表、学生成绩明细、名次段分布、重点关注 |
+| 学生检索 | `/student` | 按姓名或学号查找学生画像 |
+| 学生详情 | `/student/[id]` | 跨学年趋势、单科变化、历次考试明细 |
+| 班级对比 | `/compare` | 多班总分 / 单科均分横向对比 |
 
-## 目录结构
+## 数据和隐私
 
-```
-成绩分析webapp/
-├── backend/
-│   ├── app/
-│   │   ├── main.py              # FastAPI 入口，挂载三个 router
-│   │   ├── db/models.py         # SQLAlchemy 模型（6 张表）
-│   │   ├── ingest/              # 文件解析链路
-│   │   │   ├── filename_parser.py   # 文件名 → 年级/学期/考试类型
-│   │   │   ├── excel_parser.py      # 高一固定列 + 高二/三 3+3 选科结构
-│   │   │   └── router.py            # 上传 API + 隐式班号初始化
-│   │   ├── analysis/            # 读端计算层
-│   │   │   ├── config.py            # 阈值配置（与 metric-definitions.md 同步）
-│   │   │   ├── trends.py
-│   │   │   ├── class_compare.py
-│   │   │   ├── focus_list.py
-│   │   │   ├── cross_year.py        # 跨学年趋势（只用主三门 + 语数英）
-│   │   │   └── router.py            # 所有分析 API 端点
-│   │   └── chat/                # AI 对话助手
-│   │       ├── tools.py             # 10 个只读查询工具
-│   │       ├── session.py           # SSE 流式调度 + 系统提示
-│   │       └── config.py            # API Key / Base URL / 模型读取
-│   ├── pyproject.toml
-│   ├── .env                     # 对话助手 API 配置（不入库）
-│   └── tests/
-├── frontend/
-│   ├── src/app/                 # Next.js App Router 页面
-│   ├── src/components/
-│   │   ├── ChatDrawer.tsx       # 对话抽屉（SSE 流式，全局 open-chat 事件触发）
-│   │   ├── TrendLineChart.tsx   # 趋势折线图（Recharts 封装）
-│   │   ├── RankBandStackedBar.tsx  # 名次段并排柱状图
-│   │   ├── SubjectScatter.tsx   # 偏科散点图
-│   │   └── ToolCallCard.tsx     # 工具调用折叠卡（对话抽屉内）
-│   ├── package.json
-│   └── tailwind.config.js
-├── run.py                       # 跨平台启动器（start/stop/init），所有脚本最终都调它
-├── start.sh                     # macOS 命令行启动入口
-├── 启动成绩分析.command          # macOS 双击启动
-├── 停止成绩分析.command          # macOS 双击停止
-├── 初始化成绩分析.command        # macOS 双击全新初始化
-├── 启动成绩分析.bat              # Windows 双击启动
-├── 停止成绩分析.bat              # Windows 双击停止
-└── 初始化成绩分析.bat            # Windows 双击全新初始化
+本项目默认本地运行，不依赖远程业务服务器。
+
+本地数据目录：
+
+```text
+~/.exam-tracker/
+├── db.sqlite       # SQLite 数据库
+├── raw/            # 原始上传 Excel
+├── backend.log     # 后端日志
+└── frontend.log    # 前端日志
 ```
 
-## 数据模型（SQLite，存于 `~/.exam-tracker/db.sqlite`）
+开源仓库不会包含：
+
+- `backend/.env`
+- `~/.exam-tracker/`
+- SQLite 数据库
+- 原始 Excel 成绩文件
+- `node_modules/`
+- `.next/`
+
+隐私提醒：
+
+- 页面分析和普通 API 查询都在本机进行。
+- 使用 AI 对话助手时，工具查询结果会被发送给你配置的 LLM 服务商，用于生成回答。
+- 如果成绩数据包含真实学生信息，请确认你使用的模型服务、代理服务和网络环境符合本校或本单位的数据合规要求。
+- 不建议把真实学生成绩、真实 API Key、数据库文件或上传原始表格提交到公开仓库。
+
+## 数据模型
+
+SQLite 数据库位于 `~/.exam-tracker/db.sqlite`。
 
 | 表 | 说明 |
 |----|------|
-| teacher | 单行表，记录目标班号（高一/高二/高三各一个字段） |
-| exam | 考试档案（规范化考试名、年级、学期、考试类型） |
-| upload | 原始上传记录（审计 + 重新解析） |
-| subject_score | 长表：每生 × 每考 × 每科（raw_score / grade_score / grade_percentile） |
-| total_score | 每生 × 每考 × 每种总分（主三门 / 五门 / 九门 / +3 / 3+3） |
-| class_average | 各班均分（从班级均分表 Excel 提取） |
+| `teacher` | 班主任信息和高一 / 高二 / 高三目标班级 |
+| `exam` | 考试档案：规范化名称、年级、学期、考试类型、排序日期 |
+| `upload` | 上传记录：文件路径、hash、解析类型、解析日志 |
+| `subject_score` | 学科成绩长表：每生 × 每考 × 每科 |
+| `total_score` | 总分表：主三门、五门、九门、+3、3+3 |
+| `class_average` | 班级均分表：各科均分和各类总分均分 |
 
-## 对话助手配置
+## Excel 口径
 
-对话助手读取 `backend/.env`，同时支持 **Anthropic Messages API** 和 **OpenAI Chat Completions API**（含任意兼容服务，如 DeepSeek / Qwen / Kimi / 自建 vLLM 等）。通过 `CHAT_PROVIDER` 切换：
+| 项 | 高一 | 高二 / 高三 |
+|----|------|-------------|
+| 学科结构 | 9 科固定列 | 语数英 + 6 选 3 |
+| 单科字段 | 分数、年级百分位 | 语数英：分数 / 百分位；选考：原始分 / 等级分 |
+| 总分类型 | 主三门、五门、九门 | 主三门、+3、3+3 |
+| 趋势口径 | 总分看学籍排名；单科看年级百分位 | 总分看学籍排名；语数英看年级百分位；选考单科看等级分 |
+| 跨学年对比 | 只使用主三门和语数英 | 禁止用九门、+3 或 3+3 做跨学年比较 |
+
+## 后端 API
+
+所有业务 API 默认挂在 `/api`。
+
+### 基础和班主任
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/health` | 健康检查 |
+| GET | `/api/teacher` | 获取班主任信息，必要时自动初始化 |
+| PATCH | `/api/teacher` | 更新班主任姓名 |
+| POST | `/api/teacher/bind-class` | 绑定目标班级 |
+
+### 上传
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/uploads` | 上传 Excel 并解析入库 |
+| GET | `/api/uploads` | 查看最近上传记录 |
+
+### 分析
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/exams` | 考试列表，支持 `?grade=` |
+| DELETE | `/api/exams/{id}` | 删除考试及关联成绩、均分和上传记录 |
+| GET | `/api/exams/{id}` | 考试详情：学生明细、统计、班均分、名次段 |
+| GET | `/api/focus-list/{id}` | 重点关注名单，支持 `?class_num=` |
+| GET | `/api/students/{id}` | 学生跨学年画像 |
+| GET | `/api/class/compare` | 班级横向对比，支持 `?exam_id=` |
+| GET | `/api/subject-weakness/{id}` | 单科薄弱名单，支持 `?class_num=` |
+
+### 对话
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/chat` | SSE 流式对话 |
+| GET | `/api/chat/config` | 返回当前对话模型配置，不暴露 Key |
+
+## AI 对话助手
+
+对话助手读取 `backend/.env`。
+
+Anthropic 模式：
 
 ```env
-# === Anthropic 模式（默认） ===
 CHAT_PROVIDER=anthropic
 ANTHROPIC_API_KEY=your_api_key_here
-ANTHROPIC_BASE_URL=           # 留空使用官方；填第三方兼容地址即可切换
+ANTHROPIC_BASE_URL=
 ANTHROPIC_MODEL=claude-sonnet-4-6
+```
 
-# === OpenAI 兼容模式 ===
+OpenAI 兼容模式：
+
+```env
 CHAT_PROVIDER=openai
 OPENAI_API_KEY=your_api_key_here
-OPENAI_BASE_URL=              # 留空使用 api.openai.com；填兼容服务地址（含 /v1）
+OPENAI_BASE_URL=
 OPENAI_MODEL=gpt-4o-mini
 ```
 
-两种模式共用同一套 tool-use 工具，前端无需改动。
+两种模式共用同一套只读工具。
 
-## 对话工具集（10 个只读工具）
+### 当前工具集
 
 | Tool | 主要参数 | 用途 |
 |------|----------|------|
-| list_exams | grade?, year_range? | 罗列已建档考试 |
-| student_lookup | name? / student_id? | 按姓名或学号定位学生 |
-| student_exam_detail | student_id, exam_id | 某生某次考试完整成绩 |
-| student_trend | student_id, total_type?, exam_ids? | 跨次总分趋势（跨学年自动退化为主三门） |
-| student_learning_profile | student_id | 学生综合学情画像（优势/薄弱科/建议） |
-| class_trend | class_num, metric, exam_ids? | 班级均分/排名时间序列 |
-| compare_classes | class_nums[], exam_id, metric | 多班同次横向对比 |
-| focus_list | exam_id, category? | 重点关注名单（临界段/薄弱段/偏科） |
-| subject_weakness | class_num, exam_id | 全班单科薄弱清单 |
-| subject_progress_ranking | exam_id, subject, grade?, class_num? | 某科进步/退步排行榜 |
+| `list_exams` | `grade?`, `year_range?` | 罗列已建档考试 |
+| `student_lookup` | `name?`, `student_id?` | 按姓名或学号定位学生 |
+| `student_exam_detail` | `student_id`, `exam_id` | 某生某次考试完整成绩 |
+| `student_trend` | `student_id`, `total_type?`, `exam_ids?` | 某个学生的跨次总分趋势 |
+| `student_learning_profile` | `student_id?`, `name?` | 学生综合学情画像 |
+| `class_trend` | `class_num`, `metric`, `exam_ids?` | 班级均分时间序列 |
+| `compare_classes` | `class_nums[]`, `exam_id`, `metric` | 多班同次横向对比 |
+| `focus_list` | `exam_id`, `category?` | 重点关注名单 |
+| `subject_weakness` | `class_num`, `exam_id` | 本班单科薄弱清单 |
+| `subject_progress_ranking` | `grade`, `subject`, `start_exam_id?`, `end_exam_id?` | 单科进步 / 退步排行榜 |
+| `multi_exam_progress_ranking` | `grade`, `metrics?`, `recent_count?`, `exam_ids?`, `direction?` | 最近 N 次或指定多场考试的单科 / 总分趋势排行 |
 
-## 高一 vs 高二/三 Excel 列结构
+示例问题：
 
-| 项 | 高一 | 高二/三（3+3） |
-|----|------|---------------|
-| 学科列 | 9 科 × 2 列（分数 + 百分位） | 语数英 3 列 + 6 门 × 2 列（原始 + 等级） |
-| 总分类型 | 主三门 / 五门 / 九门 | 主三门 / +3 / 3+3 |
-| 选科 | 全员同卷 | 6 选 3，未选列为空 |
-| 等级分 | N/A | 40–70（计入高考总分） |
-
-## 成绩口径说明
-
-- **趋势主指标**：总分用学籍排名（xueji_rank）；单科用年级百分位（grade_percentile，越低越好）
-- **高二/三 +3 选考**：趋势描述用等级分（grade_score），不用原始分或百分位
-- **班级排名**：学生详情页按每场考试本班主三门实时计算
-- **跨学年对比**：只允许使用主三门和语数英原始分，禁止使用九门或 +3 比较
-- 阈值配置统一在 `analysis/config.py`，与 `exam-score-analysis/references/metric-definitions.md` 保持同步
+- `最近两次高一语文、数学、英语、主三门、五门分别进步最大的是谁？`
+- `最近5次高一主三门和五门趋势最好的是谁？至少有3次成绩才算。`
+- `高二语文退步最大的前10名是谁？`
+- `这个学生整体情况怎么样？`
 
 ## 开发命令
 
+后端热重载：
+
 ```bash
-# 后端（带热重载）
-cd backend && source .venv/bin/activate
+cd backend
+source .venv/bin/activate
 uvicorn app.main:app --reload --port 8000
-
-# 前端
-cd frontend && npm run dev
-
-# 前端类型检查
-npx tsc --noEmit
-
-# 后端测试
-cd backend && pip install pytest && pytest tests/
-
-# 关停服务（跨平台）
-python run.py stop
 ```
 
-日志写到 `~/.exam-tracker/{backend,frontend}.log`（Windows 上是 `%USERPROFILE%\.exam-tracker\`）。完全重置可双击对应平台的「初始化成绩分析」脚本，或手动删除该目录。
+前端开发：
+
+```bash
+cd frontend
+npm run dev
+```
+
+前端类型检查：
+
+```bash
+cd frontend
+npx tsc --noEmit
+```
+
+前端生产构建：
+
+```bash
+cd frontend
+npm run build
+```
+
+后端测试：
+
+```bash
+cd backend
+source .venv/bin/activate
+pip install pytest
+pytest tests/
+```
+
+注意：当前部分后端测试会读取真实 `~/.exam-tracker/db.sqlite`。在贡献测试或 CI 前，建议补充独立测试数据库隔离。
+
+## 目录结构
+
+```text
+成绩分析webapp/
+├── backend/
+│   ├── app/
+│   │   ├── main.py
+│   │   ├── db/
+│   │   ├── ingest/
+│   │   ├── analysis/
+│   │   └── chat/
+│   ├── pyproject.toml
+│   └── tests/
+├── frontend/
+│   ├── src/app/
+│   ├── src/components/
+│   ├── package.json
+│   └── tailwind.config.js
+├── run.py
+├── start.sh
+├── LICENSE
+└── README.md
+```
+
+## 贡献指南
+
+欢迎提交 Issue 和 Pull Request。
+
+建议流程：
+
+1. Fork 本仓库。
+2. 新建功能分支。
+3. 保持改动聚焦，避免提交本地数据、日志、`.env` 或构建产物。
+4. 运行必要检查：`npx tsc --noEmit`、`npm run build`、后端相关测试。
+5. 在 PR 中说明改动动机、主要实现和验证结果。
+
+## 许可证
+
+本项目使用 [MIT License](./LICENSE)。
