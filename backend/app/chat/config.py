@@ -42,7 +42,13 @@ def _load_dotenv(path: Path) -> dict[str, str]:
 
 
 def _read_setting(name: str, file_values: dict[str, str], default: str = "") -> str:
-    return os.getenv(name, file_values.get(name, default)).strip()
+    # .env 是本 app 的主配置入口：文件里有非空值就优先用它，
+    # 避免外部 shell 注入的空/错误环境变量（如空 ANTHROPIC_API_KEY）把 .env 覆盖掉。
+    # .env 未配置该项时再回退到环境变量，最后用 default。
+    file_val = file_values.get(name, "").strip()
+    if file_val:
+        return file_val
+    return os.getenv(name, default).strip()
 
 
 def get_chat_config(env_file: Path | None = None) -> ChatConfig:
