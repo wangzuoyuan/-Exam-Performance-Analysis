@@ -512,6 +512,16 @@ async def get_student(student_id: str):
 
     db.close()
 
+    def exam_sort_key(exam_id):
+        e = exam_map.get(exam_id)
+        return (e.grade if e else 0, e.exam_date if e else "")
+
+    main_totals_sorted = sorted(main_totals, key=lambda t: exam_sort_key(t.exam_id))
+    five_totals_sorted = sorted(five_totals, key=lambda t: exam_sort_key(t.exam_id))
+    plus3_totals_sorted = sorted(plus3_totals, key=lambda t: exam_sort_key(t.exam_id))
+    san3_totals_sorted = sorted(san3_totals, key=lambda t: exam_sort_key(t.exam_id))
+    subject_scores_sorted = sorted(subject_scores, key=lambda s: exam_sort_key(s.exam_id))
+
     return {
         "student_id": student_id,
         "name": name,
@@ -522,43 +532,48 @@ async def get_student(student_id: str):
         "main_total_trend": [{
             "exam_id": t.exam_id,
             "exam_name": exam_map[t.exam_id].name if t.exam_id in exam_map else str(t.exam_id),
+            "exam_date": exam_map[t.exam_id].exam_date if t.exam_id in exam_map else None,
             "grade": exam_map[t.exam_id].grade if t.exam_id in exam_map else None,
             "total_score": t.total_score,
             "xueji_rank": t.xueji_rank,
             "grade_percentile": t.grade_percentile,
             "class_rank": class_rank_by_exam.get(t.exam_id),
-        } for t in main_totals],
+        } for t in main_totals_sorted],
         "five_trend": [{
             "exam_id": t.exam_id,
             "exam_name": exam_map[t.exam_id].name if t.exam_id in exam_map else str(t.exam_id),
+            "exam_date": exam_map[t.exam_id].exam_date if t.exam_id in exam_map else None,
             "grade": exam_map[t.exam_id].grade if t.exam_id in exam_map else None,
             "total_score": t.total_score,
             "xueji_rank": t.xueji_rank,
             "grade_percentile": t.grade_percentile,
-        } for t in five_totals],
+        } for t in five_totals_sorted],
         "subject_trend": [{
             "exam_id": s.exam_id,
             "exam_name": exam_map[s.exam_id].name if s.exam_id in exam_map else str(s.exam_id),
+            "exam_date": exam_map[s.exam_id].exam_date if s.exam_id in exam_map else None,
             "subject": s.subject,
             "raw_score": s.raw_score,
             "grade_percentile": s.grade_percentile,
-        } for s in subject_scores],
+        } for s in subject_scores_sorted],
         "plus3_trend": [{
             "exam_id": t.exam_id,
             "exam_name": exam_map[t.exam_id].name if t.exam_id in exam_map else str(t.exam_id),
+            "exam_date": exam_map[t.exam_id].exam_date if t.exam_id in exam_map else None,
             "grade": exam_map[t.exam_id].grade if t.exam_id in exam_map else None,
             "total_score": t.total_score,
             "xueji_rank": t.xueji_rank,
             "grade_percentile": t.grade_percentile,
-        } for t in plus3_totals],
+        } for t in plus3_totals_sorted],
         "san3_trend": [{
             "exam_id": t.exam_id,
             "exam_name": exam_map[t.exam_id].name if t.exam_id in exam_map else str(t.exam_id),
+            "exam_date": exam_map[t.exam_id].exam_date if t.exam_id in exam_map else None,
             "grade": exam_map[t.exam_id].grade if t.exam_id in exam_map else None,
             "total_score": t.total_score,
             "xueji_rank": t.xueji_rank,
             "grade_percentile": t.grade_percentile,
-        } for t in san3_totals],
+        } for t in san3_totals_sorted],
     }
 
 @router.get("/class/compare")

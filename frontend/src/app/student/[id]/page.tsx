@@ -58,6 +58,7 @@ interface MainTrendPoint {
 interface SubjectTrendPoint {
   exam_id: number
   exam_name: string
+  exam_date?: string | null
   subject: string
   raw_score?: number | null
   grade_percentile?: number | null
@@ -360,25 +361,37 @@ export default function StudentPage() {
     }
   }, [studentId])
 
-  // 主三门趋势按 exam_id 升序（最早 → 最新）；表格倒序展示
+  // 趋势按考试时间（exam_date，格式 YYYY-MM）升序；exam_id 仅作并列兜底。
+  // 注意：不能按 exam_id 排序——上传顺序≠考试时间顺序。
+  const compareByExamDate = (
+    a: { exam_id: number; exam_date?: string | null },
+    b: { exam_id: number; exam_date?: string | null }
+  ) => {
+    const da = a.exam_date ?? ''
+    const db = b.exam_date ?? ''
+    if (da !== db) return da < db ? -1 : 1
+    return a.exam_id - b.exam_id
+  }
+
+  // 主三门趋势按考试时间升序（最早 → 最新）；表格倒序展示
   const mainTrend = useMemo<MainTrendPoint[]>(() => {
     if (!profile?.main_total_trend) return []
-    return [...profile.main_total_trend].sort((a, b) => a.exam_id - b.exam_id)
+    return [...profile.main_total_trend].sort(compareByExamDate)
   }, [profile])
 
   const fiveTrend = useMemo<MainTrendPoint[]>(() => {
     if (!profile?.five_trend) return []
-    return [...profile.five_trend].sort((a, b) => a.exam_id - b.exam_id)
+    return [...profile.five_trend].sort(compareByExamDate)
   }, [profile])
 
   const plus3Trend = useMemo<MainTrendPoint[]>(() => {
     if (!profile?.plus3_trend) return []
-    return [...profile.plus3_trend].sort((a, b) => a.exam_id - b.exam_id)
+    return [...profile.plus3_trend].sort(compareByExamDate)
   }, [profile])
 
   const san3Trend = useMemo<MainTrendPoint[]>(() => {
     if (!profile?.san3_trend) return []
-    return [...profile.san3_trend].sort((a, b) => a.exam_id - b.exam_id)
+    return [...profile.san3_trend].sort(compareByExamDate)
   }, [profile])
 
   const totalColumnSpecs = useMemo(() => {
@@ -419,7 +432,7 @@ export default function StudentPage() {
       map[s.subject].push(s)
     }
     Object.keys(map).forEach((k) => {
-      map[k].sort((a, b) => a.exam_id - b.exam_id)
+      map[k].sort(compareByExamDate)
     })
     return map
   }, [profile])
@@ -483,7 +496,7 @@ export default function StudentPage() {
         entry = {
           exam_id: s.exam_id,
           exam_name: s.exam_name,
-          exam_date: null,
+          exam_date: s.exam_date ?? null,
           subjects: {},
           totals: {},
           total: null,
@@ -495,7 +508,7 @@ export default function StudentPage() {
       entry.subjects[s.subject] = safeNum(s.raw_score)
     }
 
-    return Array.from(examMap.values()).sort((a, b) => b.exam_id - a.exam_id)
+    return Array.from(examMap.values()).sort((a, b) => compareByExamDate(b, a))
   }, [profile])
 
   // KPI 计算（取最新两次主三门点）

@@ -12,13 +12,15 @@ from app.analysis.config import (
 def compute_student_trend(student_id: str, total_type: str, exam_ids: list, db) -> dict:
     """计算学生趋势（基于名次时间序列）"""
     # 从数据库获取该生的各次考试名次
-    from app.db.models import TotalScore
+    # 必须按考试时间（grade, exam_date）排序——exam_id 是上传顺序，与时间顺序无关，
+    # 否则下方 ranks[0]/ranks[-1] 取的"最早/最新"会错位，进退步判断随之出错。
+    from app.db.models import TotalScore, Exam
 
-    scores = db.query(TotalScore).filter(
+    scores = db.query(TotalScore).join(Exam, Exam.id == TotalScore.exam_id).filter(
         TotalScore.student_id == student_id,
         TotalScore.total_type == total_type,
         TotalScore.exam_id.in_(exam_ids)
-    ).order_by(TotalScore.exam_id).all()
+    ).order_by(Exam.grade, Exam.exam_date, Exam.id).all()
 
     if not scores:
         return {"trend_label": "无数据", "ranks": [], "volatility": None}
