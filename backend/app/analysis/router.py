@@ -1,8 +1,138 @@
 from collections import Counter
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 from typing import Optional
 
 router = APIRouter(tags=["analysis"])
+
+
+class BandConfigPayload(BaseModel):
+    high_score_max: int
+    critical_min: int
+    critical_max: int
+    weak_min: int
+
+
+@router.get("/analysis-config")
+async def get_analysis_config():
+    """返回当前重点关注段位阈值（供前端展示/编辑）。"""
+    from app.analysis.config import get_band_config
+    return get_band_config()
+
+
+@router.put("/analysis-config")
+async def update_analysis_config(payload: BandConfigPayload):
+    """保存用户自定义的段位阈值（全局单行）。"""
+    from app.db.models import SessionLocal, AnalysisConfig
+    from datetime import datetime
+
+    # 基本合法性校验：边界须为正、区间下界不大于上界
+    if payload.high_score_max < 1 or payload.critical_min < 1 or payload.weak_min < 1:
+        raise HTTPException(400, "排名阈值必须为正整数")
+    if payload.critical_min > payload.critical_max:
+        raise HTTPException(400, "临界段下界不能大于上界")
+
+    db = SessionLocal()
+    try:
+        cfg = db.query(AnalysisConfig).filter(AnalysisConfig.id == 1).first()
+        if not cfg:
+            cfg = AnalysisConfig(id=1)
+            db.add(cfg)
+        cfg.high_score_max = payload.high_score_max
+        cfg.critical_min = payload.critical_min
+        cfg.critical_max = payload.critical_max
+        cfg.weak_min = payload.weak_min
+        cfg.updated_at = datetime.utcnow()
+        db.commit()
+        return {
+            "high_score_max": cfg.high_score_max,
+            "critical_min": cfg.critical_min,
+            "critical_max": cfg.critical_max,
+            "weak_min": cfg.weak_min,
+        }
+    finally:
+        db.close()
+
+
+@router.get("/band-trend")
+async def get_band_trend(grade: int, class_num: Optional[int] = None):
+    """某年级历次考试的三段（高分/临界/薄弱）人数趋势。
+    class_num 为空时统计全年级；按当前 band_config 分段，改阈值后趋势同步变化。"""
+    from app.db.models import SessionLocal, Exam, TotalScore, SubjectScore
+    from app.analysis.config import get_band_config
+
+    db = SessionLocal()
+    try:
+        cfg = get_band_config(db)
+        # 按考试时间排序（exam_id 是上传顺序，不能用）
+        exams = (
+            db.query(Exam)
+            .filter(Exam.grade == grade)
+            .order_by(Exam.grade, Exam.exam_date, Exam.id)
+            .all()
+        )
+
+        series = []
+        # 该年级历次考试出现过的班号，供前端下拉
+        class_set = set()
+        for exam in exams:
+            # 限定班级时先取本班学生集合
+            if class_num is not None:
+                sid_rows = (
+                    db.query(SubjectScore.student_id)
+                    .filter(SubjectScore.exam_id == exam.id, SubjectScore.class_num == class_num)
+                    .distinct()
+                    .all()
+                )
+                allowed = {r[0] for r in sid_rows}
+            else:
+                allowed = None
+
+            cls_rows = (
+                db.query(SubjectScore.class_num)
+                .filter(SubjectScore.exam_id == exam.id, SubjectScore.class_num.isnot(None))
+                .distinct()
+                .all()
+            )
+            class_set.update(r[0] for r in cls_rows)
+
+            totals = (
+                db.query(TotalScore)
+                .filter(TotalScore.exam_id == exam.id, TotalScore.total_type == "主三门")
+                .all()
+            )
+            high = crit = weak = 0
+            for t in totals:
+                if allowed is not None and t.student_id not in allowed:
+                    continue
+                rank = t.xueji_rank or t.grade_rank
+                if rank is None:
+                    continue
+                if 1 <= rank <= cfg["high_score_max"]:
+                    high += 1
+                if cfg["critical_min"] <= rank <= cfg["critical_max"]:
+                    crit += 1
+                if rank >= cfg["weak_min"]:
+                    weak += 1
+
+            series.append({
+                "exam_id": exam.id,
+                "exam_name": exam.name,
+                "exam_date": exam.exam_date,
+                "high_score": high,
+                "critical": crit,
+                "weak": weak,
+            })
+
+        return {
+            "series": series,
+            "band_config": cfg,
+            "grade": grade,
+            "class_num": class_num,
+            "available_classes": sorted(class_set),
+        }
+    finally:
+        db.close()
 
 @router.get("/exams")
 async def list_exams(grade: Optional[int] = None):
@@ -223,6 +353,8 @@ async def get_exam(exam_id: int):
     ]
     avg_score = sum(valid_scores) / len(valid_scores) if valid_scores else None
 
+    from app.analysis.config import get_band_config
+    band_cfg = get_band_config(db)
     rank_band_total_types = ["主三门"] if exam.grade == 1 else ["主三门", "3+3"]
     rank_bands_by_class = defaultdict(lambda: {"high_score": 0, "critical": 0, "weak": 0})
     for total in all_totals:
@@ -238,11 +370,11 @@ async def get_exam(exam_id: int):
         if rank is None:
             continue
         bands = rank_bands_by_class[(total.total_type, class_num)]
-        if 1 <= rank <= 80:
+        if 1 <= rank <= band_cfg["high_score_max"]:
             bands["high_score"] += 1
-        if 400 <= rank <= 500:
+        if band_cfg["critical_min"] <= rank <= band_cfg["critical_max"]:
             bands["critical"] += 1
-        if rank > 500:
+        if rank >= band_cfg["weak_min"]:
             bands["weak"] += 1
 
     students = sorted(
@@ -325,6 +457,7 @@ async def get_exam(exam_id: int):
         },
         "students": students,
         "rank_bands": rank_bands,
+        "band_config": band_cfg,
         "rank_distribution": rank_distribution,
     }
 
@@ -332,9 +465,10 @@ async def get_exam(exam_id: int):
 async def get_focus_list(exam_id: int, class_num: Optional[int] = None):
     """获取重点关注名单 - Step 5"""
     from app.db.models import SessionLocal, TotalScore, SubjectScore
-    from app.analysis.config import CRITICAL_RANGE, WEAK_RANGE, SUBJECT_WEAKNESS_PCT_DIFF, PROGRESS_RANK_THRESHOLD
+    from app.analysis.config import SUBJECT_WEAKNESS_PCT_DIFF, get_band_config
 
     db = SessionLocal()
+    band_cfg = get_band_config(db)
 
     # 基础查询：主三门成绩
     query = db.query(TotalScore).filter(
@@ -378,12 +512,12 @@ async def get_focus_list(exam_id: int, class_num: Optional[int] = None):
 
         issues = []
 
-        # 临界段 400-500
-        if CRITICAL_RANGE[0] <= rank <= CRITICAL_RANGE[1]:
+        # 临界段（用户可自定义）
+        if band_cfg["critical_min"] <= rank <= band_cfg["critical_max"]:
             issues.append("临界段")
 
-        # 薄弱段 >500
-        if rank > WEAK_RANGE[0]:
+        # 薄弱段（用户可自定义）
+        if rank >= band_cfg["weak_min"]:
             issues.append("薄弱段")
 
         # 严重偏科检测（单科百分位 vs 主三门百分位差>=0.20）

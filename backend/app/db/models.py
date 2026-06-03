@@ -94,4 +94,15 @@ class ClassAverage(Base):
     subject_averages = Column(JSON, default=dict)  # {语文: 120.5, ...}
     total_averages = Column(JSON, default=dict)  # {主三门: 280.5, ...}
 
+class AnalysisConfig(Base):
+    """重点关注段位阈值（全局单行，id=1）。用户可在前端自定义，
+    所有名次段计算与 AI 问答均读此配置。"""
+    __tablename__ = "analysis_config"
+    id = Column(Integer, primary_key=True)
+    high_score_max = Column(Integer, nullable=False, default=80)   # 高分段：1 ~ high_score_max
+    critical_min = Column(Integer, nullable=False, default=400)    # 临界段：critical_min ~ critical_max
+    critical_max = Column(Integer, nullable=False, default=500)
+    weak_min = Column(Integer, nullable=False, default=501)        # 薄弱段：rank >= weak_min（独立可设）
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
 Base.metadata.create_all(bind=engine)

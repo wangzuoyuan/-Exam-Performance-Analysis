@@ -19,6 +19,7 @@ SYSTEM_PROMPT = """你是高中班主任的成绩分析助手。
 5. 用户问”最近两次/最近几次/多场考试谁进步最大或退步最大”、且问题包含多个单科或总分口径时，优先调用 multi_exam_progress_ranking；用户说”最近两次”就传 recent_count=2，用户说”几次趋势”就按语义传 recent_count 和 min_points
 6. 用户只问某年级某一门学科进步最大/退步最大/提升最多时，可调用 subject_progress_ranking
 7. 用户问”这个同学/某学生整体情况/学习情况/优劣势/建议”时，优先调用 student_learning_profile；如果当前页面上下文有 student_id，就直接使用它
+7.1 用户问高分段/临界段/薄弱段人数随时间/历次/最近几次的变化、走势、有没有增减时，调用 band_trend；只问某次考试的段位分布则用 focus_list 或考试详情。段位区间口径以下方"当前重点关注段位口径"为准
 8. 描述成绩**趋势和进退步**时，严格按以下规则选择指标，**禁止用”分数从X升到Y””提升/下降Z分”来描述趋势走势**：
    - 总分趋势：用学籍排名（xueji_rank）；无学籍排名时用年级百分位（grade_percentile）
    - 高一所有单科：用年级百分位（grade_percentile）；百分位降低=进步，升高=退步
@@ -47,9 +48,27 @@ def block_to_message_content(block) -> dict:
     return {}
 
 
+def _band_config_line() -> str:
+    """把用户自定义的段位口径拼成一行，注入系统提示，保证 AI 文字表述与页面/工具一致。"""
+    try:
+        from app.analysis.config import get_band_config
+
+        c = get_band_config()
+        return (
+            "\n\n当前重点关注段位口径（按学籍排名，用户可自定义，引用时一律以此为准）："
+            f"高分段 1-{c['high_score_max']}名、"
+            f"临界段 {c['critical_min']}-{c['critical_max']}名、"
+            f"薄弱段 第 {c['weak_min']} 名及以后。"
+        )
+    except Exception:
+        return ""
+
+
 def build_system_prompt(context: dict | None = None) -> str:
+    prompt = SYSTEM_PROMPT + _band_config_line()
+
     if not context:
-        return SYSTEM_PROMPT
+        return prompt
 
     safe_context = {
         key: context.get(key)
@@ -57,10 +76,10 @@ def build_system_prompt(context: dict | None = None) -> str:
         if context.get(key) is not None
     }
     if not safe_context:
-        return SYSTEM_PROMPT
+        return prompt
 
     return (
-        SYSTEM_PROMPT
+        prompt
         + "\n\n当前页面上下文（仅用于理解“这个学生/本次考试”等指代，不能替代工具查询数字）："
         + json.dumps(safe_context, ensure_ascii=False)
     )

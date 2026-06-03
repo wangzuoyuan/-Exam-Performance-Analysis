@@ -331,11 +331,12 @@ def compare_classes(class_nums: list[int], exam_id: int, metric: str) -> list[di
 
 def focus_list(exam_id: int, category: Optional[str] = None) -> list[dict[str, Any]]:
     """重点关注名单。"""
-    from app.analysis.config import CRITICAL_RANGE, SUBJECT_WEAKNESS_PCT_DIFF, WEAK_RANGE
+    from app.analysis.config import SUBJECT_WEAKNESS_PCT_DIFF, get_band_config
     from app.db.models import SubjectScore, TotalScore
     from app.db.models import get_db
 
     db = next(get_db())
+    band_cfg = get_band_config(db)
     totals = db.query(TotalScore).filter(
         TotalScore.exam_id == exam_id,
         TotalScore.total_type == "主三门",
@@ -349,9 +350,9 @@ def focus_list(exam_id: int, category: Optional[str] = None) -> list[dict[str, A
         ).all()
         name = next((s.name for s in subjects if s.name), total.student_id)
         issues = []
-        if CRITICAL_RANGE[0] <= rank <= CRITICAL_RANGE[1]:
+        if band_cfg["critical_min"] <= rank <= band_cfg["critical_max"]:
             issues.append("临界段")
-        if rank > WEAK_RANGE[0]:
+        if rank >= band_cfg["weak_min"]:
             issues.append("薄弱段")
         if total.grade_percentile is not None:
             for subject in subjects:
@@ -754,6 +755,69 @@ def multi_exam_progress_ranking(
         db.close()
 
 
+def band_trend(grade: int, class_num: Optional[int] = None) -> dict[str, Any]:
+    """某年级历次考试的高分段/临界段/薄弱段人数趋势。class_num 为空统计全年级。
+    分段口径用用户当前自定义的 band_config，改阈值后结果同步变化。"""
+    from app.analysis.config import get_band_config
+    from app.db.models import Exam, SubjectScore, TotalScore, get_db
+
+    db = next(get_db())
+    try:
+        cfg = get_band_config(db)
+        # 按考试时间排序（exam_id 是上传顺序，不可用）
+        exams = (
+            db.query(Exam)
+            .filter(Exam.grade == grade)
+            .order_by(Exam.grade, Exam.exam_date, Exam.id)
+            .all()
+        )
+        series = []
+        for exam in exams:
+            if class_num is not None:
+                sid_rows = (
+                    db.query(SubjectScore.student_id)
+                    .filter(SubjectScore.exam_id == exam.id, SubjectScore.class_num == class_num)
+                    .distinct()
+                    .all()
+                )
+                allowed = {r[0] for r in sid_rows}
+            else:
+                allowed = None
+
+            totals = (
+                db.query(TotalScore)
+                .filter(TotalScore.exam_id == exam.id, TotalScore.total_type == "主三门")
+                .all()
+            )
+            high = crit = weak = 0
+            for t in totals:
+                if allowed is not None and t.student_id not in allowed:
+                    continue
+                rank = t.xueji_rank or t.grade_rank
+                if rank is None:
+                    continue
+                if 1 <= rank <= cfg["high_score_max"]:
+                    high += 1
+                if cfg["critical_min"] <= rank <= cfg["critical_max"]:
+                    crit += 1
+                if rank >= cfg["weak_min"]:
+                    weak += 1
+            series.append({
+                "exam_name": exam.name,
+                "exam_date": exam.exam_date,
+                "high_score": high,
+                "critical": crit,
+                "weak": weak,
+            })
+        return {
+            "band_config": cfg,
+            "class_num": class_num,
+            "series": series,
+        }
+    finally:
+        db.close()
+
+
 TOOL_FUNCTIONS = {
     "list_exams": list_exams,
     "student_lookup": student_lookup,
@@ -766,6 +830,7 @@ TOOL_FUNCTIONS = {
     "subject_weakness": subject_weakness,
     "subject_progress_ranking": subject_progress_ranking,
     "multi_exam_progress_ranking": multi_exam_progress_ranking,
+    "band_trend": band_trend,
 }
 
 
@@ -936,6 +1001,18 @@ TOOLS = [
                 "limit": {"type": "integer", "description": "每个指标返回人数，默认10，最多50"},
                 "direction": {"type": "string", "description": "progress=进步趋势最大，regression=退步趋势最大"},
                 "min_points": {"type": "integer", "description": "每名学生至少需要几次有效记录，默认2；做多场趋势时可设3"},
+            },
+            "required": ["grade"],
+        },
+    },
+    {
+        "name": "band_trend",
+        "description": "某年级历次考试的高分段/临界段/薄弱段人数随时间变化趋势。回答“本班高分段人数怎么变”“临界段最近几次趋势”“薄弱段有没有减少”等关于名次段位人数走势的问题。分段口径使用用户当前自定义的设置，返回值含 band_config 说明区间。class_num 不填表示全年级。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "grade": {"type": "integer", "description": "年级(1=高一,2=高二,3=高三)"},
+                "class_num": {"type": "integer", "description": "只看某个班；不填表示全年级"},
             },
             "required": ["grade"],
         },

@@ -51,7 +51,14 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
-import { RankBandStackedBar } from '@/components'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import { RankBandStackedBar, BandTrendChart } from '@/components'
 import { formatGradeLabel } from '@/lib/labels'
 
 interface ExamDetail {
@@ -98,6 +105,7 @@ interface ExamApiResponse {
   focus_list?: FocusStudent[]
   students?: StudentRow[]
   rank_bands?: RankBandEntry[]
+  band_config?: BandConfig
   rank_distribution?: RankDistributionEntry[]
 }
 
@@ -139,6 +147,35 @@ interface RankBandEntry {
   high_score: number
   critical: number
   weak: number
+}
+
+interface BandConfig {
+  high_score_max: number
+  critical_min: number
+  critical_max: number
+  weak_min: number
+}
+
+const DEFAULT_BAND_CONFIG: BandConfig = {
+  high_score_max: 80,
+  critical_min: 400,
+  critical_max: 500,
+  weak_min: 501,
+}
+
+interface BandTrendPoint {
+  exam_id: number
+  exam_name: string
+  exam_date?: string | null
+  high_score: number
+  critical: number
+  weak: number
+}
+
+interface TeacherClasses {
+  target_class_high1: number | null
+  target_class_high2: number | null
+  target_class_high3: number | null
 }
 
 interface RankDistributionEntry {
@@ -597,6 +634,23 @@ export default function ExamDetailPage() {
   const [studentSortKey, setStudentSortKey] = useState<string | null>(null)
   const [studentSortDir, setStudentSortDir] = useState<SortDirection>(null)
 
+  // 重点关注段位阈值（可自定义）
+  const [bandConfig, setBandConfig] = useState<BandConfig>(DEFAULT_BAND_CONFIG)
+  const [reloadKey, setReloadKey] = useState(0)
+  const [bandEditorOpen, setBandEditorOpen] = useState(false)
+  const [bandDraft, setBandDraft] = useState<BandConfig>(DEFAULT_BAND_CONFIG)
+  const [savingBand, setSavingBand] = useState(false)
+  const [bandError, setBandError] = useState<string | null>(null)
+  // 受控 tab：保存段位触发 refetch（含整页 loading）后仍停留在当前 tab
+  const [activeTab, setActiveTab] = useState('averages')
+
+  // 历次段位趋势
+  const [teacherInfo, setTeacherInfo] = useState<TeacherClasses | null>(null)
+  const [teacherLoaded, setTeacherLoaded] = useState(false)
+  const [trendClass, setTrendClass] = useState<number | null | undefined>(undefined)
+  const [bandTrend, setBandTrend] = useState<BandTrendPoint[]>([])
+  const [trendClasses, setTrendClasses] = useState<number[]>([])
+
   useEffect(() => {
     if (!examId) return
     let cancelled = false
@@ -619,6 +673,7 @@ export default function ExamDetailPage() {
         setStats(examData.stats || {})
         setStudents(examData.students || [])
         setRankBands(examData.rank_bands || [])
+        setBandConfig(examData.band_config || DEFAULT_BAND_CONFIG)
         setRankDistribution(examData.rank_distribution || [])
         // focusData 来自 /api/focus-list；examData.focus_list 兼容（如果后端某天合并）
         const list: FocusStudent[] =
@@ -637,7 +692,105 @@ export default function ExamDetailPage() {
     return () => {
       cancelled = true
     }
-  }, [examId])
+  }, [examId, reloadKey])
+
+  // 拉取本班绑定（用于趋势图默认选中本班）
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/teacher')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: TeacherClasses | null) => {
+        if (!cancelled && d) setTeacherInfo(d)
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setTeacherLoaded(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // 初始化默认班级（本班）+ 拉取历次段位趋势；改阈值（reloadKey）后同步刷新
+  useEffect(() => {
+    const grade = exam?.grade
+    if (!grade || !teacherLoaded) return
+
+    // 首次：把默认班级设为本班（无绑定则全年级）
+    if (trendClass === undefined) {
+      const bound =
+        grade === 1
+          ? teacherInfo?.target_class_high1
+          : grade === 2
+            ? teacherInfo?.target_class_high2
+            : teacherInfo?.target_class_high3
+      setTrendClass(bound ?? null)
+      return
+    }
+
+    let cancelled = false
+    const q = trendClass == null ? '' : `&class_num=${trendClass}`
+    fetch(`/api/band-trend?grade=${grade}${q}`)
+      .then((r) => (r.ok ? r.json() : { series: [], available_classes: [] }))
+      .then((d) => {
+        if (cancelled) return
+        setBandTrend(d.series || [])
+        setTrendClasses(d.available_classes || [])
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [exam?.grade, teacherLoaded, teacherInfo, trendClass, reloadKey])
+
+  function openBandEditor() {
+    setBandDraft(bandConfig)
+    setBandError(null)
+    setBandEditorOpen(true)
+  }
+
+  async function saveBandConfig() {
+    // 前端先做与后端一致的基本校验
+    const { high_score_max, critical_min, critical_max, weak_min } = bandDraft
+    if (
+      [high_score_max, critical_min, critical_max, weak_min].some(
+        (n) => !Number.isFinite(n) || n < 1,
+      )
+    ) {
+      setBandError('各项排名必须为正整数')
+      return
+    }
+    if (critical_min > critical_max) {
+      setBandError('临界段下界不能大于上界')
+      return
+    }
+    setSavingBand(true)
+    setBandError(null)
+    try {
+      const res = await fetch('/api/analysis-config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bandDraft),
+      })
+      if (!res.ok) {
+        const msg = await res.json().catch(() => null)
+        throw new Error(msg?.detail || `保存失败（HTTP ${res.status}）`)
+      }
+      setBandEditorOpen(false)
+      // 重新拉取考试详情，让柱状图按新口径重算
+      setReloadKey((k) => k + 1)
+    } catch (err) {
+      setBandError(err instanceof Error ? err.message : '保存失败')
+    } finally {
+      setSavingBand(false)
+    }
+  }
+
+  const bandLabels = {
+    high_score: `高分段(1-${bandConfig.high_score_max})`,
+    critical: `临界段(${bandConfig.critical_min}-${bandConfig.critical_max})`,
+    weak: `薄弱段(≥${bandConfig.weak_min})`,
+  }
 
   // 重点关注：搜索过滤
   const filteredFocus = useMemo(() => {
@@ -798,7 +951,7 @@ export default function ExamDetailPage() {
       ) : null}
 
       {/* Tabs */}
-      <Tabs defaultValue="averages" className="space-y-4">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
         <TabsList>
           <TabsTrigger value="averages">
             班级均分表
@@ -1001,12 +1154,93 @@ export default function ExamDetailPage() {
         <TabsContent value="bands">
           <Card>
             <CardHeader>
-              <CardTitle>分数段分布</CardTitle>
-              <CardDescription>
-                按学籍排名口径划分：高分段 1-80、临界段 400-500、薄弱段 &gt;500。
-              </CardDescription>
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <CardTitle>分数段分布</CardTitle>
+                  <CardDescription>
+                    按学籍排名口径划分：高分段 1-{bandConfig.high_score_max}、临界段{' '}
+                    {bandConfig.critical_min}-{bandConfig.critical_max}、薄弱段 第{' '}
+                    {bandConfig.weak_min} 名及以后。
+                  </CardDescription>
+                </div>
+                <Button variant="outline" size="sm" onClick={openBandEditor}>
+                  自定义段位
+                </Button>
+              </div>
             </CardHeader>
             <CardContent>
+              {bandEditorOpen && (
+                <div className="mb-4 rounded-md border border-slate-200 bg-slate-50 p-4">
+                  <div className="mb-1 text-sm font-medium text-slate-800">
+                    自定义重点关注段位（按学籍排名）
+                  </div>
+                  <p className="mb-3 text-xs text-slate-500">
+                    设置对全局所有考试和 AI 问答生效。薄弱段下界可独立设置，与临界段上界之间可留空档。
+                  </p>
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    <div className="space-y-1">
+                      <label className="text-xs text-slate-600">高分段上界</label>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={bandDraft.high_score_max}
+                        onChange={(e) =>
+                          setBandDraft((d) => ({ ...d, high_score_max: Number(e.target.value) }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-slate-600">临界段下界</label>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={bandDraft.critical_min}
+                        onChange={(e) =>
+                          setBandDraft((d) => ({ ...d, critical_min: Number(e.target.value) }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-slate-600">临界段上界</label>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={bandDraft.critical_max}
+                        onChange={(e) =>
+                          setBandDraft((d) => ({ ...d, critical_max: Number(e.target.value) }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-slate-600">薄弱段下界</label>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={bandDraft.weak_min}
+                        onChange={(e) =>
+                          setBandDraft((d) => ({ ...d, weak_min: Number(e.target.value) }))
+                        }
+                      />
+                    </div>
+                  </div>
+                  {bandError && (
+                    <div className="mt-2 text-sm text-danger-500">{bandError}</div>
+                  )}
+                  <div className="mt-3 flex items-center justify-end gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setBandEditorOpen(false)}
+                      disabled={savingBand}
+                    >
+                      取消
+                    </Button>
+                    <Button size="sm" onClick={saveBandConfig} disabled={savingBand}>
+                      {savingBand ? '保存中…' : '保存并应用'}
+                    </Button>
+                  </div>
+                </div>
+              )}
               {rankBands.length === 0 ? (
                 <EmptyState
                   icon={<BarChart3 className="h-8 w-8 text-slate-400" />}
@@ -1021,12 +1255,47 @@ export default function ExamDetailPage() {
                         <div className="mb-2 text-sm font-semibold text-slate-900">
                           {group.label}
                         </div>
-                        <RankBandStackedBar data={group.rows} />
+                        <RankBandStackedBar data={group.rows} labels={bandLabels} />
                       </div>
                     ) : null,
                   )}
                 </div>
               )}
+
+              {/* 历次段位人数趋势 */}
+              <div className="mt-6 border-t border-slate-100 pt-4">
+                <div className="mb-3 flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-900">历次段位人数趋势</div>
+                    <div className="text-xs text-slate-500">
+                      同一年级历次考试中各段人数变化（按考试时间排序）；修改上方阈值后趋势同步更新。
+                    </div>
+                  </div>
+                  <Select
+                    value={trendClass == null ? 'all' : String(trendClass)}
+                    onValueChange={(v) => setTrendClass(v === 'all' ? null : Number(v))}
+                  >
+                    <SelectTrigger className="w-32 shrink-0">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">全年级</SelectItem>
+                      {trendClasses.map((c) => (
+                        <SelectItem key={c} value={String(c)}>
+                          {c} 班
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {bandTrend.length === 0 ? (
+                  <div className="rounded-md border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-400">
+                    暂无历次考试数据
+                  </div>
+                ) : (
+                  <BandTrendChart data={bandTrend} labels={bandLabels} />
+                )}
+              </div>
             </CardContent>
           </Card>
         </TabsContent>

@@ -16,7 +16,26 @@ const COLORS = {
   weak: '#ef4444',       // danger-500
 }
 
-export default function RankBandStackedBar({ data }: { data: RankBandData[] }) {
+interface BandLabels {
+  high_score: string
+  critical: string
+  weak: string
+}
+
+const DEFAULT_LABELS: BandLabels = {
+  high_score: '高分段(1-80)',
+  critical: '临界段(400-500)',
+  weak: '薄弱段(>500)',
+}
+
+export default function RankBandStackedBar({
+  data,
+  labels,
+}: {
+  data: RankBandData[]
+  labels?: BandLabels
+}) {
+  const l = labels ?? DEFAULT_LABELS
   return (
     <ResponsiveContainer width="100%" height={300}>
       <BarChart data={data} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
@@ -41,9 +60,9 @@ export default function RankBandStackedBar({ data }: { data: RankBandData[] }) {
           cursor={{ fill: '#f1f5f9' }}
         />
         <Legend wrapperStyle={{ fontSize: 12, color: '#64748b' }} />
-        <Bar dataKey="high_score" fill={COLORS.high_score} name="高分段(1-80)" />
-        <Bar dataKey="critical" fill={COLORS.critical} name="临界段(400-500)" />
-        <Bar dataKey="weak" fill={COLORS.weak} name="薄弱段(>500)" />
+        <Bar dataKey="high_score" fill={COLORS.high_score} name={l.high_score} />
+        <Bar dataKey="critical" fill={COLORS.critical} name={l.critical} />
+        <Bar dataKey="weak" fill={COLORS.weak} name={l.weak} />
       </BarChart>
     </ResponsiveContainer>
   )
