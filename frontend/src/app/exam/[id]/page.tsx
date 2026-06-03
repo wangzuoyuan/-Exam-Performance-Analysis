@@ -183,6 +183,48 @@ interface RankDistributionEntry {
   [key: string]: string | number
 }
 
+interface RankMetricOption {
+  value: string
+  label: string
+  kind: string
+}
+
+interface ExamChoice {
+  id: number
+  name: string
+  grade: number
+  exam_date?: string | null
+}
+
+interface RankFrequencyResponse {
+  metric: string
+  metric_label: string
+  metric_kind: string
+  class_num?: number | null
+  exams: Array<{ id: number; name: string; exam_date?: string | null }>
+  bins: Array<{ key: string; label: string; separator_after?: boolean }>
+  rows: Array<Record<string, string | number | null>>
+  metric_note?: string
+}
+
+interface RankRangeResponse {
+  metric: string
+  metric_label: string
+  metric_kind: string
+  rank_min: number
+  rank_max: number
+  class_num?: number | null
+  rows: Array<{
+    student_id: string
+    name: string
+    class_num?: number | null
+    score?: number | null
+    class_rank?: number | null
+    year_rank?: number | null
+  }>
+  metric_note?: string
+}
+
 type IssueTone = 'danger' | 'warning' | 'purple' | 'slate' | 'outline'
 
 const SUBJECT_KEYS: { key: string; label: string }[] = [
@@ -346,6 +388,40 @@ function getClassAverageMetrics(grade: number): AverageMetric[] {
 
 function getRankDistributionKeys(grade: number): string[] {
   return grade === 1 ? ['主三门', '五门', '九门'] : ['主三门', '+3', '3+3']
+}
+
+function getRankMetricOptions(
+  grade: number,
+  mode: 'range' | 'frequency',
+): RankMetricOption[] {
+  if (grade === 1) {
+    return [
+      ...ALL_AVERAGE_SUBJECTS.map((subject) => ({
+        value: `subject:${subject}`,
+        label: subject,
+        kind: 'subject_percentile',
+      })),
+      { value: 'total:主三门', label: '主三门总分', kind: 'total_rank' },
+      { value: 'total:五门', label: '五门总分', kind: 'total_rank' },
+    ]
+  }
+
+  return [
+    ...BASE_AVERAGE_SUBJECTS.map((subject) => ({
+      value: `subject:${subject}`,
+      label: subject,
+      kind: 'subject_percentile',
+    })),
+    ...(mode === 'frequency'
+      ? ELECTIVE_AVERAGE_SUBJECTS.map((subject) => ({
+          value: `subject_grade:${subject}`,
+          label: `${subject}等级分`,
+          kind: 'subject_grade_score',
+        }))
+      : []),
+    { value: 'total:主三门', label: '主三门总分', kind: 'total_rank' },
+    { value: 'total:3+3', label: '3+3总分', kind: 'total_rank' },
+  ]
 }
 
 function getStudentSubjectScore(
@@ -644,6 +720,20 @@ export default function ExamDetailPage() {
   // 受控 tab：保存段位触发 refetch（含整页 loading）后仍停留在当前 tab
   const [activeTab, setActiveTab] = useState('averages')
 
+  // 排名频次 / 排名区间筛选
+  const [rankClass, setRankClass] = useState<number | null | undefined>(undefined)
+  const [examChoices, setExamChoices] = useState<ExamChoice[]>([])
+  const [frequencyMetric, setFrequencyMetric] = useState('subject:语文')
+  const [frequencyExamIds, setFrequencyExamIds] = useState<number[]>([])
+  const [frequencyData, setFrequencyData] = useState<RankFrequencyResponse | null>(null)
+  const [frequencyLoading, setFrequencyLoading] = useState(false)
+  const [rangeExamId, setRangeExamId] = useState<number | null>(null)
+  const [rangeMetric, setRangeMetric] = useState('subject:语文')
+  const [rangeMin, setRangeMin] = useState(1)
+  const [rangeMax, setRangeMax] = useState(100)
+  const [rangeData, setRangeData] = useState<RankRangeResponse | null>(null)
+  const [rangeLoading, setRangeLoading] = useState(false)
+
   // 历次段位趋势
   const [teacherInfo, setTeacherInfo] = useState<TeacherClasses | null>(null)
   const [teacherLoaded, setTeacherLoaded] = useState(false)
@@ -694,6 +784,15 @@ export default function ExamDetailPage() {
     }
   }, [examId, reloadKey])
 
+  useEffect(() => {
+    if (!exam) return
+    const frequencyOptions = getRankMetricOptions(exam.grade, 'frequency')
+    const rangeOptions = getRankMetricOptions(exam.grade, 'range')
+    setFrequencyMetric(frequencyOptions[0]?.value || 'subject:语文')
+    setRangeMetric(rangeOptions[0]?.value || 'subject:语文')
+    setRangeExamId(exam.id)
+  }, [exam?.id, exam?.grade])
+
   // 拉取本班绑定（用于趋势图默认选中本班）
   useEffect(() => {
     let cancelled = false
@@ -710,6 +809,89 @@ export default function ExamDetailPage() {
       cancelled = true
     }
   }, [])
+
+  useEffect(() => {
+    const grade = exam?.grade
+    if (!grade || !teacherLoaded || rankClass !== undefined) return
+    const bound =
+      grade === 1
+        ? teacherInfo?.target_class_high1
+        : grade === 2
+          ? teacherInfo?.target_class_high2
+          : teacherInfo?.target_class_high3
+    setRankClass(bound ?? null)
+  }, [exam?.grade, teacherLoaded, teacherInfo, rankClass])
+
+  useEffect(() => {
+    if (!exam?.grade) return
+    let cancelled = false
+    fetch(`/api/exams?grade=${exam.grade}`)
+      .then((r) => (r.ok ? r.json() : { exams: [] }))
+      .then((data) => {
+        if (cancelled) return
+        const choices = (data.exams || []) as ExamChoice[]
+        setExamChoices(choices)
+        const defaultIds = choices.slice(0, 5).map((item) => item.id)
+        setFrequencyExamIds(defaultIds.length ? defaultIds : [exam.id])
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [exam?.grade, exam?.id])
+
+  useEffect(() => {
+    if (!exam?.grade || frequencyExamIds.length === 0 || rankClass === undefined) return
+    let cancelled = false
+    setFrequencyLoading(true)
+    const params = new URLSearchParams({
+      grade: String(exam.grade),
+      metric: frequencyMetric,
+      exam_ids: frequencyExamIds.join(','),
+    })
+    if (rankClass != null) params.set('class_num', String(rankClass))
+    fetch(`/api/rank-frequency?${params.toString()}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: RankFrequencyResponse | null) => {
+        if (!cancelled) setFrequencyData(data)
+      })
+      .catch(() => {
+        if (!cancelled) setFrequencyData(null)
+      })
+      .finally(() => {
+        if (!cancelled) setFrequencyLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [exam?.grade, frequencyMetric, frequencyExamIds, rankClass])
+
+  useEffect(() => {
+    if (!rangeExamId || !rangeMetric || rankClass === undefined) return
+    let cancelled = false
+    setRangeLoading(true)
+    const params = new URLSearchParams({
+      exam_id: String(rangeExamId),
+      metric: rangeMetric,
+      rank_min: String(rangeMin),
+      rank_max: String(rangeMax),
+    })
+    if (rankClass != null) params.set('class_num', String(rankClass))
+    fetch(`/api/rank-range?${params.toString()}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: RankRangeResponse | null) => {
+        if (!cancelled) setRangeData(data)
+      })
+      .catch(() => {
+        if (!cancelled) setRangeData(null)
+      })
+      .finally(() => {
+        if (!cancelled) setRangeLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [rangeExamId, rangeMetric, rangeMin, rangeMax, rankClass])
 
   // 初始化默认班级（本班）+ 拉取历次段位趋势；改阈值（reloadKey）后同步刷新
   useEffect(() => {
@@ -821,6 +1003,22 @@ export default function ExamDetailPage() {
     () => (exam ? getExamKpis(exam.grade, stats, focusList.length) : []),
     [exam, stats, focusList.length],
   )
+
+  const frequencyMetricOptions = useMemo(
+    () => (exam ? getRankMetricOptions(exam.grade, 'frequency') : []),
+    [exam],
+  )
+  const rangeMetricOptions = useMemo(
+    () => (exam ? getRankMetricOptions(exam.grade, 'range') : []),
+    [exam],
+  )
+  const rankClasses = useMemo(() => {
+    const values = new Set<number>()
+    students.forEach((student) => {
+      if (student.class_num != null) values.add(student.class_num)
+    })
+    return Array.from(values).sort((a, b) => a - b)
+  }, [students])
 
   // 学生成绩：过滤 + 排序
   const visibleStudents = useMemo(() => {
@@ -952,7 +1150,7 @@ export default function ExamDetailPage() {
 
       {/* Tabs */}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-        <TabsList>
+        <TabsList className="h-auto flex-wrap justify-start">
           <TabsTrigger value="averages">
             班级均分表
           </TabsTrigger>
@@ -961,6 +1159,12 @@ export default function ExamDetailPage() {
           </TabsTrigger>
           <TabsTrigger value="bands">
             班级名次段位表
+          </TabsTrigger>
+          <TabsTrigger value="frequency">
+            排名频次统计
+          </TabsTrigger>
+          <TabsTrigger value="range">
+            排名区间筛选
           </TabsTrigger>
           <TabsTrigger value="focus">
             <AlertCircle className="mr-1.5 h-4 w-4" /> 重点关注
@@ -1299,6 +1503,147 @@ export default function ExamDetailPage() {
             </CardContent>
           </Card>
         </TabsContent>
+
+        <TabsContent value="frequency">
+          <Card>
+            <CardHeader>
+              <CardTitle>排名频次统计</CardTitle>
+              <CardDescription>
+                单科按年级百分位五等分；高二/高三选考科目按 70、67、64、61、58、55、52、49、46、43、40 精确等级分统计；总分按 40 名一档统计。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <RankScopeControls
+                rankClass={rankClass}
+                classes={rankClasses}
+                onClassChange={setRankClass}
+              />
+              <div className="space-y-2">
+                <div className="text-xs font-medium text-slate-500">选择考试（可多选）</div>
+                <div className="flex flex-wrap gap-2">
+                  {examChoices.map((choice) => {
+                    const checked = frequencyExamIds.includes(choice.id)
+                    return (
+                      <label
+                        key={choice.id}
+                        className={cn(
+                          'inline-flex cursor-pointer items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs',
+                          checked
+                            ? 'border-brand-300 bg-brand-50 text-brand-700'
+                            : 'border-slate-200 bg-white text-slate-600',
+                        )}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(event) => {
+                            setFrequencyExamIds((ids) =>
+                              event.target.checked
+                                ? [...ids, choice.id]
+                                : ids.filter((id) => id !== choice.id),
+                            )
+                          }}
+                          className="h-3.5 w-3.5 accent-blue-600"
+                        />
+                        <span>{choice.name}</span>
+                      </label>
+                    )
+                  })}
+                </div>
+              </div>
+              <MetricButtonGroup
+                options={frequencyMetricOptions}
+                value={frequencyMetric}
+                onChange={setFrequencyMetric}
+              />
+              {frequencyLoading ? (
+                <Skeleton className="h-64 w-full" />
+              ) : frequencyData && frequencyData.rows.length > 0 ? (
+                <RankFrequencyTable data={frequencyData} />
+              ) : (
+                <EmptyState
+                  icon={<Hash className="h-8 w-8 text-slate-400" />}
+                  title="暂无排名频次数据"
+                  desc="请至少选择一场考试，并确认该指标在已导入数据中存在。"
+                />
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="range">
+          <Card>
+            <CardHeader>
+              <CardTitle>排名区间筛选</CardTitle>
+              <CardDescription>
+                总分使用已有学籍/年级排名；单科使用年级百分位换算年级排名后筛选。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <RankScopeControls
+                rankClass={rankClass}
+                classes={rankClasses}
+                onClassChange={setRankClass}
+              />
+              <div className="grid gap-3 lg:grid-cols-[minmax(220px,360px)_1fr]">
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-slate-500">选择考试</label>
+                  <Select
+                    value={rangeExamId == null ? undefined : String(rangeExamId)}
+                    onValueChange={(value) => setRangeExamId(Number(value))}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="选择考试" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {examChoices.map((choice) => (
+                        <SelectItem key={choice.id} value={String(choice.id)}>
+                          {choice.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-slate-500">筛选年级排名</label>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="number"
+                      min={1}
+                      value={rangeMin}
+                      onChange={(event) => setRangeMin(Math.max(1, Number(event.target.value) || 1))}
+                      className="w-28"
+                    />
+                    <span className="text-sm text-slate-500">至</span>
+                    <Input
+                      type="number"
+                      min={1}
+                      value={rangeMax}
+                      onChange={(event) => setRangeMax(Math.max(1, Number(event.target.value) || 1))}
+                      className="w-28"
+                    />
+                  </div>
+                </div>
+              </div>
+              <MetricButtonGroup
+                options={rangeMetricOptions}
+                value={rangeMetric}
+                onChange={setRangeMetric}
+              />
+              {rangeLoading ? (
+                <Skeleton className="h-64 w-full" />
+              ) : rangeData && rangeData.rows.length > 0 ? (
+                <RankRangeTable data={rangeData} />
+              ) : (
+                <EmptyState
+                  icon={<Search className="h-8 w-8 text-slate-400" />}
+                  title="没有匹配学生"
+                  desc="换一个考试、指标或排名区间再试。"
+                />
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
       </Tabs>
     </div>
   )
@@ -1348,6 +1693,168 @@ function RankDistributionChart({
           ))}
         </BarChart>
       </ResponsiveContainer>
+    </div>
+  )
+}
+
+function RankScopeControls({
+  rankClass,
+  classes,
+  onClassChange,
+}: {
+  rankClass: number | null | undefined
+  classes: number[]
+  onClassChange: (value: number | null) => void
+}) {
+  return (
+    <div className="flex flex-wrap items-end gap-3">
+      <div className="space-y-1">
+        <label className="text-xs font-medium text-slate-500">统计范围</label>
+        <Select
+          value={rankClass == null ? 'all' : String(rankClass)}
+          onValueChange={(value) => onClassChange(value === 'all' ? null : Number(value))}
+        >
+          <SelectTrigger className="w-32">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全年级</SelectItem>
+            {classes.map((classNum) => (
+              <SelectItem key={classNum} value={String(classNum)}>
+                {classNum} 班
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
+  )
+}
+
+function MetricButtonGroup({
+  options,
+  value,
+  onChange,
+}: {
+  options: RankMetricOption[]
+  value: string
+  onChange: (value: string) => void
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="text-xs font-medium text-slate-500">选择指标</div>
+      <div className="flex flex-wrap gap-1.5">
+        {options.map((option) => (
+          <Button
+            key={option.value}
+            type="button"
+            size="sm"
+            variant={option.value === value ? 'default' : 'outline'}
+            className="h-8 px-2.5 text-xs"
+            onClick={() => onChange(option.value)}
+          >
+            {option.label}
+          </Button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function RankFrequencyTable({ data }: { data: RankFrequencyResponse }) {
+  const minWidth =
+    data.metric_kind === 'subject_grade_score' ? 'min-w-[1280px]' : 'min-w-[920px]'
+  return (
+    <div className="overflow-x-auto rounded-sm border border-slate-200 bg-white">
+      <table className={cn('w-full border-collapse text-center text-xs text-slate-900', minWidth)}>
+        <thead className="bg-slate-50 text-xs font-semibold text-slate-700">
+          <tr>
+            <th className="w-24 border-b border-slate-200 px-3 py-2 text-left">学生姓名</th>
+            <th className="w-28 border-b border-slate-200 px-3 py-2 text-left">学号</th>
+            {data.bins.map((bin) => (
+              <th
+                key={bin.key}
+                className={cn(
+                  'border-b border-slate-200 px-3 py-2',
+                  bin.separator_after && 'border-r-2 border-r-slate-900',
+                )}
+              >
+                {bin.label}
+              </th>
+            ))}
+            <th className="w-20 border-b border-slate-200 px-3 py-2">有效次数</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.rows.map((row, index) => (
+            <tr key={String(row.student_id)} className={index % 2 ? 'bg-slate-50/80' : 'bg-white'}>
+              <td className="border-b border-slate-100 px-3 py-2 text-left font-medium">
+                <Link href={`/student/${row.student_id}`} className="text-brand-600 hover:text-brand-700">
+                  {String(row.name || row.student_id)}
+                </Link>
+              </td>
+              <td className="border-b border-slate-100 px-3 py-2 text-left font-mono text-slate-500">
+                {String(row.student_id)}
+              </td>
+              {data.bins.map((bin) => (
+                <td
+                  key={bin.key}
+                  className={cn(
+                    'border-b border-slate-100 px-3 py-2 tabular-nums',
+                    bin.separator_after && 'border-r-2 border-r-slate-900',
+                  )}
+                >
+                  {Number(row[bin.key] || 0)}
+                </td>
+              ))}
+              <td className="border-b border-slate-100 px-3 py-2 font-medium tabular-nums">
+                {Number(row.total_count || 0)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function RankRangeTable({ data }: { data: RankRangeResponse }) {
+  return (
+    <div className="overflow-x-auto rounded-sm border border-slate-200 bg-white">
+      <table className="w-full min-w-[720px] border-collapse text-left text-sm text-slate-900">
+        <thead className="bg-slate-50 text-xs font-semibold text-slate-700">
+          <tr>
+            <th className="border-b border-slate-200 px-3 py-2">学号</th>
+            <th className="border-b border-slate-200 px-3 py-2">学生姓名</th>
+            <th className="border-b border-slate-200 px-3 py-2 text-right">分数</th>
+            <th className="border-b border-slate-200 px-3 py-2 text-right">班级排名</th>
+            <th className="border-b border-slate-200 px-3 py-2 text-right">年级排名</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.rows.map((row) => (
+            <tr key={row.student_id}>
+              <td className="border-b border-slate-100 px-3 py-2 font-mono text-xs text-slate-500">
+                {row.student_id}
+              </td>
+              <td className="border-b border-slate-100 px-3 py-2 font-medium">
+                <Link href={`/student/${row.student_id}`} className="text-brand-600 hover:text-brand-700">
+                  {row.name}
+                </Link>
+              </td>
+              <td className="border-b border-slate-100 px-3 py-2 text-right tabular-nums">
+                {formatTableNumber(row.score)}
+              </td>
+              <td className="border-b border-slate-100 px-3 py-2 text-right tabular-nums">
+                {formatInt(row.class_rank)}
+              </td>
+              <td className="border-b border-slate-100 px-3 py-2 text-right font-medium tabular-nums">
+                {formatInt(row.year_rank)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }

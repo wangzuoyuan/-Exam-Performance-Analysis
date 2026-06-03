@@ -28,9 +28,20 @@ def test_chat_config_reads_dotenv_file(tmp_path: Path, monkeypatch):
     assert config.is_configured
 
 
-def test_chat_config_env_vars_override_dotenv_file(tmp_path: Path, monkeypatch):
+def test_chat_config_dotenv_file_overrides_env_vars(tmp_path: Path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text("ANTHROPIC_API_KEY=file-key\nANTHROPIC_MODEL=file-model\n", encoding="utf-8")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "env-model")
+
+    config = get_chat_config(env_file)
+
+    assert config.api_key == "file-key"
+    assert config.model == "file-model"
+
+
+def test_chat_config_reads_env_vars_when_dotenv_missing(tmp_path: Path, monkeypatch):
+    env_file = tmp_path / ".env"
     monkeypatch.setenv("ANTHROPIC_API_KEY", "env-key")
     monkeypatch.setenv("ANTHROPIC_MODEL", "env-model")
 

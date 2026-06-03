@@ -13,6 +13,62 @@ class BandConfigPayload(BaseModel):
     weak_min: int
 
 
+@router.get("/rank-metrics")
+async def get_rank_metrics(grade: int, mode: str = "frequency"):
+    """返回指定年级在排名区间筛选/排名频次统计中可选的指标。"""
+    from app.analysis.rank_metrics import rank_metric_options
+
+    if mode not in {"range", "frequency"}:
+        raise HTTPException(400, "mode 只能是 range 或 frequency")
+    return {"grade": grade, "mode": mode, "metrics": rank_metric_options(grade, mode)}
+
+
+@router.get("/rank-range")
+async def get_rank_range(
+    exam_id: int,
+    metric: str,
+    rank_min: int = 1,
+    rank_max: int = 100,
+    class_num: Optional[int] = None,
+):
+    """按单次考试、指标和年级排名区间筛选学生。"""
+    from app.analysis.rank_metrics import rank_range_filter
+
+    try:
+        return rank_range_filter(
+            exam_id=exam_id,
+            metric=metric,
+            rank_min=rank_min,
+            rank_max=rank_max,
+            class_num=class_num,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.get("/rank-frequency")
+async def get_rank_frequency(
+    grade: int,
+    metric: str,
+    exam_ids: Optional[str] = None,
+    class_num: Optional[int] = None,
+    recent_count: int = 5,
+):
+    """按多场考试统计学生落入各排名/百分位/等级分区间的频次。"""
+    from app.analysis.rank_metrics import rank_frequency_stats
+
+    try:
+        return rank_frequency_stats(
+            grade=grade,
+            metric=metric,
+            exam_ids=exam_ids,
+            class_num=class_num,
+            recent_count=recent_count,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
 @router.get("/analysis-config")
 async def get_analysis_config():
     """返回当前重点关注段位阈值（供前端展示/编辑）。"""

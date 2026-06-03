@@ -6,16 +6,59 @@ from app.ingest.excel_parser import parse_excel_grade23
 from app.ingest.excel_parser import parse_excel_grade1_student_scores
 
 
-def test_parse_grade23_sample_totals():
-    sample = (
-        Path(__file__).resolve().parents[3]
-        / "高二成绩"
-        / "高二2025学年第二学期期中考试学生成绩明细表.xlsx"
-    )
+def make_grade23_student_workbook(path: Path):
+    workbook = Workbook()
+    ws = workbook.active
+    ws.title = "学生成绩明细"
+    ws.cell(2, 1, "学号")
+    ws.cell(2, 2, "班级")
+    ws.cell(2, 3, "学籍")
+    ws.cell(2, 4, "姓名")
+    ws.cell(2, 20, "+3总分")
+    ws.cell(2, 21, "主三门")
+    ws.cell(2, 24, "3+3总分")
+
+    # 高二/高三学生成绩表是固定列位解析：5-7 为语数英原始分，
+    # 8-19 为选考科目原始/等级分，20-26 为总分/百分位/排名，27-29 为语数英百分位。
+    ws.append([])
+    ws.append([
+        "7240101", "01", "1", "卞幻",
+        97, 108, 120,
+        48, 52,
+        50, 55,
+        None, None,
+        None, None,
+        None, None,
+        None, None,
+        174,
+        325.5, "25.08%", 283,
+        499.5, "30.01%", 291,
+        "75.08%", "40.12%", "35.45%",
+    ])
+    ws.append([
+        "7240102", "01", "1", "学生乙",
+        90, 100, 110,
+        None, None,
+        45, 50,
+        None, None,
+        None, None,
+        None, None,
+        None, None,
+        95,
+        300, "40.00%", 350,
+        395, "45.00%", 420,
+        "60.00%", "55.00%", "50.00%",
+    ])
+    workbook.save(path)
+
+
+def test_parse_grade23_sample_totals(tmp_path):
+    sample = tmp_path / "高二2025学年第二学期期中考试学生成绩明细表.xlsx"
+    make_grade23_student_workbook(sample)
     result = parse_excel_grade23(str(sample), grade=2)
 
     assert result["kind"] == "student_scores"
-    assert len(result["students"]) > 700
+    assert len(result["students"]) == 2
 
     totals = {
         row["total_type"]: row
@@ -28,12 +71,9 @@ def test_parse_grade23_sample_totals():
     assert totals["3+3"]["xueji_rank"] == 291
 
 
-def test_parse_grade23_sample_subjects():
-    sample = (
-        Path(__file__).resolve().parents[3]
-        / "高二成绩"
-        / "高二2025学年第二学期期中考试学生成绩明细表.xlsx"
-    )
+def test_parse_grade23_sample_subjects(tmp_path):
+    sample = tmp_path / "高二2025学年第二学期期中考试学生成绩明细表.xlsx"
+    make_grade23_student_workbook(sample)
     result = parse_excel_grade23(str(sample), grade=2)
 
     subjects = {

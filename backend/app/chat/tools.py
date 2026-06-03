@@ -818,6 +818,156 @@ def band_trend(grade: int, class_num: Optional[int] = None) -> dict[str, Any]:
         db.close()
 
 
+def custom_rank_band_trend(
+    grade: int,
+    rank_max: int,
+    rank_min: int = 1,
+    total_type: str = "主三门",
+    class_num: Optional[int] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> dict[str, Any]:
+    """按用户临时指定的排名区间统计历次考试人数变化。"""
+    from datetime import date
+
+    from app.db.models import Exam, SubjectScore, TotalScore, get_db
+
+    def normalize_date(value: Optional[str], *, end: bool = False) -> Optional[date]:
+        if not value:
+            return None
+        text = str(value).strip()
+        try:
+            if len(text) == 4 and text.isdigit():
+                return date(int(text), 12 if end else 1, 31 if end else 1)
+            if len(text) == 7:
+                year, month = [int(part) for part in text.split("-")]
+                if end:
+                    next_month = date(year + (month // 12), (month % 12) + 1, 1)
+                    return date.fromordinal(next_month.toordinal() - 1)
+                return date(year, month, 1)
+            return date.fromisoformat(text[:10])
+        except Exception:
+            return None
+
+    rank_min = max(1, int(rank_min or 1))
+    rank_max = int(rank_max)
+    if rank_max < rank_min:
+        return {
+            "error": "rank_max 不能小于 rank_min",
+            "grade": grade,
+            "rank_min": rank_min,
+            "rank_max": rank_max,
+            "series": [],
+        }
+
+    start = normalize_date(start_date)
+    end = normalize_date(end_date, end=True)
+
+    db = next(get_db())
+    try:
+        exams = (
+            db.query(Exam)
+            .filter(Exam.grade == grade)
+            .order_by(Exam.exam_date, Exam.id)
+            .all()
+        )
+        series = []
+        for exam in exams:
+            exam_date = normalize_date(exam.exam_date)
+            if start and exam_date and exam_date < start:
+                continue
+            if end and exam_date and exam_date > end:
+                continue
+
+            allowed = None
+            if class_num is not None:
+                sid_rows = (
+                    db.query(SubjectScore.student_id)
+                    .filter(SubjectScore.exam_id == exam.id, SubjectScore.class_num == class_num)
+                    .distinct()
+                    .all()
+                )
+                allowed = {row[0] for row in sid_rows}
+
+            totals = (
+                db.query(TotalScore)
+                .filter(TotalScore.exam_id == exam.id, TotalScore.total_type == total_type)
+                .all()
+            )
+            ranks = []
+            for total in totals:
+                if allowed is not None and total.student_id not in allowed:
+                    continue
+                rank = total.xueji_rank or total.grade_rank
+                if rank is not None:
+                    ranks.append(rank)
+
+            count = sum(1 for rank in ranks if rank_min <= rank <= rank_max)
+            series.append(
+                {
+                    "exam_id": exam.id,
+                    "exam_name": exam.name,
+                    "exam_date": exam.exam_date,
+                    "count": count,
+                    "ranked_count": len(ranks),
+                    "rank_min_observed": min(ranks) if ranks else None,
+                    "rank_max_observed": max(ranks) if ranks else None,
+                }
+            )
+
+        return {
+            "grade": grade,
+            "class_num": class_num,
+            "total_type": total_type,
+            "rank_min": rank_min,
+            "rank_max": rank_max,
+            "start_date": start_date,
+            "end_date": end_date,
+            "metric_note": "count 为该次考试中排名落在 rank_min 到 rank_max 内的人数；排名优先用 xueji_rank，无学籍排名时用 grade_rank。",
+            "series": series,
+        }
+    finally:
+        db.close()
+
+
+def rank_range_filter_tool(
+    exam_id: int,
+    metric: str,
+    rank_min: int = 1,
+    rank_max: int = 100,
+    class_num: Optional[int] = None,
+) -> dict[str, Any]:
+    """单次考试按指标和年级排名区间筛选学生。"""
+    from app.analysis.rank_metrics import rank_range_filter
+
+    return rank_range_filter(
+        exam_id=exam_id,
+        metric=metric,
+        rank_min=rank_min,
+        rank_max=rank_max,
+        class_num=class_num,
+    )
+
+
+def rank_frequency_stat_tool(
+    grade: int,
+    metric: str,
+    exam_ids: Optional[list[int]] = None,
+    class_num: Optional[int] = None,
+    recent_count: int = 5,
+) -> dict[str, Any]:
+    """多场考试按排名/百分位/精确等级分统计学生频次。"""
+    from app.analysis.rank_metrics import rank_frequency_stats
+
+    return rank_frequency_stats(
+        grade=grade,
+        metric=metric,
+        exam_ids=exam_ids,
+        class_num=class_num,
+        recent_count=recent_count,
+    )
+
+
 TOOL_FUNCTIONS = {
     "list_exams": list_exams,
     "student_lookup": student_lookup,
@@ -831,6 +981,9 @@ TOOL_FUNCTIONS = {
     "subject_progress_ranking": subject_progress_ranking,
     "multi_exam_progress_ranking": multi_exam_progress_ranking,
     "band_trend": band_trend,
+    "custom_rank_band_trend": custom_rank_band_trend,
+    "rank_range_filter": rank_range_filter_tool,
+    "rank_frequency_stat": rank_frequency_stat_tool,
 }
 
 
@@ -1015,6 +1168,53 @@ TOOLS = [
                 "class_num": {"type": "integer", "description": "只看某个班；不填表示全年级"},
             },
             "required": ["grade"],
+        },
+    },
+    {
+        "name": "custom_rank_band_trend",
+        "description": "按用户临时指定的排名阈值或排名区间统计历次考试人数变化。适合回答“350名以内人数如何变化”“前200名有多少人”“300-450名之间人数趋势”等，不受高分段/临界段/薄弱段固定配置限制。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "grade": {"type": "integer", "description": "年级(1=高一,2=高二,3=高三)"},
+                "rank_min": {"type": "integer", "description": "排名区间下界，默认1；例如前350名传1"},
+                "rank_max": {"type": "integer", "description": "排名区间上界；例如350名以内传350"},
+                "total_type": {"type": "string", "description": "总分类型，默认主三门；可传主三门、五门、九门、3+3等"},
+                "class_num": {"type": "integer", "description": "只看某个班；不填表示全年级"},
+                "start_date": {"type": "string", "description": "起始日期，可传YYYY、YYYY-MM或YYYY-MM-DD；例如2026年以来传2026"},
+                "end_date": {"type": "string", "description": "结束日期，可传YYYY、YYYY-MM或YYYY-MM-DD"},
+            },
+            "required": ["grade", "rank_max"],
+        },
+    },
+    {
+        "name": "rank_range_filter",
+        "description": "按单次考试、指标和年级排名区间筛选学生。适合回答“这次考试数学年级前100有哪些人”“主三门排名300到350有哪些学生”。高一可查9门单科、主三门、五门；高二/高三可查语数英单科、主三门、3+3。metric格式如 subject:数学 或 total:主三门。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "exam_id": {"type": "integer", "description": "考试ID"},
+                "metric": {"type": "string", "description": "指标，格式如 subject:语文、total:主三门、total:五门、total:3+3"},
+                "rank_min": {"type": "integer", "description": "年级排名下界，默认1"},
+                "rank_max": {"type": "integer", "description": "年级排名上界，默认100"},
+                "class_num": {"type": "integer", "description": "只看某个班；不填表示全年级"},
+            },
+            "required": ["exam_id", "metric"],
+        },
+    },
+    {
+        "name": "rank_frequency_stat",
+        "description": "统计多场考试里每名学生落入各排名区间/百分位区间/精确等级分的次数。适合回答“最近5次主三门排名频次”“语文前20%次数”“物理等级分频次”。高一9门单科按百分位，主三门/五门按40名一档；高二/高三语数英按百分位，+3选科用 subject_grade:物理 这类等级分指标，并按70、67、64、61、58、55、52、49、46、43、40精确等级分统计，主三门/3+3按40名一档。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "grade": {"type": "integer", "description": "年级(1=高一,2=高二,3=高三)"},
+                "metric": {"type": "string", "description": "指标，格式如 subject:语文、subject_grade:物理、total:主三门、total:五门、total:3+3"},
+                "exam_ids": {"type": "array", "items": {"type": "integer"}, "description": "参与统计的考试ID；不填则取最近 recent_count 次"},
+                "class_num": {"type": "integer", "description": "只看某个班；不填表示全年级"},
+                "recent_count": {"type": "integer", "description": "未指定考试ID时取最近几次，默认5"},
+            },
+            "required": ["grade", "metric"],
         },
     },
 ]

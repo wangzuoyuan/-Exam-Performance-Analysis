@@ -136,6 +136,70 @@ def test_subject_weakness(client):
     assert response.status_code == 200
     assert "subject_weakness" in response.json()
 
+
+def test_rank_metrics_options(client):
+    response = client.get("/api/rank-metrics?grade=1&mode=frequency")
+    assert response.status_code == 200
+    data = response.json()
+    assert "metrics" in data
+    assert any(item["value"] == "subject:语文" for item in data["metrics"])
+    assert any(item["value"] == "total:主三门" for item in data["metrics"])
+
+
+def test_rank_range_endpoint(client):
+    from app.db.models import SessionLocal, TotalScore
+
+    db = SessionLocal()
+    row = db.query(TotalScore).filter(TotalScore.total_type == "主三门").first()
+    db.close()
+    if row is None:
+        pytest.skip("no total scores in local tracker database")
+
+    response = client.get(
+        f"/api/rank-range?exam_id={row.exam_id}&metric=total:主三门&rank_min=1&rank_max=9999"
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert {"metric", "metric_label", "rows"} <= set(data)
+
+
+def test_rank_frequency_endpoint(client):
+    from app.db.models import SessionLocal, Exam
+
+    db = SessionLocal()
+    exam = db.query(Exam).first()
+    db.close()
+    if exam is None:
+        pytest.skip("no exams in local tracker database")
+
+    response = client.get(f"/api/rank-frequency?grade={exam.grade}&metric=total:主三门&recent_count=2")
+    assert response.status_code == 200
+    data = response.json()
+    assert {"bins", "rows", "exams"} <= set(data)
+
+
+def test_grade_score_frequency_bins_are_exact_scores():
+    """高二/高三+3等级分频次按精确等级分统计，不按分数段归并。"""
+    from app.analysis.rank_metrics import GRADE_SCORE_BINS, _grade_score_bin
+
+    assert [label for _key, label, _score, _separator in GRADE_SCORE_BINS] == [
+        "70分",
+        "67分",
+        "64分",
+        "61分",
+        "58分",
+        "55分",
+        "52分",
+        "49分",
+        "46分",
+        "43分",
+        "40分",
+    ]
+    assert [score for _key, _label, score, separator in GRADE_SCORE_BINS if separator] == [67, 58, 49, 43]
+    assert _grade_score_bin(67) == "g67"
+    assert _grade_score_bin(66) is None
+
+
 def test_ingest_uploads_get(client):
     """Step 6: 上传列表"""
     response = client.get("/api/uploads")
