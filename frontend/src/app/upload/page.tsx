@@ -66,6 +66,39 @@ const KIND_LABEL: Record<string, string> = {
   unknown: '未识别',
 }
 
+// 上传确认时可编辑的单文件元数据
+interface PreviewItem {
+  token: string
+  filename: string
+  grade: number
+  semester: '上' | '下'
+  exam_type: string
+  year: number | null
+  month: number | null
+  canonical_name?: string | null
+  is_xlsx?: boolean
+}
+
+const GRADE_OPTS = [
+  { v: 1, l: '高一' },
+  { v: 2, l: '高二' },
+  { v: 3, l: '高三' },
+]
+const SEMESTER_OPTS: Array<{ v: '上' | '下'; l: string }> = [
+  { v: '上', l: '第一学期' },
+  { v: '下', l: '第二学期' },
+]
+const EXAM_TYPE_OPTS = ['月考', '期中', '期末', '一模', '二模', '三模']
+
+function yearOptions(): number[] {
+  const base = new Date().getFullYear()
+  // 覆盖前两年到后一年，足够覆盖跨学年录入
+  return Array.from({ length: 6 }, (_, i) => base - 2 + i)
+}
+function monthOptions(): number[] {
+  return Array.from({ length: 12 }, (_, i) => i + 1)
+}
+
 function classOptions() {
   return Array.from({ length: 20 }, (_, i) => i + 1)
 }
@@ -181,6 +214,11 @@ export default function UploadPage() {
   const [detectedGrade, setDetectedGrade] = useState<number | null>(null)
   const [resultOpen, setResultOpen] = useState(false)
 
+  // 上传确认（逐文件可编辑年级/年月）
+  const [previewItems, setPreviewItems] = useState<PreviewItem[]>([])
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [committing, setCommitting] = useState(false)
+
   // 拉取已绑定状态
   useEffect(() => {
     let aborted = false
@@ -283,7 +321,8 @@ export default function UploadPage() {
     setFiles((prev) => prev.filter((_, i) => i !== idx))
   }
 
-  async function handleUpload() {
+  // 阶段一：上传并取回每个文件的自动识别建议，弹出确认表单
+  async function handlePreview() {
     if (files.length === 0) return
     setUploading(true)
     setUploadError(null)
@@ -292,9 +331,59 @@ export default function UploadPage() {
     files.forEach((f) => formData.append('files', f))
 
     try {
-      const res = await fetch('/api/uploads', { method: 'POST', body: formData })
+      const res = await fetch('/api/uploads/preview', { method: 'POST', body: formData })
       if (!res.ok) {
-        throw new Error(`上传失败（HTTP ${res.status}）`)
+        throw new Error(`识别失败（HTTP ${res.status}）`)
+      }
+      const data: { files?: PreviewItem[] } = await res.json()
+      const thisYear = new Date().getFullYear()
+      const items: PreviewItem[] = (data.files || []).map((it) => ({
+        token: it.token,
+        filename: it.filename,
+        grade: it.grade ?? 1,
+        semester: it.semester === '下' ? '下' : '上',
+        exam_type: it.exam_type ?? '月考',
+        year: it.year ?? thisYear,
+        month: it.month ?? 9,
+        canonical_name: it.canonical_name,
+        is_xlsx: it.is_xlsx,
+      }))
+      setPreviewItems(items)
+      setConfirmOpen(true)
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : '识别过程中发生未知错误')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  function updateItem(idx: number, patch: Partial<PreviewItem>) {
+    setPreviewItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)))
+  }
+
+  // 阶段二：按确认后的元数据正式入库
+  async function handleCommit() {
+    if (previewItems.length === 0) return
+    setCommitting(true)
+    setUploadError(null)
+
+    try {
+      const res = await fetch('/api/uploads/commit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          items: previewItems.map((it) => ({
+            token: it.token,
+            grade: it.grade,
+            semester: it.semester,
+            exam_type: it.exam_type,
+            year: it.year,
+            month: it.month,
+          })),
+        }),
+      })
+      if (!res.ok) {
+        throw new Error(`入库失败（HTTP ${res.status}）`)
       }
       const data: UploadResponse = await res.json()
       setResults(data.results || [])
@@ -302,11 +391,13 @@ export default function UploadPage() {
       setDetectedGrade(data.detected_grade ?? null)
       setCompleted((c) => ({ ...c, file: true, done: true }))
       setStep('done')
+      setConfirmOpen(false)
       setResultOpen(true)
+      setFiles([])
     } catch (err) {
-      setUploadError(err instanceof Error ? err.message : '上传过程中发生未知错误')
+      setUploadError(err instanceof Error ? err.message : '入库过程中发生未知错误')
     } finally {
-      setUploading(false)
+      setCommitting(false)
     }
   }
 
@@ -509,7 +600,7 @@ export default function UploadPage() {
             <div className="space-y-2">
               <div className="flex items-center gap-2 text-sm text-slate-600">
                 <Loader2 className="h-4 w-4 animate-spin text-brand-600" />
-                正在上传并解析…
+                正在识别考试信息…
               </div>
               {/* 后端不返回进度，使用不定值动画 */}
               <Progress value={66} className="animate-pulse" />
@@ -533,22 +624,174 @@ export default function UploadPage() {
             >
               清空
             </Button>
-            <Button onClick={handleUpload} disabled={files.length === 0 || uploading}>
+            <Button onClick={handlePreview} disabled={files.length === 0 || uploading}>
               {uploading ? (
                 <>
                   <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                  上传中
+                  识别中
                 </>
               ) : (
                 <>
                   <UploadCloud className="mr-1 h-4 w-4" />
-                  开始上传
+                  下一步：确认考试信息
                 </>
               )}
             </Button>
           </div>
         </CardContent>
       </Card>
+
+      {/* Step 3a: 确认考试信息（逐文件可编辑年级/年月） */}
+      <Dialog open={confirmOpen} onOpenChange={(o) => !committing && setConfirmOpen(o)}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>确认考试信息</DialogTitle>
+            <DialogDescription>
+              下方是按文件名的自动识别结果，请核对「年级」和「考试年月」（决定排序）后再入库。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
+            {previewItems.map((it, i) => (
+              <Card key={`${it.token}-${i}`} className="border-slate-200">
+                <CardContent className="space-y-3 py-3">
+                  <div className="flex items-center gap-2">
+                    <FileSpreadsheet className="h-4 w-4 shrink-0 text-brand-600" />
+                    <span className="truncate text-sm font-medium text-slate-800">
+                      {it.filename}
+                    </span>
+                    {it.is_xlsx === false && (
+                      <Badge variant="destructive">非 .xlsx，无法解析</Badge>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                    <div className="space-y-1">
+                      <label className="text-xs text-slate-500">年级</label>
+                      <Select
+                        value={String(it.grade)}
+                        onValueChange={(v) => updateItem(i, { grade: Number(v) })}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {GRADE_OPTS.map((o) => (
+                            <SelectItem key={o.v} value={String(o.v)}>
+                              {o.l}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-slate-500">学期</label>
+                      <Select
+                        value={it.semester}
+                        onValueChange={(v) => updateItem(i, { semester: v as '上' | '下' })}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {SEMESTER_OPTS.map((o) => (
+                            <SelectItem key={o.v} value={o.v}>
+                              {o.l}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-slate-500">类型</label>
+                      <Select
+                        value={it.exam_type}
+                        onValueChange={(v) => updateItem(i, { exam_type: v })}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {EXAM_TYPE_OPTS.map((o) => (
+                            <SelectItem key={o} value={o}>
+                              {o}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-slate-500">年份</label>
+                      <Select
+                        value={it.year != null ? String(it.year) : ''}
+                        onValueChange={(v) => updateItem(i, { year: Number(v) })}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="年" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {yearOptions().map((y) => (
+                            <SelectItem key={y} value={String(y)}>
+                              {y} 年
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-slate-500">月份</label>
+                      <Select
+                        value={it.month != null ? String(it.month) : ''}
+                        onValueChange={(v) => updateItem(i, { month: Number(v) })}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="月" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {monthOptions().map((m) => (
+                            <SelectItem key={m} value={String(m)}>
+                              {m} 月
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+            {previewItems.length === 0 && (
+              <div className="rounded-md border border-dashed border-slate-300 px-4 py-6 text-center text-sm text-slate-500">
+                没有可确认的文件
+              </div>
+            )}
+          </div>
+
+          {uploadError && (
+            <Card className="border-danger-500 bg-danger-50">
+              <CardContent className="flex items-start gap-2 py-3">
+                <AlertTriangle className="mt-0.5 h-4 w-4 text-danger-500" />
+                <div className="text-sm text-danger-500">{uploadError}</div>
+              </CardContent>
+            </Card>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmOpen(false)} disabled={committing}>
+              取消
+            </Button>
+            <Button onClick={handleCommit} disabled={committing || previewItems.length === 0}>
+              {committing ? (
+                <>
+                  <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                  入库中
+                </>
+              ) : (
+                '确认入库'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Step 3: 解析结果对话框 */}
       <Dialog open={resultOpen} onOpenChange={setResultOpen}>

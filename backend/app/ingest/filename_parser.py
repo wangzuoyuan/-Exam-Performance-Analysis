@@ -122,3 +122,13 @@ def canonical_exam_name(exam_type: str, grade: int, semester: str) -> str:
     sem_str = SEMESTER_LABELS.get(semester if semester in ("上", "下") else "下", "第二学期")
     suffix = "考试" if exam_type in {"期中", "期末", "一模", "二模", "三模"} else ""
     return f"{grade_str}{sem_str}{exam_type}{suffix}"
+
+
+def build_exam_name(grade: int, semester: str, exam_type: str, month: int | None = None) -> str:
+    """按用户手动指定的年级/学期/考试类型/月份生成规范考试名。
+    月考需带月份，避免同一学期多次月考被合并（与 parse_filename 中的逻辑一致）。"""
+    grade_str = GRADE_LABELS.get(grade, "未知年级")
+    sem_str = SEMESTER_LABELS.get(semester if semester in ("上", "下") else "下", "第二学期")
+    month_str = f"{int(month)}月" if exam_type == "月考" and month else ""
+    suffix = "考试" if exam_type in {"期中", "期末", "一模", "二模", "三模"} else ""
+    return f"{grade_str}{sem_str}{month_str}{exam_type}{suffix}"
