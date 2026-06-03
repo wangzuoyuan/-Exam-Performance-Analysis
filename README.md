@@ -6,9 +6,11 @@
 
 ## 功能特性
 
-- **Excel 批量导入**：支持学生成绩明细表和班级均分表，自动从文件名识别年级、学期、考试类型和排序月份。
+- **Excel 批量导入**：支持学生成绩明细表和班级均分表，自动从文件名识别年级、学期、考试类型和排序月份；上传时可逐文件确认并修正年级与考试年月，避免文件名识别错误。
 - **高一 / 高二高三双口径**：高一支持主三门、五门、九门；高二高三支持主三门、+3、3+3 和选考等级分。
 - **考试详情页**：展示班级均分、学生成绩明细、名次段分布、重点关注名单。
+- **可自定义关注段位**：高分段 / 临界段 / 薄弱段的排名区间可自行调整，页面图表、历次趋势和 AI 问答口径同步生效。
+- **历次段位趋势**：在考试详情页查看本班（或指定班级 / 全年级）三段人数随历次考试的变化趋势折线图。
 - **学生画像页**：展示跨学年主三门趋势、五门趋势、+3 / 3+3 趋势、单科历史和历次考试明细。
 - **班级对比页**：按总分或单科均分做多班横向对比，并高亮当前班级。
 - **AI 对话助手**：支持 Anthropic Messages API 和 OpenAI Chat Completions 兼容接口，使用只读工具查询本地成绩数据后回答。
@@ -108,7 +110,7 @@ python3 run.py init
 | 仪表盘 | `/` | 最近考试一览、班级动态、重点关注速览 |
 | 数据上传 | `/upload` | 绑定班级、上传 Excel、查看解析结果 |
 | 考试列表 | `/exam` | 已建档考试列表、搜索、删除误传考试 |
-| 考试详情 | `/exam/[id]` | 班级均分表、学生成绩明细、名次段分布、重点关注 |
+| 考试详情 | `/exam/[id]` | 班级均分表、学生成绩明细、名次段分布（可自定义段位 + 历次趋势）、重点关注 |
 | 学生检索 | `/student` | 按姓名或学号查找学生画像 |
 | 学生详情 | `/student/[id]` | 跨学年趋势、单科变化、历次考试明细 |
 | 班级对比 | `/compare` | 多班总分 / 单科均分横向对比 |
@@ -155,6 +157,7 @@ SQLite 数据库位于 `~/.exam-tracker/db.sqlite`。
 | `subject_score` | 学科成绩长表：每生 × 每考 × 每科 |
 | `total_score` | 总分表：主三门、五门、九门、+3、3+3 |
 | `class_average` | 班级均分表：各科均分和各类总分均分 |
+| `analysis_config` | 重点关注段位阈值（高分段 / 临界段 / 薄弱段排名区间，全局单行） |
 
 ## Excel 口径
 
@@ -183,7 +186,9 @@ SQLite 数据库位于 `~/.exam-tracker/db.sqlite`。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/uploads` | 上传 Excel 并解析入库 |
+| POST | `/api/uploads/preview` | 上传 Excel 并返回可编辑的识别结果（年级 / 学期 / 类型 / 年月），不入库 |
+| POST | `/api/uploads/commit` | 按确认后的元数据正式解析入库 |
+| POST | `/api/uploads` | 旧版一步式上传（按文件名自动识别后直接入库，保留兼容） |
 | GET | `/api/uploads` | 查看最近上传记录 |
 
 ### 分析
@@ -197,13 +202,15 @@ SQLite 数据库位于 `~/.exam-tracker/db.sqlite`。
 | GET | `/api/students/{id}` | 学生跨学年画像 |
 | GET | `/api/class/compare` | 班级横向对比，支持 `?exam_id=` |
 | GET | `/api/subject-weakness/{id}` | 单科薄弱名单，支持 `?class_num=` |
+| GET | `/api/analysis-config` | 获取重点关注段位阈值 |
+| PUT | `/api/analysis-config` | 保存自定义段位阈值（高分段 / 临界段 / 薄弱段） |
+| GET | `/api/band-trend` | 某年级历次考试三段人数趋势，支持 `?grade=`、`?class_num=` |
 
 ### 对话
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/chat` | SSE 流式对话 |
-| GET | `/api/chat/config` | 返回当前对话模型配置，不暴露 Key |
 
 ## AI 对话助手
 
@@ -229,6 +236,8 @@ OPENAI_MODEL=gpt-4o-mini
 
 两种模式共用同一套只读工具。
 
+说明：`backend/.env` 中的非空配置优先于同名环境变量，避免外部 shell 注入的空 `ANTHROPIC_API_KEY` 等变量覆盖本地配置。若对话助手提示「未设置有效的 API Key」，请先确认 `backend/.env` 已正确填写。
+
 ### 当前工具集
 
 | Tool | 主要参数 | 用途 |
@@ -244,6 +253,8 @@ OPENAI_MODEL=gpt-4o-mini
 | `subject_weakness` | `class_num`, `exam_id` | 本班单科薄弱清单 |
 | `subject_progress_ranking` | `grade`, `subject`, `start_exam_id?`, `end_exam_id?` | 单科进步 / 退步排行榜 |
 | `multi_exam_progress_ranking` | `grade`, `metrics?`, `recent_count?`, `exam_ids?`, `direction?` | 最近 N 次或指定多场考试的单科 / 总分趋势排行 |
+| `band_trend` | `grade`, `class_num?` | 历次考试高分段 / 临界段 / 薄弱段人数趋势（口径随自定义阈值变化） |
+| `custom_rank_band_trend` | `grade`, `rank_max`, `rank_min?`, `total_type?`, `class_num?`, `start_date?`, `end_date?` | 按临时指定的排名区间统计历次人数变化（如“前 350 名人数怎么变”） |
 
 示例问题：
 
@@ -251,6 +262,7 @@ OPENAI_MODEL=gpt-4o-mini
 - `最近5次高一主三门和五门趋势最好的是谁？至少有3次成绩才算。`
 - `高二语文退步最大的前10名是谁？`
 - `这个学生整体情况怎么样？`
+- `高一6班临界段人数最近几次考试是怎么变化的？`
 
 ## 开发命令
 
