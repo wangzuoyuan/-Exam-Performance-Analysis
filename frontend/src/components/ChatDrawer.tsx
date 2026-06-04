@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useRef, KeyboardEvent } from 'react'
+import { useEffect, useState, useRef, KeyboardEvent, PointerEvent } from 'react'
 import { Bot, Send } from 'lucide-react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -21,6 +21,24 @@ interface Message {
   role: 'user' | 'assistant'
   content: string
   tool_calls?: any[]
+}
+
+const DEFAULT_DRAWER_WIDTH = 520
+const MIN_DRAWER_WIDTH = 360
+const MAX_DRAWER_WIDTH = 960
+const PAGE_GUTTER = 96
+
+function clampDrawerWidth(width: number) {
+  if (typeof window === 'undefined') return width
+
+  if (window.innerWidth < 640) return window.innerWidth
+
+  const maxWidth = Math.max(
+    MIN_DRAWER_WIDTH,
+    Math.min(MAX_DRAWER_WIDTH, window.innerWidth - PAGE_GUTTER)
+  )
+  const minWidth = Math.min(MIN_DRAWER_WIDTH, maxWidth)
+  return Math.min(Math.max(width, minWidth), maxWidth)
 }
 
 function visibleAssistantContent(content: string) {
@@ -119,7 +137,10 @@ export default function ChatDrawer() {
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [currentText, setCurrentText] = useState('')
+  const [drawerWidth, setDrawerWidth] = useState(DEFAULT_DRAWER_WIDTH)
+  const [isResizing, setIsResizing] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const resizeCleanupRef = useRef<(() => void) | null>(null)
 
   useEffect(() => {
     const handler = () => setOpen(true)
@@ -130,6 +151,50 @@ export default function ChatDrawer() {
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, currentText])
+
+  useEffect(() => {
+    const handleResize = () => setDrawerWidth(width => clampDrawerWidth(width))
+    handleResize()
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
+
+  useEffect(() => {
+    return () => resizeCleanupRef.current?.()
+  }, [])
+
+  const startResize = (event: PointerEvent<HTMLButtonElement>) => {
+    if (typeof window === 'undefined' || window.innerWidth < 640) return
+
+    event.preventDefault()
+    resizeCleanupRef.current?.()
+
+    const startX = event.clientX
+    const startWidth = drawerWidth
+    const previousCursor = document.body.style.cursor
+    const previousUserSelect = document.body.style.userSelect
+
+    setIsResizing(true)
+    document.body.style.cursor = 'ew-resize'
+    document.body.style.userSelect = 'none'
+
+    const handlePointerMove = (moveEvent: globalThis.PointerEvent) => {
+      setDrawerWidth(clampDrawerWidth(startWidth + startX - moveEvent.clientX))
+    }
+
+    const cleanup = () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', cleanup)
+      document.body.style.cursor = previousCursor
+      document.body.style.userSelect = previousUserSelect
+      setIsResizing(false)
+      resizeCleanupRef.current = null
+    }
+
+    resizeCleanupRef.current = cleanup
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', cleanup, { once: true })
+  }
 
   const sendMessage = async () => {
     if (!input.trim() || streaming) return
@@ -223,10 +288,10 @@ export default function ChatDrawer() {
         )}
         <div
           className={cn(
-            'max-w-[80%] break-words px-3 py-2 text-sm leading-relaxed shadow-sm',
+            'min-w-0 break-words px-3 py-2 text-sm leading-relaxed shadow-sm',
             isUser
-              ? 'whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-brand-600 text-white'
-              : 'rounded-2xl rounded-tl-sm bg-slate-100 text-slate-900'
+              ? 'max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-brand-600 text-white'
+              : 'max-w-[calc(100%-2.5rem)] flex-1 rounded-2xl rounded-tl-sm bg-slate-100 text-slate-900'
           )}
         >
           {isUser ? (
@@ -252,8 +317,26 @@ export default function ChatDrawer() {
     <Sheet open={open} onOpenChange={setOpen}>
       <SheetContent
         side="right"
-        className="flex w-full flex-col gap-0 p-0 sm:max-w-md"
+        className="flex w-full max-w-none flex-col gap-0 p-0 sm:max-w-none"
+        style={{ width: `min(100vw, ${drawerWidth}px)`, maxWidth: '100vw' }}
       >
+        <button
+          type="button"
+          aria-label="调整对话助手宽度"
+          onPointerDown={startResize}
+          className={cn(
+            'group absolute left-0 top-0 z-50 hidden h-full w-4 -translate-x-1/2 cursor-ew-resize items-center justify-center sm:flex',
+            'focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-0',
+            isResizing && 'bg-brand-500/10'
+          )}
+        >
+          <span
+            className={cn(
+              'h-14 w-1 rounded-full bg-slate-300 transition-colors group-hover:bg-brand-500',
+              isResizing && 'bg-brand-600'
+            )}
+          />
+        </button>
         <SheetHeader className="border-b border-slate-200 px-5 py-4 text-left">
           <SheetTitle className="text-base font-semibold text-slate-900">
             AI 对话助手
