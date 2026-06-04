@@ -296,6 +296,18 @@ function formatTableNumber(n: number | null | undefined): string {
     .replace(/(\.\d)0$/, '$1')
 }
 
+function compareStudentId(
+  a: string | number | null | undefined,
+  b: string | number | null | undefined,
+) {
+  const av = a == null ? '' : String(a)
+  const bv = b == null ? '' : String(b)
+  if (!av && !bv) return 0
+  if (!av) return 1
+  if (!bv) return -1
+  return av.localeCompare(bv, undefined, { numeric: true })
+}
+
 function formatInt(n: number | null | undefined): string {
   if (n === null || n === undefined || Number.isNaN(n)) return '—'
   return String(Math.round(Number(n)))
@@ -1042,6 +1054,8 @@ export default function ExamDetailPage() {
         if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir
         return String(av).localeCompare(String(bv)) * dir
       })
+    } else {
+      list = list.slice().sort((a, b) => compareStudentId(a.student_id, b.student_id))
     }
     return list
   }, [students, studentQuery, studentSortKey, studentSortDir])
@@ -1764,6 +1778,10 @@ function MetricButtonGroup({
 function RankFrequencyTable({ data }: { data: RankFrequencyResponse }) {
   const minWidth =
     data.metric_kind === 'subject_grade_score' ? 'min-w-[1280px]' : 'min-w-[920px]'
+  const rows = useMemo(
+    () => data.rows.slice().sort((a, b) => compareStudentId(a.student_id, b.student_id)),
+    [data.rows],
+  )
   return (
     <div className="overflow-x-auto rounded-sm border border-slate-200 bg-white">
       <table className={cn('w-full border-collapse text-center text-xs text-slate-900', minWidth)}>
@@ -1786,7 +1804,7 @@ function RankFrequencyTable({ data }: { data: RankFrequencyResponse }) {
           </tr>
         </thead>
         <tbody>
-          {data.rows.map((row, index) => (
+          {rows.map((row, index) => (
             <tr key={String(row.student_id)} className={index % 2 ? 'bg-slate-50/80' : 'bg-white'}>
               <td className="border-b border-slate-100 px-3 py-2 text-left font-medium">
                 <Link href={`/student/${row.student_id}`} className="text-brand-600 hover:text-brand-700">
@@ -1876,32 +1894,34 @@ function StudentScoresTable({
 }) {
   if (grade === 1) {
     return (
-      <div className="overflow-x-auto rounded-sm border border-slate-300 bg-white">
+      <div className="max-h-[calc(100vh-18rem)] overflow-auto rounded-sm border border-slate-300 bg-white">
         <table className="w-full min-w-[2100px] border-collapse text-center text-xs text-slate-900">
           <thead className="bg-white text-sm font-semibold text-slate-950">
             <tr>
-              <ScoreTitleHead colSpan={34}>学生成绩（在籍）</ScoreTitleHead>
+              <ScoreTitleHead colSpan={34} className="sticky top-0 z-40 h-8">
+                学生成绩（在籍）
+              </ScoreTitleHead>
             </tr>
             <tr>
-              <ScoreHead rowSpan={2} className="w-28">
+              <ScoreHead rowSpan={2} className="sticky left-0 top-8 z-50 w-[84px] min-w-[84px] bg-white">
                 <SortButton label="学号" sortKey="student_id" active={studentSortKey} dir={studentSortDir} onSort={onSort} />
               </ScoreHead>
-              <ScoreHead rowSpan={2} className="w-16">
+              <ScoreHead rowSpan={2} className="sticky left-[84px] top-8 z-50 w-12 min-w-12 bg-white">
                 <SortButton label="班级" sortKey="class_num" active={studentSortKey} dir={studentSortDir} onSort={onSort} />
               </ScoreHead>
-              <ScoreHead rowSpan={2} className="w-16">
+              <ScoreHead rowSpan={2} className="sticky left-[132px] top-8 z-50 w-12 min-w-12 bg-white">
                 <SortButton label="学籍" sortKey="xueji" active={studentSortKey} dir={studentSortDir} onSort={onSort} />
               </ScoreHead>
-              <ScoreHead rowSpan={2} className="w-24">
+              <ScoreHead rowSpan={2} className="sticky left-[180px] top-8 z-50 w-20 min-w-20 bg-white shadow-[inset_-2px_0_0_#475569]">
                 <SortButton label="姓名" sortKey="name" active={studentSortKey} dir={studentSortDir} onSort={onSort} />
               </ScoreHead>
               {ALL_AVERAGE_SUBJECTS.map((subject) => (
-                <ScoreHead key={subject} colSpan={2}>
+                <ScoreHead key={subject} colSpan={2} className="sticky top-8 z-30 h-10 bg-white">
                   {subject}
                 </ScoreHead>
               ))}
               {(['主三门', '五门', '九门'] as const).map((totalType) => (
-                <ScoreHead key={totalType} colSpan={4}>
+                <ScoreHead key={totalType} colSpan={4} className="sticky top-8 z-30 h-10 bg-white">
                   {totalType}
                 </ScoreHead>
               ))}
@@ -1909,26 +1929,26 @@ function StudentScoresTable({
             <tr>
               {ALL_AVERAGE_SUBJECTS.map((subject) => (
                 <Fragment key={subject}>
-                  <ScoreHead className="w-16">
+                  <ScoreHead className="sticky top-[72px] z-30 h-9 w-16 bg-white">
                     <SortButton label="分数" sortKey={`subj:${subject}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
                   </ScoreHead>
-                  <ScoreHead className="w-20">
+                  <ScoreHead className="sticky top-[72px] z-30 h-9 w-20 bg-white">
                     <SortButton label="年级百分位" sortKey={`pct:${subject}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
                   </ScoreHead>
                 </Fragment>
               ))}
               {(['主三门', '五门', '九门'] as const).map((totalType) => (
                 <Fragment key={totalType}>
-                  <ScoreHead className="w-16">
+                  <ScoreHead className="sticky top-[72px] z-30 h-9 w-16 bg-white">
                     <SortButton label="总分" sortKey={`total:${totalType}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
                   </ScoreHead>
-                  <ScoreHead className="w-20">
+                  <ScoreHead className="sticky top-[72px] z-30 h-9 w-20 bg-white">
                     <SortButton label="年级百分位" sortKey={`totalPct:${totalType}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
                   </ScoreHead>
-                  <ScoreHead className="w-16">
+                  <ScoreHead className="sticky top-[72px] z-30 h-9 w-16 bg-white">
                     <SortButton label="学籍排名" sortKey={`xuejiRank:${totalType}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
                   </ScoreHead>
-                  <ScoreHead className="w-16">
+                  <ScoreHead className="sticky top-[72px] z-30 h-9 w-16 bg-white">
                     <SortButton label="年级排名" sortKey={`gradeRank:${totalType}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
                   </ScoreHead>
                 </Fragment>
@@ -1938,16 +1958,16 @@ function StudentScoresTable({
           <tbody>
             {rows.map((student) => (
               <tr key={student.student_id} className="bg-white">
-                <ScoreCell className="font-mono text-xs text-slate-600">
+                <ScoreCell className="sticky left-0 z-20 w-[84px] min-w-[84px] bg-white font-mono text-xs text-slate-600">
                   {student.student_id}
                 </ScoreCell>
-                <ScoreCell className="text-slate-600">
+                <ScoreCell className="sticky left-[84px] z-20 w-12 min-w-12 bg-white text-slate-600">
                   {student.class_num != null ? student.class_num : '—'}
                 </ScoreCell>
-                <ScoreCell className="text-slate-600">
+                <ScoreCell className="sticky left-[132px] z-20 w-12 min-w-12 bg-white text-slate-600">
                   {student.xueji ?? '—'}
                 </ScoreCell>
-                <ScoreCell className="text-left">
+                <ScoreCell className="sticky left-[180px] z-20 w-20 min-w-20 bg-white text-left shadow-[inset_-2px_0_0_#cbd5e1]">
                   <Link href={`/student/${student.student_id}`} className="font-medium text-slate-900 hover:text-brand-600">
                     {student.name}
                   </Link>
@@ -1975,67 +1995,67 @@ function StudentScoresTable({
   }
 
   return (
-    <div className="overflow-x-auto rounded-sm border border-slate-300 bg-white">
+    <div className="max-h-[calc(100vh-18rem)] overflow-auto rounded-sm border border-slate-300 bg-white">
       <table className="w-full min-w-[1660px] border-collapse text-center text-xs text-slate-900">
         <thead className="bg-[#dbe4f2] text-sm font-semibold text-slate-950">
           <tr>
-            <ScoreHead rowSpan={2} className="w-28">
+            <ScoreHead rowSpan={2} className="sticky left-0 top-0 z-50 w-[84px] min-w-[84px] bg-[#dbe4f2]">
               <SortButton label="学号" sortKey="student_id" active={studentSortKey} dir={studentSortDir} onSort={onSort} />
             </ScoreHead>
-            <ScoreHead rowSpan={2} className="w-24">
+            <ScoreHead rowSpan={2} className="sticky left-[84px] top-0 z-50 w-20 min-w-20 bg-[#dbe4f2]">
               <SortButton label="姓名" sortKey="name" active={studentSortKey} dir={studentSortDir} onSort={onSort} />
             </ScoreHead>
-            <ScoreHead rowSpan={2} className="w-16">
+            <ScoreHead rowSpan={2} className="sticky left-[164px] top-0 z-50 w-14 min-w-14 bg-[#dbe4f2] shadow-[inset_-2px_0_0_#475569]">
               <SortButton label="班级" sortKey="class_num" active={studentSortKey} dir={studentSortDir} onSort={onSort} />
             </ScoreHead>
             {BASE_AVERAGE_SUBJECTS.map((subject) => (
-              <ScoreHead key={subject} colSpan={2}>
+              <ScoreHead key={subject} colSpan={2} className="sticky top-0 z-30 h-10 bg-[#dbe4f2]">
                 {subject}
               </ScoreHead>
             ))}
             {ELECTIVE_AVERAGE_SUBJECTS.map((subject) => (
-              <ScoreHead key={subject} colSpan={2}>
+              <ScoreHead key={subject} colSpan={2} className="sticky top-0 z-30 h-10 bg-[#dbe4f2]">
                 {subject}
               </ScoreHead>
             ))}
-            <ScoreHead colSpan={1}>加三均分</ScoreHead>
-            <ScoreHead colSpan={2}>主三门总分</ScoreHead>
-            <ScoreHead colSpan={2}>3+3总分</ScoreHead>
+            <ScoreHead colSpan={1} className="sticky top-0 z-30 h-10 bg-[#dbe4f2]">加三均分</ScoreHead>
+            <ScoreHead colSpan={2} className="sticky top-0 z-30 h-10 bg-[#dbe4f2]">主三门总分</ScoreHead>
+            <ScoreHead colSpan={2} className="sticky top-0 z-30 h-10 bg-[#dbe4f2]">3+3总分</ScoreHead>
           </tr>
           <tr>
             {BASE_AVERAGE_SUBJECTS.map((subject) => (
               <Fragment key={subject}>
-                <ScoreHead className="w-16">
+                <ScoreHead className="sticky top-10 z-30 h-9 w-16 bg-[#dbe4f2]">
                   <SortButton label="分数" sortKey={`subj:${subject}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
                 </ScoreHead>
-                <ScoreHead className="w-20">
+                <ScoreHead className="sticky top-10 z-30 h-9 w-20 bg-[#dbe4f2]">
                   <SortButton label="年级百分位" sortKey={`pct:${subject}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
                 </ScoreHead>
               </Fragment>
             ))}
             {ELECTIVE_AVERAGE_SUBJECTS.map((subject) => (
               <Fragment key={subject}>
-                <ScoreHead className="w-16">
+                <ScoreHead className="sticky top-10 z-30 h-9 w-16 bg-[#dbe4f2]">
                   <SortButton label="原始分" sortKey={`subj:${subject}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
                 </ScoreHead>
-                <ScoreHead className="w-16">
+                <ScoreHead className="sticky top-10 z-30 h-9 w-16 bg-[#dbe4f2]">
                   <SortButton label="等级分" sortKey={`subjGrade:${subject}`} active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
                 </ScoreHead>
               </Fragment>
             ))}
-            <ScoreHead className="w-20">
+            <ScoreHead className="sticky top-10 z-30 h-9 w-20 bg-[#dbe4f2]">
               <SortButton label="分数" sortKey="total:+3" active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
             </ScoreHead>
-            <ScoreHead className="w-20">
+            <ScoreHead className="sticky top-10 z-30 h-9 w-20 bg-[#dbe4f2]">
               <SortButton label="分数" sortKey="total:主三门" active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
             </ScoreHead>
-            <ScoreHead className="w-16">
+            <ScoreHead className="sticky top-10 z-30 h-9 w-16 bg-[#dbe4f2]">
               <SortButton label="排名" sortKey="rank:主三门" active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
             </ScoreHead>
-            <ScoreHead className="w-20">
+            <ScoreHead className="sticky top-10 z-30 h-9 w-20 bg-[#dbe4f2]">
               <SortButton label="分数" sortKey="total:3+3" active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
             </ScoreHead>
-            <ScoreHead className="w-16">
+            <ScoreHead className="sticky top-10 z-30 h-9 w-16 bg-[#dbe4f2]">
               <SortButton label="排名" sortKey="rank:3+3" active={studentSortKey} dir={studentSortDir} onSort={onSort} align="center" />
             </ScoreHead>
           </tr>
@@ -2043,15 +2063,15 @@ function StudentScoresTable({
         <tbody>
           {rows.map((student) => (
             <tr key={student.student_id} className="bg-white">
-              <ScoreCell className="font-mono text-xs text-slate-600">
+              <ScoreCell className="sticky left-0 z-20 w-[84px] min-w-[84px] bg-white font-mono text-xs text-slate-600">
                 {student.student_id}
               </ScoreCell>
-              <ScoreCell className="text-left">
+              <ScoreCell className="sticky left-[84px] z-20 w-20 min-w-20 bg-white text-left">
                 <Link href={`/student/${student.student_id}`} className="font-medium text-slate-900 hover:text-brand-600">
                   {student.name}
                 </Link>
               </ScoreCell>
-              <ScoreCell className="text-slate-600">
+              <ScoreCell className="sticky left-[164px] z-20 w-14 min-w-14 bg-white text-slate-600 shadow-[inset_-2px_0_0_#cbd5e1]">
                 {student.class_num != null ? `${student.class_num}班` : '—'}
               </ScoreCell>
               {BASE_AVERAGE_SUBJECTS.map((subject) => (
@@ -2164,7 +2184,7 @@ function ScoreTitleHead({
   return (
     <th
       className={cn(
-        'border-y-2 border-black bg-white px-1 py-2 text-center text-sm font-semibold text-slate-950',
+        'border-y-2 border-black bg-white px-1 py-1.5 text-center text-sm font-semibold text-slate-950',
         className,
       )}
       {...props}
@@ -2179,7 +2199,7 @@ function ScoreHead({
   return (
     <th
       className={cn(
-        'border border-slate-600 px-1 py-2 align-middle whitespace-nowrap',
+        'border border-slate-600 px-1 py-1 align-middle whitespace-nowrap',
         className,
       )}
       {...props}
@@ -2194,7 +2214,7 @@ function ScoreCell({
   return (
     <td
       className={cn(
-        'border border-slate-300 px-2 py-2 align-middle whitespace-nowrap',
+        'border border-slate-300 px-1.5 py-1 align-middle whitespace-nowrap',
         className,
       )}
       {...props}

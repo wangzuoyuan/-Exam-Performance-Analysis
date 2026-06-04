@@ -2,6 +2,8 @@
 
 import { useEffect, useState, useRef, KeyboardEvent } from 'react'
 import { Bot, Send } from 'lucide-react'
+import ReactMarkdown, { type Components } from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   Sheet,
   SheetContent,
@@ -27,6 +29,74 @@ function visibleAssistantContent(content: string) {
     .filter(line => !line.trim().match(/^\[已查询：.+\]$/))
     .join('\n')
     .trim()
+}
+
+const markdownComponents: Components = {
+  h1: ({ children }) => (
+    <h1 className="mb-2 mt-3 text-base font-semibold leading-snug text-slate-950 first:mt-0">
+      {children}
+    </h1>
+  ),
+  h2: ({ children }) => (
+    <h2 className="mb-2 mt-3 text-sm font-semibold leading-snug text-slate-950 first:mt-0">
+      {children}
+    </h2>
+  ),
+  h3: ({ children }) => (
+    <h3 className="mb-1.5 mt-3 text-sm font-semibold leading-snug text-slate-900 first:mt-0">
+      {children}
+    </h3>
+  ),
+  p: ({ children }) => <p className="my-2 first:mt-0 last:mb-0">{children}</p>,
+  strong: ({ children }) => <strong className="font-semibold text-slate-950">{children}</strong>,
+  em: ({ children }) => <em className="text-slate-700">{children}</em>,
+  ul: ({ children }) => (
+    <ul className="my-2 list-disc space-y-1 pl-5 first:mt-0 last:mb-0">{children}</ul>
+  ),
+  ol: ({ children }) => (
+    <ol className="my-2 list-decimal space-y-1 pl-5 first:mt-0 last:mb-0">{children}</ol>
+  ),
+  li: ({ children }) => <li className="pl-0.5">{children}</li>,
+  blockquote: ({ children }) => (
+    <blockquote className="my-2 border-l-2 border-brand-500 pl-3 text-slate-700">
+      {children}
+    </blockquote>
+  ),
+  a: ({ children, href }) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="font-medium text-brand-700 underline underline-offset-2"
+    >
+      {children}
+    </a>
+  ),
+  code: ({ children, className }) => (
+    <code
+      className={cn(
+        'rounded bg-slate-200 px-1 py-0.5 font-mono text-[0.8em] text-slate-900',
+        className
+      )}
+    >
+      {children}
+    </code>
+  ),
+  pre: ({ children }) => (
+    <pre className="my-2 overflow-x-auto rounded-md bg-slate-900 p-3 text-xs leading-relaxed text-slate-50">
+      {children}
+    </pre>
+  ),
+  table: ({ children }) => (
+    <div className="my-3 overflow-x-auto rounded-md border border-slate-200 bg-white">
+      <table className="min-w-full border-collapse text-left text-xs">{children}</table>
+    </div>
+  ),
+  thead: ({ children }) => <thead className="bg-slate-50 text-slate-700">{children}</thead>,
+  th: ({ children }) => (
+    <th className="border-b border-slate-200 px-2 py-1.5 font-semibold">{children}</th>
+  ),
+  td: ({ children }) => <td className="border-b border-slate-100 px-2 py-1.5">{children}</td>,
 }
 
 function buildPageContext() {
@@ -153,13 +223,21 @@ export default function ChatDrawer() {
         )}
         <div
           className={cn(
-            'max-w-[80%] whitespace-pre-wrap break-words px-3 py-2 text-sm leading-relaxed shadow-sm',
+            'max-w-[80%] break-words px-3 py-2 text-sm leading-relaxed shadow-sm',
             isUser
-              ? 'rounded-2xl rounded-tr-sm bg-brand-600 text-white'
+              ? 'whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-brand-600 text-white'
               : 'rounded-2xl rounded-tl-sm bg-slate-100 text-slate-900'
           )}
         >
-          {visibleContent}
+          {isUser ? (
+            visibleContent
+          ) : (
+            <div className="markdown-content">
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                {visibleContent}
+              </ReactMarkdown>
+            </div>
+          )}
         </div>
         {isUser && (
           <Avatar className="h-8 w-8 shrink-0">
