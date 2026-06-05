@@ -711,6 +711,9 @@ async def get_student(student_id: str):
     plus3_totals_sorted = sorted(plus3_totals, key=lambda t: exam_sort_key(t.exam_id))
     san3_totals_sorted = sorted(san3_totals, key=lambda t: exam_sort_key(t.exam_id))
     subject_scores_sorted = sorted(subject_scores, key=lambda s: exam_sort_key(s.exam_id))
+    subject_scores_with_score = [
+        s for s in subject_scores_sorted if s.raw_score is not None or s.grade_score is not None
+    ]
 
     return {
         "student_id": student_id,
@@ -745,7 +748,7 @@ async def get_student(student_id: str):
             "subject": s.subject,
             "raw_score": s.raw_score,
             "grade_percentile": s.grade_percentile,
-        } for s in subject_scores_sorted],
+        } for s in subject_scores_with_score],
         "plus3_trend": [{
             "exam_id": t.exam_id,
             "exam_name": exam_map[t.exam_id].name if t.exam_id in exam_map else str(t.exam_id),

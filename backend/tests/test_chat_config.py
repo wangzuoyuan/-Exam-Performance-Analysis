@@ -75,3 +75,11 @@ def test_system_prompt_includes_page_context():
 
     assert "当前页面上下文" in prompt
     assert "7240115" in prompt
+
+
+def test_system_prompt_defines_plus_three_subject_scope():
+    prompt = build_system_prompt()
+
+    assert "加三学科" in prompt
+    for subject in ["物理", "化学", "生物", "政治", "历史", "地理"]:
+        assert subject in prompt

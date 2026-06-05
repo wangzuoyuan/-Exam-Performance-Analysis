@@ -93,6 +93,10 @@ function safeNum(v: unknown): number | null {
   return null
 }
 
+function hasSubjectScore(point: SubjectTrendPoint): boolean {
+  return safeNum(point.raw_score) !== null
+}
+
 function formatPercent(v: number | null | undefined): string {
   const n = safeNum(v)
   if (n === null) return DASH
@@ -428,6 +432,7 @@ export default function StudentPage() {
     const map: Record<string, SubjectTrendPoint[]> = {}
     if (!profile?.subject_trend) return map
     for (const s of profile.subject_trend) {
+      if (!hasSubjectScore(s)) continue
       if (!map[s.subject]) map[s.subject] = []
       map[s.subject].push(s)
     }

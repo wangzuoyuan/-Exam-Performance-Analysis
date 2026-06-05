@@ -8,6 +8,8 @@ from app.chat.config import get_chat_config
 from app.chat.tools import create_anthropic_client, create_openai_client, to_openai_tools
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+CHAT_MAX_TOKENS = 4096
+CHAT_MAX_CONTINUATIONS = 2
 
 SYSTEM_PROMPT = """你是高中班主任的成绩分析助手。
 
@@ -16,6 +18,7 @@ SYSTEM_PROMPT = """你是高中班主任的成绩分析助手。
 2. 引用任何数字必须先经过工具查询；不准凭空给数据
 3. 其他班是参照系不是报告对象
 4. 受众是班主任本人，可直呼学生姓名
+4.1 “加三学科”是物理、化学、生物、政治、历史、地理六科的统称；“+3/选考三科”才表示学生实际选择参加的三门
 5. 用户问”最近两次/最近几次/多场考试谁进步最大或退步最大”、且问题包含多个单科或总分口径时，优先调用 multi_exam_progress_ranking；用户说”最近两次”就传 recent_count=2，用户说”几次趋势”就按语义传 recent_count 和 min_points
 6. 用户只问某年级某一门学科进步最大/退步最大/提升最多时，可调用 subject_progress_ranking
 7. 用户问”这个同学/某学生整体情况/学习情况/优劣势/建议”时，优先调用 student_learning_profile；如果当前页面上下文有 student_id，就直接使用它
@@ -28,6 +31,7 @@ SYSTEM_PROMPT = """你是高中班主任的成绩分析助手。
    - 高二/高三 语数英单科：用年级百分位（grade_percentile）
    - 高二/高三 +3选考单科：用等级分（grade_score）；不用原始分，不用百分位
    - raw_score 只允许出现在”该次考试原始分为X”的单点描述中，不得用于计算进退步幅度
+9. 工具返回 available=false 或 raw_score/grade_score 均为空的单科，表示未参考或无有效成绩；不得把残留百分位当作真实成绩，也不得把有 raw_score 的高一期中/期末小科误写成“—”
 
 口径文档参考：exam-score-analysis/references/metric-definitions.md"""
 
@@ -142,6 +146,21 @@ def _anthropic_messages_to_openai(messages: list, system_prompt: str) -> list[di
     return out
 
 
+def _join_continuation(parts: list[str]) -> str:
+    text = ""
+    for part in parts:
+        if not part:
+            continue
+        if text and not text.endswith(("\n", " ", "　")) and not part.startswith(("\n", " ", "，", "。", "；", "：", "、", "）", ")", "]")):
+            text += "\n"
+        text += part
+    return text
+
+
+def _continuation_prompt() -> str:
+    return "请从上一句后继续完成回答，不要重复已经写过的内容；如果已经完整结束，只回复空内容。"
+
+
 async def _stream_openai(config, messages: list, context: dict | None):
     from app.chat.tools import execute_tool
 
@@ -156,7 +175,7 @@ async def _stream_openai(config, messages: list, context: dict | None):
                 model=config.model,
                 messages=chat_messages,
                 tools=tools,
-                max_tokens=2048,
+                max_tokens=CHAT_MAX_TOKENS,
             )
         except Exception as exc:
             yield sse({"type": "text", "delta": f"对话接口调用失败：{exc}"})
@@ -203,7 +222,31 @@ async def _stream_openai(config, messages: list, context: dict | None):
                 )
             continue
 
-        text = msg.content or ""
+        text_parts = [msg.content or ""]
+        finish_reason = getattr(choice, "finish_reason", None)
+        for _ in range(CHAT_MAX_CONTINUATIONS):
+            if finish_reason != "length" or not text_parts[-1]:
+                break
+            chat_messages.append({"role": "assistant", "content": text_parts[-1]})
+            chat_messages.append({"role": "user", "content": _continuation_prompt()})
+            try:
+                continuation = client.chat.completions.create(
+                    model=config.model,
+                    messages=chat_messages,
+                    max_tokens=CHAT_MAX_TOKENS,
+                )
+            except Exception:
+                break
+            continuation_choice = continuation.choices[0]
+            continuation_text = continuation_choice.message.content or ""
+            if not continuation_text:
+                break
+            text_parts.append(continuation_text)
+            finish_reason = getattr(continuation_choice, "finish_reason", None)
+
+        text = _join_continuation(text_parts)
+        if finish_reason == "length":
+            text += "\n\n（回答仍达到长度上限，已尽量保留完整内容；如需更长明细请继续追问。）"
         if text:
             yield sse({"type": "text", "delta": text})
         yield sse({"type": "done"})
@@ -241,7 +284,7 @@ async def stream_chat(messages: list, context: dict | None = None):
             try:
                 response = client.messages.create(
                     model=config.model,
-                    max_tokens=2048,
+                    max_tokens=CHAT_MAX_TOKENS,
                     system=build_system_prompt(context),
                     messages=chat_messages,
                     tools=tools,
@@ -285,7 +328,44 @@ async def stream_chat(messages: list, context: dict | None = None):
             chat_messages.append({"role": "user", "content": tool_results})
             continue
 
-        text = "".join(final_text_parts)
+        text_parts = ["".join(final_text_parts)]
+        stop_reason = getattr(response, "stop_reason", None)
+        for _ in range(CHAT_MAX_CONTINUATIONS):
+            if stop_reason != "max_tokens" or not text_parts[-1]:
+                break
+            chat_messages.append({"role": "assistant", "content": [{"type": "text", "text": text_parts[-1]}]})
+            chat_messages.append({"role": "user", "content": _continuation_prompt()})
+
+            continuation = None
+            last_exc = None
+            for attempt in range(3):
+                try:
+                    continuation = client.messages.create(
+                        model=config.model,
+                        max_tokens=CHAT_MAX_TOKENS,
+                        system=build_system_prompt(context),
+                        messages=chat_messages,
+                    )
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < 2:
+                        await asyncio.sleep(0.6 * (attempt + 1))
+            if continuation is None:
+                text_parts.append(f"\n\n（继续生成失败：{last_exc}）")
+                break
+
+            continuation_text = "".join(
+                block.text for block in continuation.content if block.type == "text"
+            )
+            if not continuation_text:
+                break
+            text_parts.append(continuation_text)
+            stop_reason = getattr(continuation, "stop_reason", None)
+
+        text = _join_continuation(text_parts)
+        if stop_reason == "max_tokens":
+            text += "\n\n（回答仍达到长度上限，已尽量保留完整内容；如需更长明细请继续追问。）"
         if text:
             yield sse({"type": "text", "delta": text})
         yield sse({"type": "done"})
@@ -305,3 +385,14 @@ async def chat(request: Request):
         stream_chat(messages, context),
         media_type="text/event-stream",
     )
+
+
+@router.get("/config")
+async def chat_config():
+    config = get_chat_config()
+    return {
+        "provider": config.provider,
+        "model": config.model,
+        "configured": config.is_configured,
+        "base_url_configured": bool(config.base_url),
+    }
