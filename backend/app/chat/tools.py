@@ -4,6 +4,10 @@ from typing import Optional
 
 from app.chat.config import ChatConfig, get_chat_config
 
+BASE_SUBJECTS = ("语文", "数学", "英语")
+ELECTIVE_SUBJECTS = ("物理", "化学", "生物", "政治", "历史", "地理")
+ALL_SUBJECTS = BASE_SUBJECTS + ELECTIVE_SUBJECTS
+
 
 def create_anthropic_client(config: ChatConfig | None = None):
     config = config or get_chat_config()
@@ -30,6 +34,39 @@ def get_client():
     if config.provider == "openai":
         return create_openai_client(config)
     return create_anthropic_client(config)
+
+
+def _has_subject_score(score) -> bool:
+    return score.raw_score is not None or score.grade_score is not None
+
+
+def _subject_score_payload(score, exam=None) -> dict[str, Any]:
+    available = _has_subject_score(score)
+    payload = {
+        "subject": score.subject,
+        "raw_score": score.raw_score if available else None,
+        "grade_score": score.grade_score if available else None,
+        "grade_percentile": score.grade_percentile if available else None,
+        "available": available,
+    }
+    if exam is not None:
+        payload["exam"] = {
+            "id": exam.id,
+            "name": exam.name,
+            "grade": exam.grade,
+            "exam_date": exam.exam_date,
+        }
+    return payload
+
+
+def _missing_subject_payload(subject: str) -> dict[str, Any]:
+    return {
+        "subject": subject,
+        "raw_score": None,
+        "grade_score": None,
+        "grade_percentile": None,
+        "available": False,
+    }
 
 def list_exams(grade: Optional[int] = None, year_range: Optional[tuple] = None) -> list:
     """列出已建档考试"""
@@ -78,7 +115,7 @@ def student_exam_detail(student_id: str, exam_id: int) -> dict:
     return {
         "student_id": student_id,
         "exam_id": exam_id,
-        "subjects": [{"subject": s.subject, "raw_score": s.raw_score, "grade_percentile": s.grade_percentile} for s in subjects],
+        "subjects": [_subject_score_payload(s) for s in subjects],
         "totals": [{"total_type": t.total_type, "total_score": t.total_score, "xueji_rank": t.xueji_rank} for t in totals],
     }
 
@@ -166,8 +203,10 @@ def student_learning_profile(
         .all()
     )
     subjects_by_name: dict[str, list[SubjectScore]] = defaultdict(list)
+    subjects_by_exam: dict[int, dict[str, SubjectScore]] = defaultdict(dict)
     for score in subjects:
         subjects_by_name[score.subject].append(score)
+        subjects_by_exam[score.exam_id][score.subject] = score
     for rows in subjects_by_name.values():
         rows.sort(key=lambda row: (exam_map.get(row.exam_id).grade if exam_map.get(row.exam_id) else 0,
                                    exam_map.get(row.exam_id).exam_date if exam_map.get(row.exam_id) else "",
@@ -178,6 +217,65 @@ def student_learning_profile(
         if not exam:
             return {"id": exam_id, "name": str(exam_id), "grade": None, "exam_date": None}
         return {"id": exam.id, "name": exam.name, "grade": exam.grade, "exam_date": exam.exam_date}
+
+    def is_high23_elective(score: SubjectScore) -> bool:
+        exam = exam_map.get(score.exam_id)
+        return bool(exam and exam.grade in {2, 3} and score.subject in ELECTIVE_SUBJECTS)
+
+    def analysis_metric(score: SubjectScore) -> dict[str, Any]:
+        if not _has_subject_score(score):
+            return {
+                "metric_kind": "missing",
+                "value": None,
+                "lower_is_better": None,
+                "note": "未参考或无有效成绩",
+            }
+        if is_high23_elective(score):
+            return {
+                "metric_kind": "grade_score",
+                "value": score.grade_score,
+                "lower_is_better": False,
+                "note": "高二/高三加三选考单科用等级分判断趋势",
+            }
+        return {
+            "metric_kind": "grade_percentile",
+            "value": score.grade_percentile,
+            "lower_is_better": True,
+            "note": "高一单科和高二/高三语数英用年级百分位判断趋势，数值越小越靠前",
+        }
+
+    def subject_history_payload(score: SubjectScore) -> dict[str, Any]:
+        payload = _subject_score_payload(score, exam_map.get(score.exam_id))
+        payload["analysis_metric"] = analysis_metric(score)
+        return payload
+
+    def trend_change(first: SubjectScore, latest: SubjectScore) -> tuple[float | None, dict[str, Any]]:
+        first_metric = analysis_metric(first)
+        latest_metric = analysis_metric(latest)
+        if first_metric["metric_kind"] != latest_metric["metric_kind"]:
+            return None, {
+                "metric_kind": latest_metric["metric_kind"],
+                "value_field": latest_metric["metric_kind"],
+                "reason": "起止考试指标口径不同，不能直接计算趋势变化",
+            }
+        first_value = first_metric["value"]
+        latest_value = latest_metric["value"]
+        if first_value is None or latest_value is None:
+            return None, {
+                "metric_kind": latest_metric["metric_kind"],
+                "value_field": latest_metric["metric_kind"],
+                "reason": "有效趋势点不足",
+            }
+        if latest_metric["lower_is_better"]:
+            change = round(first_value - latest_value, 4)
+        else:
+            change = round(latest_value - first_value, 4)
+        return change, {
+            "metric_kind": latest_metric["metric_kind"],
+            "value_field": latest_metric["metric_kind"],
+            "lower_is_better": latest_metric["lower_is_better"],
+            "positive_means": "进步",
+        }
 
     main_total_trend = []
     for total in totals_by_type.get("主三门", []):
@@ -194,24 +292,22 @@ def student_learning_profile(
     subject_summaries = []
     subject_history = {}
     for subject, rows in subjects_by_name.items():
-        history = [
-            {
-                "exam": exam_payload(score.exam_id),
-                "raw_score": score.raw_score,
-                "grade_score": score.grade_score,
-                "grade_percentile": score.grade_percentile,
-            }
-            for score in rows
-        ]
+        history = [subject_history_payload(score) for score in rows]
         subject_history[subject] = history
-        first = rows[0]
-        latest = rows[-1]
+        valid_rows = [score for score in rows if _has_subject_score(score)]
+        if not valid_rows:
+            continue
+        latest = valid_rows[-1]
+        comparable_rows = [
+            score
+            for score in valid_rows
+            if analysis_metric(score)["metric_kind"] == analysis_metric(latest)["metric_kind"]
+        ]
+        first = comparable_rows[0] if comparable_rows else latest
         raw_score_change = None
         if first.raw_score is not None and latest.raw_score is not None:
             raw_score_change = round(latest.raw_score - first.raw_score, 2)
-        percentile_change = None
-        if first.grade_percentile is not None and latest.grade_percentile is not None:
-            percentile_change = round(first.grade_percentile - latest.grade_percentile, 4)
+        metric_change, metric_meta = trend_change(first, latest)
         subject_summaries.append(
             {
                 "subject": subject,
@@ -219,42 +315,60 @@ def student_learning_profile(
                 "latest_grade_score": latest.grade_score,
                 "latest_grade_percentile": latest.grade_percentile,
                 "raw_score_change": raw_score_change,
-                "percentile_change": percentile_change,
-                "exam_count": len(rows),
+                "percentile_change": metric_change if metric_meta["metric_kind"] == "grade_percentile" else None,
+                "grade_score_change": metric_change if metric_meta["metric_kind"] == "grade_score" else None,
+                "trend_change": metric_change,
+                "trend_metric": metric_meta,
+                "exam_count": len(valid_rows),
             }
         )
 
     latest_exam = exam_rows[-1] if exam_rows else None
     latest_subjects = []
     if latest_exam:
-        latest_subjects = [
-            {
-                "subject": score.subject,
-                "raw_score": score.raw_score,
-                "grade_score": score.grade_score,
-                "grade_percentile": score.grade_percentile,
-            }
-            for score in subjects
-            if score.exam_id == latest_exam.id
-        ]
+        latest_subjects = [subject_history_payload(score) for score in subjects if score.exam_id == latest_exam.id and _has_subject_score(score)]
 
-    strengths = sorted(
-        [row for row in latest_subjects if row["grade_percentile"] is not None],
-        key=lambda row: row["grade_percentile"],
-    )[:subject_limit]
-    weaknesses = sorted(
-        [row for row in latest_subjects if row["grade_percentile"] is not None],
-        key=lambda row: row["grade_percentile"],
-        reverse=True,
-    )[:subject_limit]
+    exam_history = []
+    for exam in exam_rows:
+        score_map = subjects_by_exam.get(exam.id, {})
+        subject_payloads = {}
+        included_subjects = []
+        missing_subjects = []
+        for subject in ALL_SUBJECTS:
+            score = score_map.get(subject)
+            payload = subject_history_payload(score) if score else _missing_subject_payload(subject)
+            subject_payloads[subject] = payload
+            if payload["available"]:
+                included_subjects.append(subject)
+            else:
+                missing_subjects.append(subject)
+        exam_history.append(
+            {
+                "exam": exam_payload(exam.id),
+                "subjects": subject_payloads,
+                "included_subjects": included_subjects,
+                "missing_subjects": missing_subjects,
+            }
+        )
+
+    def latest_sort_score(row: dict[str, Any]) -> float | None:
+        metric = row.get("analysis_metric") or {}
+        value = metric.get("value")
+        if value is None:
+            return None
+        return value if metric.get("lower_is_better") else -value
+
+    latest_rankable = [row for row in latest_subjects if latest_sort_score(row) is not None]
+    strengths = sorted(latest_rankable, key=lambda row: latest_sort_score(row) or 0)[:subject_limit]
+    weaknesses = sorted(latest_rankable, key=lambda row: latest_sort_score(row) or 0, reverse=True)[:subject_limit]
     progress_subjects = sorted(
-        [row for row in subject_summaries if row["percentile_change"] is not None],
-        key=lambda row: row["percentile_change"],
+        [row for row in subject_summaries if row["trend_change"] is not None],
+        key=lambda row: row["trend_change"],
         reverse=True,
     )[:subject_limit]
     regression_subjects = sorted(
-        [row for row in subject_summaries if row["percentile_change"] is not None],
-        key=lambda row: row["percentile_change"],
+        [row for row in subject_summaries if row["trend_change"] is not None],
+        key=lambda row: row["trend_change"],
     )[:subject_limit]
 
     db.close()
@@ -273,7 +387,9 @@ def student_learning_profile(
         "progress_subjects": progress_subjects,
         "regression_subjects": regression_subjects,
         "subject_history": subject_history,
-        "metric_note": "grade_percentile 越小表示年级位置越靠前；percentile_change 为正表示进步，为负表示退步。描述趋势时必须以 percentile_change / xueji_rank 为主，raw_score_change 只能作为辅助说明。",
+        "exam_history": exam_history,
+        "subject_scope_note": "加三学科指物理、化学、生物、政治、历史、地理六科的统称；高二/高三学生通常只在六科中选择三科考试。",
+        "metric_note": "available=false 表示未参考或无有效成绩，即使原始导入行里有百分位也不能当作成绩引用。grade_percentile 越小表示年级位置越靠前；高一单科和高二/高三语数英用 grade_percentile 判断趋势；高二/高三加三选考单科用 grade_score 判断趋势。trend_change 为正表示进步，为负表示退步；raw_score_change 只能作为辅助说明。",
         "analysis_boundary": "仅基于已导入考试成绩，不能推断课堂表现、作业习惯或家庭因素。",
     }
 
@@ -448,6 +564,7 @@ def subject_progress_ranking(
         SubjectScore.subject == subject,
     ).all()
 
+    use_grade_score = start_exam.grade in {2, 3} and end_exam.grade in {2, 3} and subject in ELECTIVE_SUBJECTS
     start_by_student = {score.student_id: score for score in start_scores}
     rows = []
     for end_score in end_scores:
@@ -455,15 +572,23 @@ def subject_progress_ranking(
         if not start_score:
             continue
 
+        if not _has_subject_score(start_score) or not _has_subject_score(end_score):
+            continue
+
         percentile_change = None
         if start_score.grade_percentile is not None and end_score.grade_percentile is not None:
             percentile_change = round(start_score.grade_percentile - end_score.grade_percentile, 4)
+
+        grade_score_change = None
+        if start_score.grade_score is not None and end_score.grade_score is not None:
+            grade_score_change = round(end_score.grade_score - start_score.grade_score, 2)
 
         raw_score_change = None
         if start_score.raw_score is not None and end_score.raw_score is not None:
             raw_score_change = round(end_score.raw_score - start_score.raw_score, 2)
 
-        if percentile_change is None and raw_score_change is None:
+        trend_change = grade_score_change if use_grade_score else percentile_change
+        if trend_change is None and raw_score_change is None:
             continue
 
         rows.append(
@@ -474,9 +599,13 @@ def subject_progress_ranking(
                 "start_raw_score": start_score.raw_score,
                 "end_raw_score": end_score.raw_score,
                 "raw_score_change": raw_score_change,
+                "start_grade_score": start_score.grade_score,
+                "end_grade_score": end_score.grade_score,
+                "grade_score_change": grade_score_change,
                 "start_grade_percentile": start_score.grade_percentile,
                 "end_grade_percentile": end_score.grade_percentile,
                 "percentile_change": percentile_change,
+                "trend_change": trend_change,
             }
         )
 
@@ -484,7 +613,7 @@ def subject_progress_ranking(
     none_value = float("-inf") if reverse else float("inf")
     rows.sort(
         key=lambda row: (
-            row["percentile_change"] if row["percentile_change"] is not None else none_value,
+            row["trend_change"] if row["trend_change"] is not None else none_value,
             row["raw_score_change"] if row["raw_score_change"] is not None else none_value,
         ),
         reverse=reverse,
@@ -497,7 +626,11 @@ def subject_progress_ranking(
         "start_exam": {"id": start_exam.id, "name": start_exam.name, "exam_date": start_exam.exam_date},
         "end_exam": {"id": end_exam.id, "name": end_exam.name, "exam_date": end_exam.exam_date},
         "direction": direction,
-        "metric": "percentile_change 正数表示学科年级位置进步，负数表示退步；raw_score_change 为原始分变化",
+        "metric": (
+            "高二/高三加三学科用 grade_score_change/trend_change 判断进退步；"
+            "其他单科用 percentile_change/trend_change 判断进退步，正数表示进步，负数表示退步；"
+            "raw_score_change 为原始分变化，只作单点辅助。"
+        ),
         "rows": rows[: max(1, min(limit, 50))],
     }
 
@@ -1060,7 +1193,7 @@ TOOLS = [
     },
     {
         "name": "student_learning_profile",
-        "description": "分析某个学生的整体学习情况，返回总分趋势、最新优势/薄弱科目、进步/退步科目和各科历史。",
+        "description": "分析某个学生的整体学习情况，返回总分趋势、最新优势/薄弱科目、进步/退步科目、各科历史和按考试展开的完整成绩表。加三学科指物理、化学、生物、政治、历史、地理六科；available=false 表示未参考或无有效成绩。",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1118,12 +1251,12 @@ TOOLS = [
     },
     {
         "name": "subject_progress_ranking",
-        "description": "按年级和学科找跨考试进步或退步最大的学生，例如“高二语文进步最大的是谁”。默认比较该年级最早和最新考试。",
+        "description": "按年级和学科找跨考试进步或退步最大的学生，例如“高二语文进步最大的是谁”。默认比较该年级最早和最新考试。高一单科和高二/高三语数英按百分位，高二/高三加三学科（物理、化学、生物、政治、历史、地理）按等级分。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "grade": {"type": "integer", "description": "年级(1=高一,2=高二,3=高三)"},
-                "subject": {"type": "string", "description": "学科名，如语文、数学、英语"},
+                "subject": {"type": "string", "description": "学科名，如语文、数学、英语、物理、化学、生物、政治、历史、地理"},
                 "start_exam_id": {"type": "integer", "description": "起始考试ID；不填则使用该年级最早考试"},
                 "end_exam_id": {"type": "integer", "description": "结束考试ID；不填则使用该年级最新考试"},
                 "limit": {"type": "integer", "description": "返回人数，默认10，最多50"},
@@ -1142,7 +1275,7 @@ TOOLS = [
                 "metrics": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "要分析的指标，如['语文','数学','英语','主三门','五门']；不填时按年级返回常用总分和全部学科",
+                    "description": "要分析的指标，如['语文','数学','英语','主三门','五门']；加三学科指物理、化学、生物、政治、历史、地理六科；不填时按年级返回常用总分和全部学科",
                 },
                 "exam_ids": {
                     "type": "array",

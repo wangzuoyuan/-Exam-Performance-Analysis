@@ -48,6 +48,13 @@ def test_list_exams(client):
     assert response.status_code == 200
     assert "exams" in response.json()
 
+def test_chat_config_endpoint(client):
+    response = client.get("/api/chat/config")
+    assert response.status_code == 200
+    data = response.json()
+    assert {"provider", "model", "configured", "base_url_configured"} <= set(data)
+    assert "api_key" not in data
+
 def test_exam_not_found(client):
     """Step 6: 考试不存在返回404"""
     response = client.get("/api/exams/99999")
@@ -101,10 +108,12 @@ def test_student_not_found(client):
 def test_student_detail_includes_plus_three_subjects(client):
     """学生详情需要返回加三学科，供历次考试明细表展示。"""
     from app.db.models import SessionLocal, SubjectScore
+    from sqlalchemy import or_
 
     db = SessionLocal()
     row = db.query(SubjectScore).filter(
-        SubjectScore.subject.notin_(["语文", "数学", "英语"])
+        SubjectScore.subject.notin_(["语文", "数学", "英语"]),
+        or_(SubjectScore.raw_score.isnot(None), SubjectScore.grade_score.isnot(None)),
     ).first()
     db.close()
     if row is None:
@@ -114,6 +123,20 @@ def test_student_detail_includes_plus_three_subjects(client):
     assert response.status_code == 200
     subjects = {s["subject"] for s in response.json()["subject_trend"]}
     assert row.subject in subjects
+
+def test_student_detail_excludes_subject_trend_without_scores(client):
+    """无原始分/等级分的单科行不能进入趋势线数据。"""
+    response = client.get("/api/students/7250615")
+    if response.status_code == 404:
+        pytest.skip("local database does not contain regression student 7250615")
+    assert response.status_code == 200
+
+    invalid_rows = [
+        row
+        for row in response.json()["subject_trend"]
+        if row["exam_date"] == "2025-09" and row["subject"] in {"物理", "化学", "生物", "政治", "历史", "地理"}
+    ]
+    assert invalid_rows == []
 
 def test_student_detail_includes_grade1_five_total_trend(client):
     """高一学生详情需要返回五门总分趋势，供个人页展示语数英物化总分和排名。"""
