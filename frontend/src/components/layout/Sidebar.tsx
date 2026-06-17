@@ -196,7 +196,7 @@ interface SidebarProps {
 
 export function Sidebar({ teacher, onNameChange }: SidebarProps) {
   return (
-    <aside className="hidden md:flex md:w-60 md:flex-col md:fixed md:inset-y-0 md:left-0 md:z-30">
+    <aside className="hidden md:flex md:w-60 md:flex-col md:fixed md:inset-y-0 md:left-0 md:z-30 print:hidden">
       <SidebarContent teacher={teacher} onNameChange={onNameChange} />
     </aside>
   )

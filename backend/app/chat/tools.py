@@ -1113,6 +1113,54 @@ def student_homework_summary(student_id: Optional[str] = None, name: Optional[st
         db.close()
 
 
+def student_notes(student_id: Optional[str] = None, name: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
+    """读取某生的成长/谈话档案（谈话、观察、家访、家长沟通、奖惩等班主任记录），
+    用于结合成绩与缺交起草谈话提纲或家长沟通稿。姓名多义时返回候选。"""
+    from app.db.models import ClassRoster, StudentNote, get_db
+
+    db = next(get_db())
+    try:
+        roster_q = db.query(ClassRoster)
+        if student_id:
+            roster_q = roster_q.filter(ClassRoster.student_id == student_id)
+        elif name:
+            roster_q = roster_q.filter(ClassRoster.name.like(f"%{name}%"))
+        else:
+            return {"error": "需提供 student_id 或 name"}
+        matches = roster_q.limit(10).all()
+        if not matches:
+            return {"error": "未找到学生", "student_id": student_id, "name": name}
+        if len(matches) > 1 and not student_id:
+            return {
+                "error": "匹配到多个学生，请指定学号",
+                "candidates": [{"student_id": m.student_id, "name": m.name} for m in matches],
+            }
+        roster = matches[0]
+        rows = (
+            db.query(StudentNote)
+            .filter(StudentNote.student_id == roster.student_id)
+            .order_by(StudentNote.date.desc(), StudentNote.id.desc())
+            .limit(max(1, min(limit, 100)))
+            .all()
+        )
+        return {
+            "student": {"student_id": roster.student_id, "name": roster.name},
+            "notes": [
+                {
+                    "date": n.date,
+                    "category": n.category,
+                    "content": n.content,
+                    "follow_up": n.follow_up,
+                    "follow_up_done": bool(n.follow_up_done),
+                }
+                for n in rows
+            ],
+            "note": "这些是班主任的私密档案，仅用于辅助本人工作，措辞需稳妥、尊重学生。",
+        }
+    finally:
+        db.close()
+
+
 def class_homework_ranking(
     class_num: int = 6,
     start_date: Optional[str] = None,
@@ -1190,6 +1238,7 @@ TOOL_FUNCTIONS = {
     "student_homework_summary": student_homework_summary,
     "class_homework_ranking": class_homework_ranking,
     "homework_grade_correlation": homework_grade_correlation,
+    "student_notes": student_notes,
 }
 
 
@@ -1457,6 +1506,18 @@ TOOLS = [
                 "exam_id": {"type": "integer", "description": "考试ID；不填取最新一场"},
                 "total_type": {"type": "string", "description": "总分类型，默认主三门（仅总览模式用）"},
                 "subject": {"type": "string", "description": "学科名（语文/数学/英语/物理/化学/生物/政治/历史/地理）；传了就看该科缺交×该科百分位"},
+            },
+        },
+    },
+    {
+        "name": "student_notes",
+        "description": "读取某个学生的成长/谈话档案（班主任记录的谈话、观察、家访、家长沟通、奖惩等）。当用户要『结合最近谈话/家访情况』『帮我准备和某某的谈话提纲』『写给某某家长的沟通稿』时调用，结合 student_learning_profile 与 student_homework_summary 一起用。内容为私密档案，措辞需稳妥尊重。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "student_id": {"type": "string", "description": "学号；页面上下文有 student_id 时优先使用"},
+                "name": {"type": "string", "description": "学生姓名；姓名不唯一时返回候选"},
+                "limit": {"type": "integer", "description": "返回最近几条，默认20"},
             },
         },
     },

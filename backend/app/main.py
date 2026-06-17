@@ -7,7 +7,8 @@ app = FastAPI(title="成绩追踪 API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    # 放行本机及局域网内任意主机的前端（3000 端口），便于手机/平板同 WiFi 访问。
+    allow_origin_regex=r"http://[\w.\-]+:3000",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -107,8 +108,12 @@ from app.ingest.router import router as ingest_router  # noqa
 from app.analysis.router import router as analysis_router  # noqa
 from app.chat.session import router as chat_router  # noqa
 from app.homework.router import router as homework_router  # noqa
+from app.notes.router import router as notes_router  # noqa
+from app.backup.router import router as backup_router  # noqa
 
 app.include_router(ingest_router, prefix="/api")
 app.include_router(analysis_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(homework_router, prefix="/api")
+app.include_router(notes_router, prefix="/api")
+app.include_router(backup_router, prefix="/api")

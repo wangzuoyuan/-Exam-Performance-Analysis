@@ -130,6 +130,16 @@ async def hw_student_summary(student_id: str):
         db.close()
 
 
+@router.get("/weekly-focus")
+async def weekly_focus(class_num: int = 6):
+    """本周关注名单（仪表盘主动提醒）。"""
+    db = next(get_db())
+    try:
+        return service.weekly_focus(db, class_num)
+    finally:
+        db.close()
+
+
 # ─────────────────────────── 录入 ───────────────────────────
 
 class RecordsPayload(BaseModel):

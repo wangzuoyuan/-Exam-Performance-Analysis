@@ -258,6 +258,11 @@ def student_summary(db, student_id=None, name=None):
         w for w in (all_warn["serious"] + all_warn["warning"]) if w["name"] == roster.name
     ]
 
+    recent_records = [
+        {"date": r.date, "subject": normalize_subject(r.subject), "content": r.content or ""}
+        for r in sorted(miss_rows, key=lambda r: r.date, reverse=True)[:10]
+    ]
+
     return {
         "student": {
             "student_id": roster.student_id,
@@ -270,6 +275,7 @@ def student_summary(db, student_id=None, name=None):
         "miss_by_subject": dict(sorted(by_subject.items(), key=lambda x: x[1], reverse=True)),
         "special_counts": dict(special_counts),
         "active_warnings": student_warnings,
+        "recent_records": recent_records,
         "note": "作业数据仅含缺交、请假、迟到等负面信号，不代表作业完成质量。",
     }
 
@@ -450,4 +456,96 @@ def subject_correlation_ranking(db, class_num, exam_id=None, start=None, end=Non
         "semester": {"start": start, "end": end},
         "rankings": results,
         "note": "r 为皮尔逊相关系数，正值越大表示该科缺交越多、年级百分位越大（成绩越差），即缺交越拖该科成绩；n 为样本数，n<3 记 r=null。作业数据仅反映缺交，不代表完成质量。",
+    }
+
+
+def weekly_focus(db, class_num=6, today=None):
+    """本周关注名单：合并连续缺交预警、本周缺交激增、最近一次考试临界/薄弱/
+    偏科、谈话跟进待办。主要由缺交信号驱动，不依赖新考试。"""
+    from datetime import date, timedelta
+
+    from app.db.models import StudentNote
+
+    sem = get_semester(db)
+    start, end = sem["semester_start"], sem["semester_end"]
+    today = today or date.today().isoformat()
+    week_start = (date.fromisoformat(today) - timedelta(days=6)).isoformat()
+
+    roster = {
+        r.student_id: r
+        for r in db.query(ClassRoster).filter(
+            ClassRoster.class_num == class_num, ClassRoster.excluded == 0
+        ).all()
+    }
+    reasons = defaultdict(list)  # student_id -> [理由标签]
+
+    def add(sid, tag, weight):
+        if sid in roster:
+            reasons[sid].append({"tag": tag, "weight": weight})
+
+    # ① 连续缺交预警（取每生最高连续次数）
+    w = warnings(db, start, end)
+    best = {}
+    for item in w["serious"] + w["warning"]:
+        sid = item.get("student_id")
+        if sid and (sid not in best or item["streak"] > best[sid]["streak"]):
+            best[sid] = item
+    for sid, item in best.items():
+        sev = 3 if item["streak"] >= 3 else 2
+        add(sid, f"连续缺交{item['streak']}次（{item['subject']}）", sev)
+
+    # ② 本周缺交激增
+    miss_rows = _base_miss_query(db, start, end, respect_excluded=True).all()
+    total_by_sid = defaultdict(int)
+    week_by_sid = defaultdict(int)
+    for rec, _ in miss_rows:
+        total_by_sid[rec.student_id] += 1
+        if week_start <= rec.date <= today:
+            week_by_sid[rec.student_id] += 1
+    weeks_elapsed = max(1, (date.fromisoformat(min(today, end)) - date.fromisoformat(start)).days / 7)
+    for sid, wk in week_by_sid.items():
+        avg = total_by_sid[sid] / weeks_elapsed
+        if wk >= 3 and wk >= 2 * max(avg, 0.5):
+            add(sid, f"本周缺交激增（{wk}次）", 2)
+
+    # ③ 最近一次考试的临界/薄弱/偏科（复用 focus_list 口径，过滤到本班）
+    try:
+        from app.chat.tools import focus_list
+        from app.db.models import Exam, TotalScore
+        latest = (
+            db.query(Exam).join(TotalScore, TotalScore.exam_id == Exam.id)
+            .order_by(Exam.exam_date.desc(), Exam.id.desc()).first()
+        )
+        if latest:
+            for row in focus_list(latest.id):
+                sid = row.get("student_id")
+                if sid in roster and row.get("issues"):
+                    add(sid, "、".join(row["issues"]), 1)
+    except Exception:
+        pass
+
+    # ④ 谈话跟进待办
+    note_rows = (
+        db.query(StudentNote)
+        .filter(StudentNote.follow_up.isnot(None), StudentNote.follow_up_done == 0)
+        .all()
+    )
+    for n in note_rows:
+        if n.student_id in roster:
+            add(n.student_id, f"谈话跟进待办：{n.follow_up}", 2)
+
+    out = []
+    for sid, items in reasons.items():
+        out.append({
+            "student_id": sid,
+            "name": roster[sid].name,
+            "score": sum(i["weight"] for i in items),
+            "reasons": [i["tag"] for i in sorted(items, key=lambda x: -x["weight"])],
+        })
+    out.sort(key=lambda x: x["score"], reverse=True)
+    return {
+        "class_num": class_num,
+        "week": {"start": week_start, "end": today},
+        "students": out,
+        "note": "合并连续缺交预警、本周缺交激增、最近考试临界/薄弱/偏科、谈话跟进待办。主要由缺交信号驱动，无新考试也每天更新。",
     }

@@ -12,12 +12,18 @@ interface WarnItem {
   streak: number
   dates: string[]
 }
+interface RecentRecord {
+  date: string
+  subject: string
+  content: string
+}
 interface HomeworkSummary {
   student?: { student_id: string; name: string; excluded: boolean }
   total_misses?: number
   miss_by_subject?: Record<string, number>
   special_counts?: Record<string, number>
   active_warnings?: WarnItem[]
+  recent_records?: RecentRecord[]
   error?: string
 }
 
@@ -40,6 +46,7 @@ export default function HomeworkCard({ studentId }: { studentId: string }) {
   const subjects = Object.entries(data?.miss_by_subject || {})
   const specials = Object.entries(data?.special_counts || {})
   const warnings = data?.active_warnings || []
+  const recent = data?.recent_records || []
 
   return (
     <Card>
@@ -103,6 +110,32 @@ export default function HomeworkCard({ studentId }: { studentId: string }) {
               </div>
             ))}
           </div>
+        )}
+
+        {recent.length > 0 && (
+          <details className="border-t border-slate-100 pt-3" open>
+            <summary className="cursor-pointer text-xs font-medium text-slate-500">
+              近期缺交明细（{recent.length} 条）
+            </summary>
+            <table className="mt-2 w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-slate-400">
+                  <th className="py-1 font-normal">日期</th>
+                  <th className="py-1 font-normal">学科</th>
+                  <th className="py-1 font-normal">说明</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recent.map((r, i) => (
+                  <tr key={i} className="border-t border-slate-50">
+                    <td className="py-1.5 text-slate-500">{r.date}</td>
+                    <td className="py-1.5 text-slate-700">{r.subject}</td>
+                    <td className="py-1.5 text-slate-500">{r.content || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </details>
         )}
 
         <p className="text-xs text-slate-400">

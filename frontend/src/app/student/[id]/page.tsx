@@ -24,6 +24,7 @@ import {
 
 import TrendLineChart from '@/components/TrendLineChart'
 import HomeworkCard from '@/components/HomeworkCard'
+import StudentNotes from '@/components/StudentNotes'
 import { cn } from '@/lib/utils'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
@@ -566,14 +567,23 @@ export default function StudentPage() {
   return (
     <TooltipProvider delayDuration={150}>
       <div className="space-y-6">
-        {/* 返回 */}
-        <Link
-          href="/"
-          className="inline-flex items-center gap-1 text-sm text-slate-600 hover:text-slate-900"
-        >
-          <ChevronLeft className="h-4 w-4" />
-          返回
-        </Link>
+        {/* 返回 + 导出 */}
+        <div className="flex items-center justify-between">
+          <Link
+            href="/"
+            className="inline-flex items-center gap-1 text-sm text-slate-600 hover:text-slate-900"
+          >
+            <ChevronLeft className="h-4 w-4" />
+            返回
+          </Link>
+          {studentId && (
+            <Link href={`/student/${studentId}/report`}>
+              <span className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50">
+                导出家长会一页纸
+              </span>
+            </Link>
+          )}
+        </div>
 
         {/* 学生卡 */}
         <Card>
@@ -679,6 +689,9 @@ export default function StudentPage() {
 
         {/* 作业缺交（仅作业花名册内学生显示） */}
         {studentId && <HomeworkCard studentId={studentId} />}
+
+        {/* 成长 / 谈话档案 */}
+        {studentId && <StudentNotes studentId={studentId} />}
 
         {/* 主三门趋势图 */}
         <Card>
