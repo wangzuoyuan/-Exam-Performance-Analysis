@@ -9,6 +9,7 @@ import {
   BarChart3,
   ClipboardList,
   Users,
+  NotebookPen,
   GraduationCap,
   Pencil,
   Check,
@@ -60,6 +61,12 @@ const NAV_ITEMS: NavItem[] = [
     label: '学生检索',
     icon: Users,
     match: (p) => p.startsWith('/student'),
+  },
+  {
+    href: '/homework',
+    label: '作业跟踪',
+    icon: NotebookPen,
+    match: (p) => p.startsWith('/homework'),
   },
 ]
 

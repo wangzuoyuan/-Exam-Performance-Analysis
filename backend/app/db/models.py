@@ -105,4 +105,67 @@ class AnalysisConfig(Base):
     weak_min = Column(Integer, nullable=False, default=501)        # 薄弱段：rank >= weak_min（独立可设）
     updated_at = Column(DateTime, default=datetime.utcnow)
 
+
+# ────────────────────────────── 作业跟踪 ──────────────────────────────
+# 由原独立 Flask 应用「作业跟踪」合并而来。成绩库原本无花名册（学生从
+# SubjectScore 派生），ClassRoster 补齐作业侧需要的座号/性别/排除标记，
+# 并以真实学号 student_id 作为作业记录的统一关联键。
+
+class ClassRoster(Base):
+    """班级花名册，作业模块的学生主体。student_id 用真实学号（与
+    SubjectScore.student_id 同口径）。excluded=1 的学生记录仍保留，
+    但缺交看板/排行默认不统计。"""
+    __tablename__ = "class_roster"
+    student_id = Column(String, primary_key=True)  # 真实学号，如 7250601
+    name = Column(String, nullable=False)
+    class_num = Column(Integer, nullable=True)
+    seat_no = Column(Integer, nullable=True)        # 班内座号（原作业库 student_no）
+    gender = Column(String, nullable=True)
+    excluded = Column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        Index("idx_roster_class", "class_num"),
+        Index("idx_roster_name", "name"),
+    )
+
+
+class HomeworkRecord(Base):
+    """缺交记录（对应原 records 表）。每行=某生某天某科欠交一次。
+    remark 非空表示当天请假等情况，缺交看板默认过滤。"""
+    __tablename__ = "homework_record"
+    id = Column(Integer, primary_key=True)
+    student_id = Column(String, ForeignKey("class_roster.student_id"), nullable=False)
+    date = Column(String, nullable=False)  # YYYY-MM-DD
+    subject = Column(String, nullable=False)
+    content = Column(String, nullable=True)
+    remark = Column(String, nullable=True)
+
+    __table_args__ = (
+        Index("idx_hw_student_date", "student_id", "date"),
+        Index("idx_hw_date_subject", "date", "subject"),
+    )
+
+
+class SpecialRecord(Base):
+    """特殊情况记录（对应原 special_records 表）：请假/迟到/早退等。"""
+    __tablename__ = "special_record"
+    id = Column(Integer, primary_key=True)
+    student_id = Column(String, ForeignKey("class_roster.student_id"), nullable=False)
+    date = Column(String, nullable=False)  # YYYY-MM-DD
+    type = Column(String, nullable=False)
+    note = Column(String, nullable=True)
+
+    __table_args__ = (
+        Index("idx_special_student_date", "student_id", "date"),
+    )
+
+
+class HomeworkSetting(Base):
+    """作业模块键值配置（学期起止 semester_start / semester_end /
+    semester_name）。对应原 settings 表。"""
+    __tablename__ = "homework_setting"
+    key = Column(String, primary_key=True)
+    value = Column(String, nullable=True)
+
+
 Base.metadata.create_all(bind=engine)

@@ -23,6 +23,7 @@ import {
 } from 'lucide-react'
 
 import TrendLineChart from '@/components/TrendLineChart'
+import HomeworkCard from '@/components/HomeworkCard'
 import { cn } from '@/lib/utils'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
@@ -675,6 +676,9 @@ export default function StudentPage() {
             </CardContent>
           </Card>
         </div>
+
+        {/* 作业缺交（仅作业花名册内学生显示） */}
+        {studentId && <HomeworkCard studentId={studentId} />}
 
         {/* 主三门趋势图 */}
         <Card>

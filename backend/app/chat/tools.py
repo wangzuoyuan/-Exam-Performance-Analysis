@@ -1101,6 +1101,76 @@ def rank_frequency_stat_tool(
     )
 
 
+def student_homework_summary(student_id: Optional[str] = None, name: Optional[str] = None) -> dict[str, Any]:
+    """某生本学期作业概况：缺交总数、按科目分布、迟到/请假次数、当前连续缺交预警。"""
+    from app.db.models import get_db
+    from app.homework import service
+
+    db = next(get_db())
+    try:
+        return service.student_summary(db, student_id=student_id, name=name)
+    finally:
+        db.close()
+
+
+def class_homework_ranking(
+    class_num: int = 6,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """班级缺交排行（排除被标记为不统计的学生）。不传日期时用当前学期区间。"""
+    from app.db.models import get_db
+    from app.homework import service
+
+    db = next(get_db())
+    try:
+        sem = service.get_semester(db)
+        start = start_date or sem["semester_start"]
+        end = end_date or sem["semester_end"]
+        result = service.rankings(db, start, end, limit=limit)
+        return {
+            "class_num": class_num,
+            "semester": {"start": start, "end": end},
+            "rankings": [
+                {"name": n, "miss_count": c}
+                for n, c in zip(result["names"], result["counts"])
+            ],
+            "note": "miss_count 为该区间缺交次数；作业数据仅含缺交/请假/迟到，不代表完成质量。",
+        }
+    finally:
+        db.close()
+
+
+def homework_grade_correlation(
+    class_num: int = 6,
+    exam_id: Optional[int] = None,
+    total_type: str = "主三门",
+    subject: Optional[str] = None,
+) -> dict[str, Any]:
+    """班级「缺交 × 成绩」联动。
+
+    - 不传 subject：X=学期总缺交次数，Y=该次考试总分学籍排名；并附带各科
+      「缺交拖成绩」皮尔逊相关排序（subject_correlation），可答"哪门课缺交最影响成绩"。
+    - 传 subject（如"数学"）：X=该科缺交次数，Y=该科年级百分位（越小越靠前）。
+    exam_id 不填取最新考试。"""
+    from app.db.models import get_db
+    from app.homework import service
+
+    db = next(get_db())
+    try:
+        result = service.grade_correlation(
+            db, class_num, exam_id, total_type, subject=subject
+        )
+        if not subject:
+            result["subject_correlation"] = service.subject_correlation_ranking(
+                db, class_num, exam_id
+            )["rankings"]
+        return result
+    finally:
+        db.close()
+
+
 TOOL_FUNCTIONS = {
     "list_exams": list_exams,
     "student_lookup": student_lookup,
@@ -1117,6 +1187,9 @@ TOOL_FUNCTIONS = {
     "custom_rank_band_trend": custom_rank_band_trend,
     "rank_range_filter": rank_range_filter_tool,
     "rank_frequency_stat": rank_frequency_stat_tool,
+    "student_homework_summary": student_homework_summary,
+    "class_homework_ranking": class_homework_ranking,
+    "homework_grade_correlation": homework_grade_correlation,
 }
 
 
@@ -1348,6 +1421,43 @@ TOOLS = [
                 "recent_count": {"type": "integer", "description": "未指定考试ID时取最近几次，默认5"},
             },
             "required": ["grade", "metric"],
+        },
+    },
+    {
+        "name": "student_homework_summary",
+        "description": "某个学生本学期的作业（缺交）概况：缺交总次数、按科目分布、迟到/请假次数、当前连续缺交预警。回答“某某作业完成情况怎么样”“他缺交多吗”“作业和成绩有没有关系”时先用本工具拿作业侧数据，再结合 student_learning_profile 的成绩。作业数据仅含缺交/请假/迟到，不代表完成质量。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "student_id": {"type": "string", "description": "学号；页面上下文有 student_id 时优先使用"},
+                "name": {"type": "string", "description": "学生姓名；姓名不唯一时返回候选"},
+            },
+        },
+    },
+    {
+        "name": "class_homework_ranking",
+        "description": "班级缺交排行榜，回答“这学期谁缺交最多”“缺交前几名是谁”。默认当前学期区间，已排除被标记为不统计的学生。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "class_num": {"type": "integer", "description": "班号，默认6"},
+                "start_date": {"type": "string", "description": "起始日期 YYYY-MM-DD；不填用学期开始"},
+                "end_date": {"type": "string", "description": "结束日期 YYYY-MM-DD；不填用学期结束"},
+                "limit": {"type": "integer", "description": "返回人数，默认10"},
+            },
+        },
+    },
+    {
+        "name": "homework_grade_correlation",
+        "description": "把全班「缺交」和「成绩」放在一起，回答“作业缺交多的学生成绩是不是更差”“缺交和排名有没有关系”“哪门课缺交最影响成绩”“数学缺交多的学生数学成绩如何”。不传 subject 时返回每生 miss_count 和 xueji_rank，并附带 subject_correlation（各科缺交与成绩的皮尔逊相关排序，r 越大该科缺交越拖成绩）；传 subject（如“数学”）时返回该科缺交次数与该科年级百分位。exam_id 不填取最新考试。作业数据仅反映缺交，不代表完成质量。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "class_num": {"type": "integer", "description": "班号，默认6"},
+                "exam_id": {"type": "integer", "description": "考试ID；不填取最新一场"},
+                "total_type": {"type": "string", "description": "总分类型，默认主三门（仅总览模式用）"},
+                "subject": {"type": "string", "description": "学科名（语文/数学/英语/物理/化学/生物/政治/历史/地理）；传了就看该科缺交×该科百分位"},
+            },
         },
     },
 ]
