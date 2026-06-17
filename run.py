@@ -22,6 +22,7 @@ APP_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = APP_DIR / "backend"
 FRONTEND_DIR = APP_DIR / "frontend"
 DATA_DIR = Path.home() / ".exam-tracker"
+BACKUP_DIR = Path.home() / ".exam-tracker-backups"
 BACKEND_LOG = DATA_DIR / "backend.log"
 FRONTEND_LOG = DATA_DIR / "frontend.log"
 
@@ -217,6 +218,64 @@ def cmd_stop() -> int:
     return 0
 
 
+def make_backup(prefix: str = "backup") -> Path | None:
+    """打包 db.sqlite + homework_exports/ 到 ~/.exam-tracker-backups（DATA_DIR 之外）。"""
+    import zipfile
+
+    db_path = DATA_DIR / "db.sqlite"
+    export_dir = DATA_DIR / "homework_exports"
+    if not db_path.exists():
+        return None
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    out = BACKUP_DIR / f"{prefix}-{stamp}.zip"
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(db_path, "db.sqlite")
+        if export_dir.is_dir():
+            for p in export_dir.rglob("*"):
+                if p.is_file():
+                    zf.write(p, str(Path("homework_exports") / p.relative_to(export_dir)))
+    return out
+
+
+def cmd_backup() -> int:
+    out = make_backup()
+    if out is None:
+        print(f"没有可备份的数据库（{DATA_DIR / 'db.sqlite'} 不存在）。")
+        return 1
+    print(f"已备份到: {out}")
+    return 0
+
+
+def cmd_restore(filename: str | None) -> int:
+    import zipfile
+
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    backups = sorted(BACKUP_DIR.glob("*.zip"), reverse=True)
+    if not backups:
+        print(f"没有可用备份（{BACKUP_DIR} 为空）。")
+        return 1
+    target = (BACKUP_DIR / filename) if filename else backups[0]
+    if not target.exists():
+        print(f"备份不存在: {target}")
+        print("可用备份：")
+        for b in backups:
+            print(f"  {b.name}")
+        return 1
+    with zipfile.ZipFile(target) as zf:
+        if "db.sqlite" not in zf.namelist():
+            print("备份内缺少 db.sqlite")
+            return 1
+    # 恢复前先快照当前库
+    make_backup(prefix="before-restore")
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(target) as zf, open(DATA_DIR / "db.sqlite", "wb") as dst:
+        with zf.open("db.sqlite") as src:
+            shutil.copyfileobj(src, dst)
+    print(f"已从 {target.name} 恢复数据库。请重新启动应用。")
+    return 0
+
+
 def cmd_init() -> int:
     print("=== 成绩追踪 Web App 全新初始化 ===")
     print("这会清空本应用的本地数据库、已上传表格、日志和旧备份。")
@@ -231,6 +290,9 @@ def cmd_init() -> int:
             kill_port(port)
 
     print()
+    snapshot = make_backup(prefix="before-init")
+    if snapshot is not None:
+        print(f"[安全快照] 清空前已自动备份到: {snapshot}")
     print(f"[2/4] 清空本地应用数据 ({DATA_DIR})...")
     shutil.rmtree(DATA_DIR, ignore_errors=True)
     (DATA_DIR / "raw").mkdir(parents=True, exist_ok=True)
@@ -287,6 +349,9 @@ def main() -> int:
     sub.add_parser("start", help="启动后端 + 前端 + 浏览器")
     sub.add_parser("stop", help="停止后端 + 前端")
     sub.add_parser("init", help="清空数据并重建 venv / node_modules")
+    sub.add_parser("backup", help="备份数据库到 ~/.exam-tracker-backups")
+    p_restore = sub.add_parser("restore", help="从备份恢复数据库（不指定则用最新）")
+    p_restore.add_argument("filename", nargs="?", help="备份文件名；省略则用最新一份")
     args = parser.parse_args()
 
     if args.cmd == "start":
@@ -295,6 +360,10 @@ def main() -> int:
         return cmd_stop()
     if args.cmd == "init":
         return cmd_init()
+    if args.cmd == "backup":
+        return cmd_backup()
+    if args.cmd == "restore":
+        return cmd_restore(args.filename)
     return 1
 
 

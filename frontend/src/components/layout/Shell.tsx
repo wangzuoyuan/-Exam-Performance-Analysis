@@ -50,12 +50,12 @@ export function Shell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-slate-50 print:min-h-0 print:bg-white">
       <Sidebar teacher={teacher} onNameChange={handleNameChange} />
-      <div className="md:pl-60">
+      <div className="md:pl-60 print:pl-0">
         <Topbar teacher={teacher} />
         <main>
-          <div className="mx-auto max-w-7xl px-6 py-8">{children}</div>
+          <div className="mx-auto max-w-7xl px-6 py-8 print:max-w-none print:px-0 print:py-0">{children}</div>
         </main>
       </div>
     </div>

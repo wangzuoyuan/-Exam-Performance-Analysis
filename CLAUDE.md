@@ -11,8 +11,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 python run.py start
 # 重启（启动器检测到端口占用会跳过，必须先停）
 python run.py stop && python run.py start
-# 完全重置（清空 ~/.exam-tracker/）
+# 完全重置（清空 ~/.exam-tracker/；执行前会自动快照到 ~/.exam-tracker-backups）
 python run.py init
+# 数据备份 / 恢复（备份目录在 DATA_DIR 之外，不被 init 清空）
+python run.py backup
+python run.py restore [备份文件名]   # 省略则用最新一份
 
 # 后端（带 reload，单独开发用）
 cd backend && source .venv/bin/activate && uvicorn app.main:app --reload --port 8000
@@ -35,9 +38,9 @@ tail -f ~/.exam-tracker/frontend.log
 
 **后端**：FastAPI + SQLite（`~/.exam-tracker/db.sqlite`），通过 SQLAlchemy 访问。三个路由模块挂载在 `/api` 前缀下：`ingest`（上传）/ `analysis`（查询）/ `chat`（SSE 流式对话）。
 
-**前端**：Next.js 14 App Router + shadcn/ui + Recharts + Tailwind。全局布局由 `Shell.tsx`（侧边栏 + Topbar）管理，`ChatDrawer` 在 `layout.tsx` 全局挂载。页面：`/`(仪表盘) `/upload` `/compare` `/exam` `/student` `/homework`(作业，含 `/manage` `/warnings` `/correlation` `/settings` 子页)。
+**前端**：Next.js 14 App Router + shadcn/ui + Recharts + Tailwind。全局布局由 `Shell.tsx`（侧边栏 + Topbar）管理，`ChatDrawer` 在 `layout.tsx` 全局挂载。页面：`/`(仪表盘，含「本周关注」「数据备份」卡) `/upload` `/compare` `/exam` `/student`（学生页含作业卡片、成长/谈话档案、「导出家长会一页纸」入口）`/student/[id]/report`(打印友好一页纸) `/homework`(作业，含 `/manage` `/warnings` `/correlation` `/settings` 子页)。
 
-**数据库**：成绩相关 6 张表——`teacher`（教师配置）、`exam`、`upload`、`subject_score`（单科原始分/等级分/百分位）、`total_score`（各口径总分/排名）、`class_average`（班级均分）；另有 `analysis_config`（段位阈值，全局单行 id=1）。作业相关 4 张表（由原独立 Flask「作业跟踪」合并而来）——`class_roster`（班级花名册，主键真实学号 `student_id`，含座号/性别/`excluded` 排除统计标记）、`homework_record`（缺交记录）、`special_record`（请假/迟到等）、`homework_setting`（学期键值配置）。作业记录按真实学号与成绩表关联。
+**数据库**：成绩相关 6 张表——`teacher`、`exam`、`upload`、`subject_score`、`total_score`、`class_average`；另有 `analysis_config`（段位阈值，单行 id=1）。作业相关 4 张表（原 Flask「作业跟踪」合并而来）——`class_roster`（花名册，主键真实学号 `student_id`，含座号/性别/`excluded`）、`homework_record`、`special_record`、`homework_setting`。档案 1 张表——`student_note`（成长/谈话档案：category 谈话/观察/家访/家长沟通/奖惩、content、follow_up 跟进项）。作业与档案均按真实学号 `student_id` 与成绩表关联。
 
 ## API 端点一览
 
@@ -81,12 +84,32 @@ tail -f ~/.exam-tracker/frontend.log
 | GET/PUT/DELETE | `/manage/records[/{id}]` | 记录管理；列表支持 `?date=&student=&subject=` 筛选（供看板图表下钻） |
 | GET/POST/DELETE/PUT | `/roster[/{student_id}[/toggle-excluded]]` | 花名册增删查 + 排除统计开关 |
 | GET/PUT | `/semester` | 学期起止与名称配置 |
+| GET  | `/api/weekly-focus` | 本周关注名单：合并连续缺交预警 + 本周缺交激增 + 最近考试临界/薄弱/偏科 + 谈话跟进待办（缺交驱动，不依赖新考试） |
 
-## 对话工具集（18 个只读工具，`chat/tools.py`）
+### notes router（`/api/notes`，`notes/router.py`）
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET  | `/api/notes/{student_id}` | 某生成长/谈话档案列表 |
+| POST | `/api/notes` | 新增档案条目 |
+| PUT  | `/api/notes/{id}` | 编辑 / 勾选跟进完成 |
+| DELETE | `/api/notes/{id}` | 删除 |
+
+### backup router（`/api/backup`，`backup/router.py`）
+备份目录 `~/.exam-tracker-backups`（在 DATA_DIR 之外，不被 `init` 清空）。
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/backup` | 打包 db.sqlite + homework_exports 为时间戳 zip |
+| GET  | `/api/backups` | 备份列表 |
+| GET  | `/api/backup/{name}/download` | 下载备份 |
+| POST | `/api/restore` | 恢复（先自动备份当前库，再覆盖，建议重启） |
+
+## 对话工具集（19 个只读工具，`chat/tools.py`）
 
 成绩 15 个：`list_exams` / `student_lookup` / `student_exam_detail` / `student_trend` / `student_learning_profile` / `class_trend` / `compare_classes` / `focus_list` / `subject_weakness` / `subject_progress_ranking` / `multi_exam_progress_ranking` / `band_trend` / `custom_rank_band_trend` / `rank_range_filter` / `rank_frequency_stat`
 
-作业 3 个：`student_homework_summary`（某生缺交概况）/ `class_homework_ranking`（班级缺交排行）/ `homework_grade_correlation`（缺交×成绩联动，支持 `subject` 参数，总览模式附各科皮尔逊相关排序）
+作业 3 个：`student_homework_summary` / `class_homework_ranking` / `homework_grade_correlation`（支持 `subject`，总览附各科皮尔逊相关排序）
+
+档案 1 个：`student_notes`（读取某生成长/谈话档案，结合成绩与缺交辅助起草谈话提纲/家长沟通稿）
 
 新增工具：在 `tools.py` 里添加函数 + 注册到 `TOOL_FUNCTIONS` 字典和 `TOOLS` 列表，`session.py` 的 `execute_tool()` 自动调度。
 
@@ -98,7 +121,9 @@ tail -f ~/.exam-tracker/frontend.log
 
 **段位阈值**：所有段位计算（`rank_bands`、`focus-list`、`band-trend`、AI 工具）必须调用 `analysis/config.py` 的 `get_band_config()`，不能硬编码默认值。用户在前端修改后，页面展示与 AI 问答口径同步。
 
-**作业模块**：聚合查询集中在 `homework/service.py`（看板/排行/预警/相关性），被 `homework/router.py` 与 `chat/tools.py` 共用；学科归类与录入文本解析在 `homework/parser.py`；Excel 导出在 `homework/export.py`。缺交看板默认口径：过滤 `remark` 非空（请假当天不算缺交）、`subject='全科'`、`excluded=1` 学生。一次性数据迁移脚本 `homework/migrate.py`（按姓名把旧 `homework.db` 的座号映射到成绩库真实学号，幂等可重跑）。
+**作业模块**：聚合查询集中在 `homework/service.py`（看板/排行/预警/相关性/`weekly_focus`），被 `homework/router.py` 与 `chat/tools.py` 共用；学科归类与录入文本解析在 `homework/parser.py`；Excel 导出在 `homework/export.py`。缺交看板默认口径：过滤 `remark` 非空（请假当天不算缺交）、`subject='全科'`、`excluded=1` 学生。一次性数据迁移脚本 `homework/migrate.py`（按姓名把旧 `homework.db` 的座号映射到成绩库真实学号，幂等可重跑）。
+
+**档案 / 主动提醒 / 备份**：`notes/router.py` 管理 `student_note`（成长/谈话档案），AI 工具 `student_notes` 可读取。`homework/service.weekly_focus()` 合成「本周关注」，复用 `warnings` 与 `chat/tools.focus_list`（懒导入避免循环）。`backup/router.py` 与 `run.py` 的 `backup/restore` 子命令共用同一备份目录 `~/.exam-tracker-backups`；`run.py init` 清空前自动快照。
 
 ## 业务口径（指标选择规则）
 
@@ -136,6 +161,6 @@ OPENAI_MODEL=gpt-4o-mini
 
 ## 测试覆盖
 
-有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser`（学科解析）/ `homework_router`（看板/相关性/花名册/学期端点 + 皮尔逊单测）
+有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser`（学科解析）/ `homework_router`（看板/相关性/花名册/学期端点 + 皮尔逊单测）/ `notes_router`（档案增删改 + 跟进）/ `backup_weekly`（备份/恢复/本周关注）
 
 **无测试**：`analysis/router.py` 的计算逻辑（`trends` / `class_compare` / `focus_list` / `cross_year` / `rank_metrics` 模块同样无测试）。

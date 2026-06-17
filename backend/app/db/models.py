@@ -168,4 +168,25 @@ class HomeworkSetting(Base):
     value = Column(String, nullable=True)
 
 
+# ────────────────────────────── 学生成长 / 谈话档案 ──────────────────────────────
+
+class StudentNote(Base):
+    """班主任记录的谈话 / 观察 / 家访 / 家长沟通 / 奖惩等档案条目。
+    仅本地存储；AI 对话可按需读取以辅助起草谈话提纲、家长沟通稿。"""
+    __tablename__ = "student_note"
+    id = Column(Integer, primary_key=True)
+    student_id = Column(String, nullable=False)  # 真实学号
+    date = Column(String, nullable=False)        # YYYY-MM-DD
+    category = Column(String, nullable=False)    # 谈话/观察/家访/家长沟通/奖惩/其他
+    content = Column(String, nullable=False)
+    follow_up = Column(String, nullable=True)    # 跟进事项，可空
+    follow_up_done = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_note_student", "student_id"),
+        Index("idx_note_date", "date"),
+    )
+
+
 Base.metadata.create_all(bind=engine)

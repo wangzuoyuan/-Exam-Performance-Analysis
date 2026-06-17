@@ -107,8 +107,12 @@ from app.ingest.router import router as ingest_router  # noqa
 from app.analysis.router import router as analysis_router  # noqa
 from app.chat.session import router as chat_router  # noqa
 from app.homework.router import router as homework_router  # noqa
+from app.notes.router import router as notes_router  # noqa
+from app.backup.router import router as backup_router  # noqa
 
 app.include_router(ingest_router, prefix="/api")
 app.include_router(analysis_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(homework_router, prefix="/api")
+app.include_router(notes_router, prefix="/api")
+app.include_router(backup_router, prefix="/api")

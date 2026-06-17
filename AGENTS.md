@@ -79,12 +79,19 @@ tail -f ~/.exam-tracker/frontend.log
 | GET/PUT/DELETE | `/manage/records[/{id}]` | 记录管理；列表支持 `?date=&student=&subject=` 筛选（供看板图表下钻） |
 | GET/POST/DELETE/PUT | `/roster[/{student_id}[/toggle-excluded]]` | 花名册增删查 + 排除统计开关 |
 | GET/PUT | `/semester` | 学期起止与名称配置 |
+| GET  | `/api/weekly-focus` | 本周关注：连续缺交预警 + 本周缺交激增 + 最近考试临界/薄弱/偏科 + 谈话跟进待办（缺交驱动，不依赖新考试） |
 
-## 对话工具集（18 个只读工具，`chat/tools.py`）
+### notes / backup router
+- `notes/router.py`（`/api/notes`）：`GET /{student_id}`、`POST`、`PUT /{id}`（含跟进勾选）、`DELETE /{id}`，管理 `student_note` 成长/谈话档案。
+- `backup/router.py`（`/api/backup`）：`POST /backup`、`GET /backups`、`GET /backup/{name}/download`、`POST /restore`。备份目录 `~/.exam-tracker-backups`（在 DATA_DIR 之外）。
+
+## 对话工具集（19 个只读工具，`chat/tools.py`）
 
 成绩 15 个：`list_exams` / `student_lookup` / `student_exam_detail` / `student_trend` / `student_learning_profile` / `class_trend` / `compare_classes` / `focus_list` / `subject_weakness` / `subject_progress_ranking` / `multi_exam_progress_ranking` / `band_trend` / `custom_rank_band_trend` / `rank_range_filter` / `rank_frequency_stat`
 
 作业 3 个：`student_homework_summary` / `class_homework_ranking` / `homework_grade_correlation`（支持 `subject` 参数，总览模式附各科皮尔逊相关排序）
+
+档案 1 个：`student_notes`（读取某生成长/谈话档案，结合成绩与缺交辅助起草谈话/家长沟通）
 
 新增工具只需在 `tools.py` 里添加函数并注册到 `TOOL_FUNCTIONS` 字典和 `TOOLS` 列表，`session.py` 自动调度。
 
@@ -98,7 +105,9 @@ tail -f ~/.exam-tracker/frontend.log
 
 **段位阈值**：所有段位计算（考试详情、focus-list、band-trend、AI 工具）都应调用 `analysis/config.py` 的 `get_band_config()`，不要硬编码默认阈值。用户在前端改段位后，页面和 AI 问答口径必须同步。
 
-**作业模块**：聚合查询集中在 `homework/service.py`（看板/排行/预警/相关性），被 `homework/router.py` 与 `chat/tools.py` 共用；学科归类与录入文本解析在 `homework/parser.py`；Excel 导出在 `homework/export.py`。新增 4 张表 `class_roster`/`homework_record`/`special_record`/`homework_setting`，作业记录按真实学号 `student_id` 与成绩表关联。缺交看板默认口径：过滤 `remark` 非空（请假当天不算缺交）、`subject='全科'`、`excluded=1` 学生。一次性迁移脚本 `homework/migrate.py`（按姓名把旧 `homework.db` 座号映射到成绩库真实学号，幂等可重跑）。
+**作业模块**：聚合查询集中在 `homework/service.py`（看板/排行/预警/相关性/`weekly_focus`），被 `homework/router.py` 与 `chat/tools.py` 共用；学科归类与录入文本解析在 `homework/parser.py`；Excel 导出在 `homework/export.py`。新增 4 张表 `class_roster`/`homework_record`/`special_record`/`homework_setting`，作业记录按真实学号 `student_id` 与成绩表关联。缺交看板默认口径：过滤 `remark` 非空（请假当天不算缺交）、`subject='全科'`、`excluded=1` 学生。一次性迁移脚本 `homework/migrate.py`（按姓名把旧 `homework.db` 座号映射到成绩库真实学号，幂等可重跑）。
+
+**档案 / 主动提醒 / 备份**：`student_note` 表 + `notes/router.py` 管理成长/谈话档案，AI 工具 `student_notes` 可读取。`weekly_focus()` 合成「本周关注」（懒导入 `chat/tools.focus_list` 避免循环依赖）。`backup/router.py` 与 `run.py` 的 `backup/restore` 子命令共用备份目录 `~/.exam-tracker-backups`（DATA_DIR 之外）；`run.py init` 清空前自动快照。打印一页纸 `/student/[id]/report` 靠 `@media print`（`print:hidden` 隐藏侧栏/顶栏）。
 
 ## 业务口径（AI 与趋势指标）
 
@@ -137,6 +146,6 @@ OPENAI_MODEL=gpt-4o-mini
 
 ## 测试覆盖
 
-有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser` / `homework_router`
+有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser` / `homework_router` / `notes_router` / `backup_weekly`
 
 **无测试**：`analysis/router.py` 的计算逻辑（trends / class_compare / focus_list / cross_year 模块同样无测试）。

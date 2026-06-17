@@ -25,6 +25,8 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import WeeklyFocusCard from '@/components/WeeklyFocusCard'
+import BackupCard from '@/components/BackupCard'
 
 interface Exam {
   id: number
@@ -292,6 +294,9 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* 本周关注（主动提醒） */}
+      <WeeklyFocusCard />
+
       {/* 初始化提示 */}
       {showUploadPrompt && (
         <Card className="border-brand-500/20 bg-brand-50/50">
@@ -492,6 +497,9 @@ export default function Dashboard() {
           )}
         </Card>
       </div>
+
+      {/* 数据备份 */}
+      <BackupCard />
     </div>
   )
 }

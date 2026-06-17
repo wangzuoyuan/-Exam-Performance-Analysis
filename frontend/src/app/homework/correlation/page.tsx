@@ -5,6 +5,7 @@ import Link from 'next/link'
 import {
   CartesianGrid,
   Cell,
+  LabelList,
   ResponsiveContainer,
   Scatter,
   ScatterChart,
@@ -188,6 +189,27 @@ export default function CorrelationPage() {
                     {points.map((p, i) => (
                       <Cell key={i} fill={flaggedNames.has(p.name) ? '#dc2626' : '#94a3b8'} />
                     ))}
+                    <LabelList
+                      dataKey="name"
+                      position="top"
+                      content={(props) => {
+                        const { x, y, value } = props as { x?: number; y?: number; value?: string }
+                        if (x == null || y == null || !value) return null
+                        const flagged = flaggedNames.has(value)
+                        return (
+                          <text
+                            x={x}
+                            y={y - 6}
+                            textAnchor="middle"
+                            fontSize={10}
+                            fill={flagged ? '#dc2626' : '#94a3b8'}
+                            fontWeight={flagged ? 600 : 400}
+                          >
+                            {value}
+                          </text>
+                        )
+                      }}
+                    />
                   </Scatter>
                 </ScatterChart>
               </ResponsiveContainer>
