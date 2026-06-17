@@ -42,6 +42,19 @@ tail -f ~/.exam-tracker/frontend.log
 
 **数据库**：成绩相关 6 张表——`teacher`、`exam`、`upload`、`subject_score`、`total_score`、`class_average`；另有 `analysis_config`（段位阈值，单行 id=1）。作业相关 4 张表（原 Flask「作业跟踪」合并而来）——`class_roster`（花名册，主键真实学号 `student_id`，含座号/性别/`excluded`）、`homework_record`、`special_record`、`homework_setting`。档案 1 张表——`student_note`（成长/谈话档案：category 谈话/观察/家访/家长沟通/奖惩、content、follow_up 跟进项）。作业与档案均按真实学号 `student_id` 与成绩表关联。
 
+## 部署（Docker / 群晖 NAS）
+
+同一套代码既能本地 `run.py` 跑，也能 Docker 部署（不再维护单独副本）。部署文件：根 `docker-compose.yml`（backend + frontend + caddy 三服务，项目名 `grade_tracker`）、`Caddyfile`（`:8080` 路径分流 /api→backend、/→frontend）、`backend/Dockerfile`、`frontend/Dockerfile`（Next standalone）、`DEPLOY.md`（群晖 NAS 完整手册）。
+
+部署特性**对本地开发无感（默认关闭）**：
+
+- **登录鉴权**：`backend/app/auth.py` + `auth_router.py` + 前端 `AuthGate.tsx`。仅当设了 `APP_PASSWORD` **且**请求 Host 命中 `PUBLIC_HOST`（外网域名入口）时要求会话；内网 IP / 本地 dev / 未设密码一律放行。中间件挂在 `main.py`，放行 `/api/login`、`/api/logout`、`/api/auth/status`、`/api/health`。
+- **数据目录**：`backend/app/paths.py` 的 `DATA_DIR`/`BACKUP_DIR` 读环境变量 `EXAM_TRACKER_DIR`/`EXAM_TRACKER_BACKUP_DIR`，缺省回落 `~/.exam-tracker`；Docker 镜像内设为 `/data` 挂卷。所有原先硬编码 `~/.exam-tracker` 的地方都改走 `paths.py`。
+- **前端**：`next.config.js` 用 `output:'standalone'`；ChatDrawer 聊天地址生产走同源 `/api`（经 Caddy）、本地 dev 直连 `:8000`（跟随当前主机名，便于手机同 WiFi 访问）。
+- **CORS**：`main.py` 默认放行 `http://<任意主机>:3000`（局域网 dev）+ 可选 `CORS_ORIGINS`；生产同源无需 CORS。
+
+改部署后让 NAS 生效见 `DEPLOY.md`；NAS 上 compose 命令需带 `-p grade_tracker`（目录名含中文，裸跑会误建名为 `docker` 的平行栈）。
+
 ## API 端点一览
 
 ### ingest router

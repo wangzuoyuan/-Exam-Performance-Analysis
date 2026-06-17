@@ -401,6 +401,13 @@ pytest tests/
 └── README.md
 ```
 
+## Docker 部署 / 远程访问
+
+除本地 `run.py` 运行外，本项目可直接用 Docker 部署到服务器或群晖 NAS，让手机 / 电脑在外网随时访问。根目录 `docker-compose.yml` 起 backend + frontend + caddy 三个容器，`Caddyfile` 做 `/api`→后端、`/`→前端的路径分流；密钥与登录写在 `backend/.env`（已被 gitignore）。完整步骤见 [DEPLOY.md](DEPLOY.md)。
+
+- **按入口区分鉴权**：内网（局域网 IP 直连）免登录；外网（经配置的 `PUBLIC_HOST` 域名）需输入 `APP_PASSWORD` 登录。不设 `APP_PASSWORD` 则完全不启用登录（纯本地使用无感）。
+- **数据隔离**：容器数据落在挂载卷 `/data`，与本地 `~/.exam-tracker` 互不影响；通过 `EXAM_TRACKER_DIR` 等环境变量切换，缺省仍回落到 `~/.exam-tracker`。
+
 ## 贡献指南
 
 欢迎提交 Issue 和 Pull Request。

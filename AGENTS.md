@@ -36,6 +36,15 @@ tail -f ~/.exam-tracker/backend.log
 tail -f ~/.exam-tracker/frontend.log
 ```
 
+## 部署（Docker / 群晖 NAS）
+
+同一套代码既能本地 `run.py` 跑，也能 Docker 部署。部署文件：根 `docker-compose.yml`（backend + frontend + caddy，项目名 `grade_tracker`）、`Caddyfile`（`:8080` 路径分流）、`backend/Dockerfile`、`frontend/Dockerfile`（Next standalone）、`DEPLOY.md`（NAS 手册）。部署特性**对本地开发无感、默认关闭**：
+
+- **登录鉴权**（`backend/app/auth.py` + `auth_router.py` + 前端 `AuthGate.tsx`）：仅当设了 `APP_PASSWORD` 且 Host 命中 `PUBLIC_HOST` 时要求登录；内网 / 本地 dev / 未设密码放行。中间件在 `main.py`。
+- **数据目录**：`backend/app/paths.py` 的 `DATA_DIR`/`BACKUP_DIR` 读 `EXAM_TRACKER_DIR`/`EXAM_TRACKER_BACKUP_DIR`，缺省回落 `~/.exam-tracker`；Docker 内为 `/data`。
+- 前端 `next.config.js` 用 `output:'standalone'`；ChatDrawer 生产走同源 `/api`、dev 直连 `:8000`。CORS 默认放行 `:3000` 局域网 + 可选 `CORS_ORIGINS`。
+- NAS 上 compose 命令需带 `-p grade_tracker`（目录名含中文，裸跑会误建平行栈）。
+
 ## API 端点一览
 
 ### ingest router（`/api`）
