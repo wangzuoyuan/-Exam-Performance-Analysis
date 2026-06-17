@@ -1,6 +1,6 @@
 # 成绩分析 Webapp
 
-面向高中班主任的本地成绩分析 Web 应用。项目支持多场 Excel 成绩导入、跨学年学生画像、班级横向对比、重点关注名单，以及基于 LLM tool-use 的 AI 对话助手。
+面向高中班主任的本地成绩分析 Web 应用。项目支持多场 Excel 成绩导入、跨学年学生画像、班级横向对比、重点关注名单、作业缺交跟踪，以及基于 LLM tool-use 的 AI 对话助手。作业缺交与考试成绩按真实学号打通，可分析「缺交是否拖成绩」。
 
 本项目已按 MIT License 开源，可自由使用、修改和二次分发。
 
@@ -14,7 +14,9 @@
 - **排名筛选与频次统计**：按单次考试筛选指定年级排名区间；按多场考试统计学生落入百分位、40 名一档或精确等级分档位的次数。
 - **学生画像页**：展示跨学年主三门趋势、五门趋势、+3 / 3+3 趋势、单科历史和历次考试明细。
 - **班级对比页**：按总分或单科均分做多班横向对比，并高亮当前班级。
-- **AI 对话助手**：支持 Anthropic Messages API 和 OpenAI Chat Completions 兼容接口，使用只读工具查询本地成绩数据后回答。
+- **作业跟踪**：智能文本批量录入缺交 / 请假 / 迟到，看板含每日趋势、各科占比、缺交排行、连续缺交预警；图表可点击下钻到按日期 / 学科 / 学生筛选的明细；录入后自动导出当天 Excel；花名册可设「排除统计」学生、可配置学期区间。
+- **缺交 × 成绩相关性**：把缺交次数和考试排名放在一起，按学科散点呈现并用皮尔逊系数排出各科「缺交拖成绩」强弱；学生画像页同时显示成绩趋势与作业缺交卡片。
+- **AI 对话助手**：支持 Anthropic Messages API 和 OpenAI Chat Completions 兼容接口，使用只读工具查询本地成绩与作业数据后回答（如「6 班缺交最多的 5 人成绩排名如何」「哪门课缺交最拖成绩」）。
 - **多场趋势分析**：AI 工具支持最近两次进退步，也支持最近 N 次或指定多场考试合并判断趋势排行。
 - **本地单机部署**：数据库、上传文件和日志默认存放在用户目录 `~/.exam-tracker/`。
 - **跨平台启动器**：`run.py` 统一封装 macOS / Windows 的初始化、启动和停止流程。
@@ -113,8 +115,13 @@ python3 run.py init
 | 考试列表 | `/exam` | 已建档考试列表、搜索、删除误传考试 |
 | 考试详情 | `/exam/[id]` | 班级均分表、学生成绩明细、名次段分布（可自定义段位 + 历次趋势）、排名频次统计、排名区间筛选、重点关注 |
 | 学生检索 | `/student` | 按姓名或学号查找学生画像 |
-| 学生详情 | `/student/[id]` | 跨学年趋势、单科变化、历次考试明细 |
+| 学生详情 | `/student/[id]` | 跨学年趋势、单科变化、历次考试明细、作业缺交卡片 |
 | 班级对比 | `/compare` | 多班总分 / 单科均分横向对比 |
+| 作业跟踪 | `/homework` | 录入、每日趋势、各科占比、缺交排行、连续缺交预警速览 |
+| 记录管理 | `/homework/manage` | 缺交 / 特殊记录的查询、删除（支持 `?date=&student=&subject=` 下钻） |
+| 缺交预警 | `/homework/warnings` | 连续缺交按学生 / 按学科两视角 |
+| 缺交 × 成绩 | `/homework/correlation` | 按学科散点 + 各科相关强弱排序 |
+| 作业设置 | `/homework/settings` | 花名册排除统计、学期配置 |
 
 ## 数据和隐私
 
@@ -159,6 +166,10 @@ SQLite 数据库位于 `~/.exam-tracker/db.sqlite`。
 | `total_score` | 总分表：主三门、五门、九门、+3、3+3 |
 | `class_average` | 班级均分表：各科均分和各类总分均分 |
 | `analysis_config` | 重点关注段位阈值（高分段 / 临界段 / 薄弱段排名区间，全局单行） |
+| `class_roster` | 班级花名册（作业）：主键真实学号 `student_id`，含座号、性别、`excluded` 排除统计标记 |
+| `homework_record` | 缺交记录：学号、日期、科目、内容、备注 |
+| `special_record` | 特殊记录：请假、迟到等 |
+| `homework_setting` | 作业模块键值配置（学期起止 / 名称） |
 
 ## Excel 口径
 
@@ -212,6 +223,21 @@ SQLite 数据库位于 `~/.exam-tracker/db.sqlite`。
 | GET | `/api/rank-range` | 按单次考试、指标和年级排名区间筛选学生，支持 `?exam_id=`、`?metric=`、`?rank_min=`、`?rank_max=`、`?class_num=` |
 | GET | `/api/rank-frequency` | 按多场考试统计排名 / 百分位 / 精确等级分频次，支持 `?grade=`、`?metric=`、`?exam_ids=`、`?recent_count=`、`?class_num=` |
 
+### 作业
+
+挂在 `/api/homework`。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/homework/records`、`/special-records` | 智能文本录入缺交 / 特殊记录，录入后自动导出当天 Excel |
+| GET | `/api/homework/kpi`、`/trend`、`/subjects`、`/rankings`、`/warnings` | 看板统计与连续缺交预警 |
+| GET | `/api/homework/correlation` | 缺交 × 成绩；`?subject=` 切到按学科 |
+| GET | `/api/homework/correlation/subjects` | 各科「缺交拖成绩」皮尔逊相关排序 |
+| GET | `/api/homework/student/{student_id}` | 单个学生作业概况 |
+| GET/PUT/DELETE | `/api/homework/manage/records[/{id}]` | 记录管理，列表支持 `?date=&student=&subject=` |
+| GET/POST/DELETE/PUT | `/api/homework/roster[/{student_id}[/toggle-excluded]]` | 花名册与排除统计开关 |
+| GET/PUT | `/api/homework/semester` | 学期配置 |
+
 ### 对话
 
 | 方法 | 路径 | 说明 |
@@ -263,6 +289,9 @@ OPENAI_MODEL=gpt-4o-mini
 | `custom_rank_band_trend` | `grade`, `rank_max`, `rank_min?`, `total_type?`, `class_num?`, `start_date?`, `end_date?` | 按临时指定的排名区间统计历次人数变化（如“前 350 名人数怎么变”） |
 | `rank_range_filter` | `exam_id`, `metric`, `rank_min`, `rank_max`, `class_num?` | 按单次考试筛出指定年级排名区间内的学生 |
 | `rank_frequency_stat` | `grade`, `metric`, `exam_ids?`, `recent_count?`, `class_num?` | 统计多场考试中每名学生落入各排名 / 百分位 / 精确等级分档位的次数 |
+| `student_homework_summary` | `student_id?`, `name?` | 某生本学期缺交概况（总数、按科目、迟到请假、连续缺交预警） |
+| `class_homework_ranking` | `class_num?`, `start_date?`, `end_date?`, `limit?` | 班级缺交排行（排除「不计入统计」学生） |
+| `homework_grade_correlation` | `class_num?`, `exam_id?`, `subject?` | 缺交 × 成绩联动；不带 `subject` 附各科皮尔逊相关排序 |
 
 示例问题：
 
@@ -273,6 +302,8 @@ OPENAI_MODEL=gpt-4o-mini
 - `高一6班临界段人数最近几次考试是怎么变化的？`
 - `高二1班最近3次物理等级分频次怎么样？`
 - `高一主三门300到350名有哪些学生？`
+- `6班这学期缺交最多的5个学生，他们主三门排名如何？`
+- `哪门课缺交最影响成绩？数学缺交多的学生数学成绩怎么样？`
 
 ## 开发命令
 
@@ -326,7 +357,8 @@ pytest tests/
 │   │   ├── db/
 │   │   ├── ingest/
 │   │   ├── analysis/
-│   │   └── chat/
+│   │   ├── chat/
+│   │   └── homework/       # 作业模块：parser / service / router / export / migrate
 │   ├── pyproject.toml
 │   └── tests/
 ├── frontend/

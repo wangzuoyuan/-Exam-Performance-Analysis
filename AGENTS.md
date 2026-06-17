@@ -6,18 +6,18 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## 快速命令
 
-跨平台启动器在 `run.py`，所有 `.sh / .command / .bat` 双击入口都委托给它。日常开发优先用 `python run.py <子命令>`，macOS / Windows 行为一致。
+跨平台启动器在 `run.py`，所有 `.sh / .command / .bat` 双击入口都委托给它。日常开发优先用 `python3 run.py <子命令>`；如果目标机器有 `python` 命令，也可等价使用 `python run.py <子命令>`。
 
 ```bash
 # 一键启动后端 8000 + 前端 3000（跨平台）
-python run.py start
+python3 run.py start
 ./start.sh                       # macOS 命令行等价
 
 # 重启（改代码后必须先停，启动器检测到端口占用会跳过启动）
-python run.py stop && python run.py start
+python3 run.py stop && python3 run.py start
 
 # 完全重置（清空 ~/.exam-tracker/，Windows 上是 %USERPROFILE%\.exam-tracker\）
-python run.py init
+python3 run.py init
 
 # 后端（带 reload，单独开发用）
 cd backend && source .venv/bin/activate && uvicorn app.main:app --reload --port 8000
@@ -54,6 +54,12 @@ tail -f ~/.exam-tracker/frontend.log
 | GET  | `/api/students/{id}` | 学生跨学年画像：含 `main_total_trend`（每项含 `class_rank`）、`five_trend`、`plus3_trend`、`san3_trend`、`subject_trend` |
 | GET  | `/api/class/compare` | 班级横向对比，支持 `?exam_id=` |
 | GET  | `/api/subject-weakness/{id}` | 单科薄弱名单，支持 `?class_num=` |
+| GET  | `/api/band-trend` | 历次考试高分段/临界段/薄弱段人数趋势，支持 `?grade=&class_num=` |
+| GET  | `/api/rank-metrics` | 返回排名筛选/频次统计可用指标，支持 `?grade=&mode=range\|frequency` |
+| GET  | `/api/rank-range` | 单次考试按指标和年级排名区间筛选学生 |
+| GET  | `/api/rank-frequency` | 多场考试排名区间/百分位区间/精确等级分频次统计 |
+| GET  | `/api/analysis-config` | 读取段位阈值配置 |
+| PUT  | `/api/analysis-config` | 保存段位阈值配置 |
 
 ### chat router（`/api`）
 | 方法 | 路径 | 说明 |
@@ -61,17 +67,48 @@ tail -f ~/.exam-tracker/frontend.log
 | POST | `/api/chat` | SSE 流式，支持 Anthropic 和 OpenAI 兼容两种 provider |
 | GET  | `/api/chat/config` | 返回当前 LLM 配置（provider / model，不暴露 key） |
 
-## 对话工具集（10 个只读工具，`chat/tools.py`）
+### homework router（`/api/homework`，`homework/router.py`）
+由原独立 Flask「作业跟踪」合并而来，数据并入同一 SQLite 库。
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/records` `/special-records` | 智能文本录入缺交 / 特殊记录（by_student / by_subject 两模式），录入后自动导出当天 Excel |
+| GET  | `/kpi` `/trend` `/subjects` `/rankings` `/warnings` | 看板统计；`warnings` 为连续缺交预警（连续 2 次黄、≥3 次红） |
+| GET  | `/correlation` | 缺交 × 成绩相关：默认总缺交 × 主三门排名；`?subject=` 切到该科缺交 × 该科年级百分位 |
+| GET  | `/correlation/subjects` | 各科「缺交拖成绩」皮尔逊相关系数排序 |
+| GET  | `/student/{student_id}` | 单个学生作业概况（供学生画像页作业卡片） |
+| GET/PUT/DELETE | `/manage/records[/{id}]` | 记录管理；列表支持 `?date=&student=&subject=` 筛选（供看板图表下钻） |
+| GET/POST/DELETE/PUT | `/roster[/{student_id}[/toggle-excluded]]` | 花名册增删查 + 排除统计开关 |
+| GET/PUT | `/semester` | 学期起止与名称配置 |
 
-`list_exams` / `student_lookup` / `student_exam_detail` / `student_trend` / `student_learning_profile` / `class_trend` / `compare_classes` / `focus_list` / `subject_weakness` / `subject_progress_ranking`
+## 对话工具集（18 个只读工具，`chat/tools.py`）
 
-新增工具只需在 `tools.py` 里添加函数并注册到工具列表，`session.py` 自动调度。
+成绩 15 个：`list_exams` / `student_lookup` / `student_exam_detail` / `student_trend` / `student_learning_profile` / `class_trend` / `compare_classes` / `focus_list` / `subject_weakness` / `subject_progress_ranking` / `multi_exam_progress_ranking` / `band_trend` / `custom_rank_band_trend` / `rank_range_filter` / `rank_frequency_stat`
+
+作业 3 个：`student_homework_summary` / `class_homework_ranking` / `homework_grade_correlation`（支持 `subject` 参数，总览模式附各科皮尔逊相关排序）
+
+新增工具只需在 `tools.py` 里添加函数并注册到 `TOOL_FUNCTIONS` 字典和 `TOOLS` 列表，`session.py` 自动调度。
 
 ## 数据流关键路径
 
 **上传链路**：`ingest/router.py` → `filename_parser.py`（文件名解析年级/学期/考试类型）→ `excel_parser.py`（解析 Excel，高一固定列 vs 高二/三 3+3 两种 schema）→ 写入 6 张 SQLite 表。首次上传后弹窗确认班号 → `POST /api/teacher/bind-class`。
 
 **读端链路**：`analysis/router.py` 直接用 SQLAlchemy 查询，**没有使用** `analysis/trends.py` / `class_compare.py` / `focus_list.py` / `cross_year.py` 这些计算模块（它们是早期抽象，当前 router 内联了逻辑）。改查询逻辑只需改 `router.py`。
+
+**学生画像单科趋势**：`/api/students/{id}` 的 `subject_trend` 只返回 `raw_score` 或 `grade_score` 有真实值的单科记录。像 2025 年 9 月只有语数英时，物化生政史地即使原始导入行残留百分位，也不能进入单科趋势线；前端明细表仍显示为 `"—"`。
+
+**段位阈值**：所有段位计算（考试详情、focus-list、band-trend、AI 工具）都应调用 `analysis/config.py` 的 `get_band_config()`，不要硬编码默认阈值。用户在前端改段位后，页面和 AI 问答口径必须同步。
+
+**作业模块**：聚合查询集中在 `homework/service.py`（看板/排行/预警/相关性），被 `homework/router.py` 与 `chat/tools.py` 共用；学科归类与录入文本解析在 `homework/parser.py`；Excel 导出在 `homework/export.py`。新增 4 张表 `class_roster`/`homework_record`/`special_record`/`homework_setting`，作业记录按真实学号 `student_id` 与成绩表关联。缺交看板默认口径：过滤 `remark` 非空（请假当天不算缺交）、`subject='全科'`、`excluded=1` 学生。一次性迁移脚本 `homework/migrate.py`（按姓名把旧 `homework.db` 座号映射到成绩库真实学号，幂等可重跑）。
+
+## 业务口径（AI 与趋势指标）
+
+- **加三学科**：指物理、化学、生物、政治、历史、地理六科的统称；`+3/选考三科` 才表示高二/高三学生实际选择参加的三门。
+- **跨学年趋势**：只能用主三门和语数英原始分；高一到高二禁止用九门或 +3 比。
+- **总分趋势**：用 `xueji_rank`；无学籍排名时用 `grade_percentile`。
+- **高一所有单科**：用 `grade_percentile`，百分位降低表示进步。
+- **高二/高三语数英单科**：用 `grade_percentile`。
+- **高二/高三加三选考单科**：用 `grade_score`，不用原始分和百分位判断趋势；等级分按 70、67、64、61、58、55、52、49、46、43、40 精确值统计。
+- `raw_score` 只用于单次考试原始分描述，不得用于趋势进退步计算。
 
 ## 前端开发要点
 
@@ -80,6 +117,7 @@ tail -f ~/.exam-tracker/frontend.log
 - **颜色 token**：统一用 tailwind.config.js 的 `brand-*` / `success` / `warning` / `danger`；Recharts 内直接写字符串（它不接受 CSS 变量）。
 - **ChatDrawer 触发**：通过 `window.dispatchEvent(new Event('open-chat'))` 打开，不要直接 import/ref。
 - **缺考字段**：API 返回 `null`，前端一律显示 `"—"`，不要显示 `0`。
+- **单科趋势线**：只使用真实有单科分数的点。前端已有 `hasSubjectScore()` 防线，避免 `raw_score=null` 的记录进入小卡片趋势线。
 
 ## 对话助手配置（`backend/.env`）
 
@@ -99,6 +137,6 @@ OPENAI_MODEL=gpt-4o-mini
 
 ## 测试覆盖
 
-有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser`
+有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser` / `homework_router`
 
 **无测试**：`analysis/router.py` 的计算逻辑（trends / class_compare / focus_list / cross_year 模块同样无测试）。
