@@ -127,6 +127,7 @@ tail -f ~/.exam-tracker/frontend.log
 - **ChatDrawer 触发**：通过 `window.dispatchEvent(new Event('open-chat'))` 打开，不要直接 import/ref。
 - **缺考字段**：API 返回 `null`，前端一律显示 `"—"`，不要显示 `0`。
 - **单科趋势线**：只使用真实有单科分数的点。前端已有 `hasSubjectScore()` 防线，避免 `raw_score=null` 的记录进入小卡片趋势线。
+- **移动端适配**：`Shell.tsx` 已响应式（侧栏收为汉堡菜单、内容区窄屏减边距）。窄屏别写死宽度，用 `w-full sm:w-[..]` + `flex-col sm:flex-row`；超宽数据表（考试成绩矩阵）保留桌面宽表（`hidden md:block`）的同时配一份卡片视图（`md:hidden`，如 `StudentScoreMobileCards`）；多页签用 `overflow-x-auto` 横滑而非换行。`layout.tsx` 已声明 `viewport`，对话输入框用 `text-base`(16px) 防 iOS 聚焦缩放。
 
 ## 对话助手配置（`backend/.env`）
 
