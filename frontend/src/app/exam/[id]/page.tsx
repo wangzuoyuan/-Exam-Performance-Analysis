@@ -1164,7 +1164,7 @@ export default function ExamDetailPage() {
 
       {/* Tabs */}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-        <TabsList className="h-auto flex-wrap justify-start">
+        <TabsList className="flex h-auto max-w-full justify-start overflow-x-auto [-webkit-overflow-scrolling:touch] [&>button]:shrink-0">
           <TabsTrigger value="averages">
             班级均分表
           </TabsTrigger>
@@ -1355,14 +1355,20 @@ export default function ExamDetailPage() {
                   desc="后端 /api/exams/{id} 暂未返回完整学生分数列表。"
                 />
               ) : (
-                <StudentScoresTable
-                  grade={exam.grade}
-                  rows={visibleStudents}
-                  subjectRange={subjectRange}
-                  studentSortKey={studentSortKey}
-                  studentSortDir={studentSortDir}
-                  onSort={toggleSort}
-                />
+                <>
+                  {/* 桌面：宽表；手机：卡片 */}
+                  <div className="hidden md:block">
+                    <StudentScoresTable
+                      grade={exam.grade}
+                      rows={visibleStudents}
+                      subjectRange={subjectRange}
+                      studentSortKey={studentSortKey}
+                      studentSortDir={studentSortDir}
+                      onSort={toggleSort}
+                    />
+                  </div>
+                  <StudentScoreMobileCards grade={exam.grade} rows={visibleStudents} />
+                </>
               )}
             </CardContent>
           </Card>
@@ -2095,6 +2101,112 @@ function StudentScoresTable({
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+// 手机端：把超宽的学生成绩矩阵换成「一个学生一张卡」的纵向阅读视图。
+// 仅 <md 显示（桌面用上面的宽表）。数据取数复用与宽表相同的 getter，口径一致。
+function StudentScoreMobileCards({
+  grade,
+  rows,
+}: {
+  grade: number
+  rows: StudentRow[]
+}) {
+  const isGradeOne = grade === 1
+  const totalTypes = isGradeOne
+    ? (['主三门', '五门', '九门'] as const)
+    : (['主三门', '3+3'] as const)
+
+  return (
+    <div className="space-y-3 md:hidden">
+      {rows.map((student) => (
+        <div
+          key={student.student_id}
+          className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm"
+        >
+          {/* 头部：姓名 + 班级 / 学籍 / 学号 */}
+          <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-2">
+            <Link
+              href={`/student/${student.student_id}`}
+              className="font-medium text-slate-900 hover:text-brand-600"
+            >
+              {student.name}
+            </Link>
+            <div className="flex items-center gap-1.5 text-xs text-slate-500">
+              {student.class_num != null && (
+                <Badge variant="secondary" className="font-normal">
+                  {student.class_num}班
+                </Badge>
+              )}
+              {isGradeOne && student.xueji != null && <span>学籍{student.xueji}</span>}
+              <span className="font-mono">{student.student_id}</span>
+            </div>
+          </div>
+
+          {/* 总分块 */}
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {!isGradeOne &&
+              (() => {
+                const plus3 = getStudentTotalScore(student, '+3')
+                return plus3 == null ? null : (
+                  <div className="rounded bg-slate-50 px-2 py-1 text-xs">
+                    <span className="text-slate-500">加三均分</span>
+                    <span className="ml-1 font-semibold tabular-nums text-slate-900">
+                      {formatInt(plus3)}
+                    </span>
+                  </div>
+                )
+              })()}
+            {totalTypes.map((tt) => {
+              const score = getStudentTotalScore(student, tt)
+              const rank = isGradeOne
+                ? getStudentTotalXuejiRank(student, tt)
+                : getStudentTotalRank(student, tt)
+              return (
+                <div key={tt} className="rounded bg-slate-50 px-2 py-1 text-xs">
+                  <span className="text-slate-500">{tt}</span>
+                  <span className="ml-1 font-semibold tabular-nums text-slate-900">
+                    {score == null ? '—' : formatInt(score)}
+                  </span>
+                  {rank != null && (
+                    <span className="ml-1 text-slate-400">
+                      {isGradeOne ? '学籍' : ''}名次{formatInt(rank)}
+                    </span>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+
+          {/* 各科：分数 +（高一/基础科=年级百分位；选考科=等级分） */}
+          <div className="mt-2 grid grid-cols-3 gap-x-3 gap-y-2">
+            {ALL_AVERAGE_SUBJECTS.map((subject) => {
+              const isElective =
+                !isGradeOne &&
+                (ELECTIVE_AVERAGE_SUBJECTS as readonly string[]).includes(subject)
+              const score = getStudentSubjectScore(student, subject)
+              const secondary = isElective
+                ? getStudentSubjectScore(student, subject, 'grade')
+                : getStudentSubjectPercentile(student, subject)
+              return (
+                <div key={subject} className="flex flex-col">
+                  <span className="text-[11px] text-slate-400">{subject}</span>
+                  <span className="font-medium tabular-nums text-slate-800">
+                    {score == null ? '—' : formatInt(score)}
+                  </span>
+                  {secondary != null && (
+                    <span className="text-[10px] tabular-nums text-slate-400">
+                      {isElective ? `等级${formatInt(secondary)}` : `位${formatPercentile(secondary)}`}
+                    </span>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }

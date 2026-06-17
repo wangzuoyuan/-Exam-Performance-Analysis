@@ -367,7 +367,7 @@ export default function ChatDrawer() {
               onKeyDown={handleKeyDown}
               placeholder="问我任何关于成绩的问题..."
               disabled={streaming}
-              className="flex-1"
+              className="flex-1 text-base"
             />
             <Button
               type="button"

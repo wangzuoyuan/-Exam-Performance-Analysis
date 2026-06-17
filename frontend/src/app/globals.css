@@ -35,4 +35,8 @@
     @apply bg-background text-foreground;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   }
+  /* 触屏惯性滚动：所有横向滚动容器（宽表格、Tab 条）在 iOS 上顺滑滑动 */
+  .overflow-x-auto {
+    -webkit-overflow-scrolling: touch;
+  }
 }

@@ -508,15 +508,15 @@ export default function ComparePage() {
             'bg-white/80 backdrop-blur supports-[backdrop-filter]:bg-white/70',
           )}
         >
-          <div className="flex flex-wrap items-center gap-4 px-4 py-3">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-slate-700">选择考试</span>
+          <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-4">
+            <div className="flex w-full items-center gap-2 sm:w-auto">
+              <span className="shrink-0 text-sm font-medium text-slate-700">选择考试</span>
               <Select
                 value={selectedExam ? String(selectedExam) : undefined}
                 onValueChange={v => setSelectedExam(Number(v))}
                 disabled={examsLoading || exams.length === 0}
               >
-                <SelectTrigger className="h-9 w-[260px]">
+                <SelectTrigger className="h-9 w-full sm:w-[260px]">
                   <SelectValue placeholder={examsLoading ? '加载中…' : '请选择考试'} />
                 </SelectTrigger>
                 <SelectContent>
@@ -529,14 +529,14 @@ export default function ComparePage() {
               </Select>
             </div>
 
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-slate-700">统计口径</span>
+            <div className="flex w-full items-center gap-2 sm:w-auto">
+              <span className="shrink-0 text-sm font-medium text-slate-700">统计口径</span>
               <Select
                 value={activeMetric}
                 onValueChange={setCompareMetric}
                 disabled={metricOptions.length === 0}
               >
-                <SelectTrigger className="h-9 w-[220px]">
+                <SelectTrigger className="h-9 w-full sm:w-[220px]">
                   <SelectValue placeholder="请选择统计口径" />
                 </SelectTrigger>
                 <SelectContent>
