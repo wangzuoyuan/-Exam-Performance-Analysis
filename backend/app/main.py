@@ -7,7 +7,8 @@ app = FastAPI(title="成绩追踪 API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    # 放行本机及局域网内任意主机的前端（3000 端口），便于手机/平板同 WiFi 访问。
+    allow_origin_regex=r"http://[\w.\-]+:3000",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
