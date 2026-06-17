@@ -206,13 +206,15 @@ export default function ChatDrawer() {
     setCurrentText('')
 
     try {
-      // 直连后端，绕开 Next 开发代理：代理对单条请求有 ~30s 超时，
-      // 而"谁退步大"等需要多轮工具调用的重问题常需 60~120s，经代理会被掐断成 500。
-      // 直连还避免代理缓冲 SSE，工具调用进度可实时流式显示。
-      // 直连后端 8000。主机名跟随当前页面：Mac 本机是 localhost，手机同 WiFi 访问时
-      // 自动变成 Mac 的局域网 IP（后端已绑 0.0.0.0），无需为手机单独配置。
+      // 聊天是 SSE 流式、单条可达 60~120s。
+      // - 生产（NAS）：同源相对路径 /api/chat，经 Caddy 直达后端，不缓冲、无超时；
+      //   8000 端口不对外暴露，必须走同源。
+      // - 本地 dev：直连后端 8000（跟随当前主机名），绕开 Next 开发代理的 ~30s 超时
+      //   与 SSE 缓冲；想覆盖可设 NEXT_PUBLIC_CHAT_API_BASE。
+      const explicit = process.env.NEXT_PUBLIC_CHAT_API_BASE
+      const isDev = process.env.NODE_ENV !== 'production'
       const chatHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost'
-      const chatBase = process.env.NEXT_PUBLIC_CHAT_API_BASE || `http://${chatHost}:8000`
+      const chatBase = explicit ?? (isDev ? `http://${chatHost}:8000` : '')
       const res = await fetch(`${chatBase}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

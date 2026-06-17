@@ -19,10 +19,11 @@ from app.db.models import (
     SpecialRecord,
     get_db,
 )
+from app.paths import DATA_DIR
 
 EXPORT_DIR = os.environ.get(
     "HOMEWORK_EXPORT_DIR",
-    os.path.expanduser("~/.exam-tracker/homework_exports"),
+    os.path.join(DATA_DIR, "homework_exports"),
 )
 
 HEADERS = ["学号", "姓名", "缺交科目", "说明", "特殊情况"]

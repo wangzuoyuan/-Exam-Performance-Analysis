@@ -3,18 +3,44 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
 import os
 
+from starlette.responses import JSONResponse as _JSONResponse  # noqa: E402
+
 app = FastAPI(title="成绩追踪 API", version="0.1.0")
 
+# 生产同源（经反代）时无需 CORS；本地 dev 前端 3000 → 后端 8000 跨源需放行。
+# 额外可用 CORS_ORIGINS（逗号分隔）显式追加来源。
+_cors_origins = [
+    o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    # 放行本机及局域网内任意主机的前端（3000 端口），便于手机/平板同 WiFi 访问。
+    allow_origins=_cors_origins,
     allow_origin_regex=r"http://[\w.\-]+:3000",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-EXAM_TRACKER_DIR = os.path.expanduser("~/.exam-tracker")
+# 登录鉴权：内网免登录、外网（命中 PUBLIC_HOST）才要求会话。
+from app.auth import COOKIE_NAME, auth_required_for, verify_token  # noqa: E402
+
+_AUTH_ALLOWLIST = {"/api/login", "/api/logout", "/api/auth/status", "/api/health"}
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    path = request.url.path
+    if (
+        request.method != "OPTIONS"
+        and path.startswith("/api")
+        and path not in _AUTH_ALLOWLIST
+        and auth_required_for(request)
+        and not verify_token(request.cookies.get(COOKIE_NAME, ""))
+    ):
+        return _JSONResponse({"detail": "需要登录"}, status_code=401)
+    return await call_next(request)
+
+from app.paths import DATA_DIR as EXAM_TRACKER_DIR
 os.makedirs(EXAM_TRACKER_DIR, exist_ok=True)
 os.makedirs(f"{EXAM_TRACKER_DIR}/raw", exist_ok=True)
 
@@ -110,7 +136,9 @@ from app.chat.session import router as chat_router  # noqa
 from app.homework.router import router as homework_router  # noqa
 from app.notes.router import router as notes_router  # noqa
 from app.backup.router import router as backup_router  # noqa
+from app.auth_router import router as auth_router  # noqa
 
+app.include_router(auth_router, prefix="/api")
 app.include_router(ingest_router, prefix="/api")
 app.include_router(analysis_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")

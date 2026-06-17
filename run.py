@@ -21,8 +21,8 @@ IS_WINDOWS = sys.platform.startswith("win")
 APP_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = APP_DIR / "backend"
 FRONTEND_DIR = APP_DIR / "frontend"
-DATA_DIR = Path.home() / ".exam-tracker"
-BACKUP_DIR = Path.home() / ".exam-tracker-backups"
+DATA_DIR = Path(os.environ.get("EXAM_TRACKER_DIR", str(Path.home() / ".exam-tracker")))
+BACKUP_DIR = Path(os.environ.get("EXAM_TRACKER_BACKUP_DIR", str(Path.home() / ".exam-tracker-backups")))
 BACKEND_LOG = DATA_DIR / "backend.log"
 FRONTEND_LOG = DATA_DIR / "frontend.log"
 

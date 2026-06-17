@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from 'next'
 import './globals.css'
 import { ChatDrawer } from '../components'
+import AuthGate from '@/components/AuthGate'
 import { Shell } from '@/components/layout/Shell'
 
 export const metadata: Metadata = {
@@ -19,8 +20,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="zh-CN">
       <body className="bg-slate-50">
-        <Shell>{children}</Shell>
-        <ChatDrawer />
+        <AuthGate>
+          <Shell>{children}</Shell>
+          <ChatDrawer />
+        </AuthGate>
       </body>
     </html>
   )

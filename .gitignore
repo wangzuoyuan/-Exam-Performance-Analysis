@@ -10,4 +10,7 @@ __pycache__/
 *.sqlite
 raw/
 
+# Docker 部署的数据卷（含 db.sqlite / 备份 / 导出，绝不入库）
+/data/
+
 .DS_Store

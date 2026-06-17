@@ -7,7 +7,7 @@ import hashlib
 
 router = APIRouter(tags=["ingest"])
 
-EXAM_TRACKER_DIR = os.path.expanduser("~/.exam-tracker")
+from app.paths import DATA_DIR as EXAM_TRACKER_DIR
 RAW_DIR = f"{EXAM_TRACKER_DIR}/raw"
 
 def save_upload_with_content(filename: str, content: bytes) -> str:

@@ -1,9 +1,9 @@
 from sqlalchemy import create_engine, Column, Integer, String, Float, JSON, DateTime, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from datetime import datetime
-import os
 
-EXAM_TRACKER_DIR = os.path.expanduser("~/.exam-tracker")
+from app.paths import DATA_DIR as EXAM_TRACKER_DIR
+
 DATABASE_URL = f"sqlite:///{EXAM_TRACKER_DIR}/db.sqlite"
 
 engine = create_engine(DATABASE_URL, echo=False)
