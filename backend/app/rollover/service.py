@@ -172,16 +172,43 @@ def classify(db, target_grade, class_num) -> dict:
             else:
                 unmatched.append({"student_id": sid, "name": name})
 
-    # left_class：上学年本班未在新班出现的学生
+    # left_class：上学年本班「真正离开」的学生。
+    # 学号跨学年会变，不能用 `高一学号 in 高二学号集合` 判断（两套学号空间永不相等，
+    # 否则全体高一都会被误报为离班）。判定「仍在本班」的两条信号：
+    #   1) 身份已链接：该生所属 identity 拥有的任一学号出现在新班集合中 -> 已继承，不算离班；
+    #   2) 同名待确认：该生姓名出现在新班学生姓名中 -> 换届向导里还在 ambiguous，不算离班。
+    # 两者都不满足才算真正离班。
     left_class = []
     if prev_grade >= 1:
         prev_class = _teacher_target_class(db, prev_grade)
         if prev_class is not None:
+            # 新班学生姓名集合（成绩库优先，回退 roster）
+            target_names = set()
+            for tsid in sid_set:
+                tname = _student_name_in_grade(db, tsid, target_grade)
+                if tname is None:
+                    r = (
+                        db.query(ClassRoster.name)
+                        .filter(
+                            ClassRoster.student_id == tsid,
+                            ClassRoster.grade == target_grade,
+                        )
+                        .first()
+                    )
+                    tname = r[0] if r else None
+                if tname:
+                    target_names.add(tname)
+
             prev_sids = _class_students(db, prev_grade, prev_class)
             for sid in prev_sids:
-                if sid in sid_set:
-                    continue
+                iid = identity_of(db, sid)
+                if iid is not None:
+                    person_sids = {al.student_id for al in aliases_of(db, iid)}
+                    if person_sids & sid_set:
+                        continue  # 同一人已在新班（已继承）
                 pname = _student_name_in_grade(db, sid, prev_grade)
+                if pname and pname in target_names:
+                    continue  # 新班有同名学生，尚在待确认，不算离班
                 left_class.append(
                     {
                         "student_id": sid,
