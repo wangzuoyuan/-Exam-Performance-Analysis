@@ -149,7 +149,12 @@ class RecordsPayload(BaseModel):
 
 
 def _find_student_id(db, name):
-    row = db.query(ClassRoster).filter(ClassRoster.name == name).first()
+    """按姓名解析学号；高一+高二名册并存时优先 active_grade 的当前学年学生。"""
+    active_grade = service.get_active_grade(db)
+    q = db.query(ClassRoster).filter(ClassRoster.name == name)
+    row = q.filter(ClassRoster.grade == active_grade).first()
+    if row is None:
+        row = q.first()
     return row.student_id if row else None
 
 
@@ -397,9 +402,13 @@ async def hw_manage_delete(record_id: int):
 async def hw_roster():
     db = next(get_db())
     try:
-        rows = db.query(ClassRoster).order_by(
-            ClassRoster.excluded.asc(), ClassRoster.seat_no.asc()
-        ).all()
+        active_grade = service.get_active_grade(db)
+        rows = (
+            db.query(ClassRoster)
+            .filter(ClassRoster.grade == active_grade)
+            .order_by(ClassRoster.excluded.asc(), ClassRoster.seat_no.asc())
+            .all()
+        )
         out = []
         for r in rows:
             count = db.query(HomeworkRecord).filter(
@@ -408,6 +417,7 @@ async def hw_roster():
             out.append({
                 "student_id": r.student_id, "name": r.name, "seat_no": r.seat_no,
                 "gender": r.gender, "excluded": r.excluded, "class_num": r.class_num,
+                "grade": r.grade,
                 "record_count": count,
             })
         return out
@@ -421,6 +431,7 @@ class AddStudentPayload(BaseModel):
     seat_no: Optional[int] = None
     gender: Optional[str] = None
     class_num: int = 6
+    grade: Optional[int] = None
 
 
 @router.post("/homework/roster")
@@ -430,13 +441,15 @@ async def hw_add_student(payload: AddStudentPayload):
         raise HTTPException(400, "姓名不能为空")
     db = next(get_db())
     try:
+        grade = payload.grade if payload.grade is not None else service.get_active_grade(db)
         if db.query(ClassRoster).filter(ClassRoster.name == name).first():
             raise HTTPException(400, f"学生 {name} 已存在")
         sid = payload.student_id or f"HW-{payload.seat_no or name}"
         db.add(ClassRoster(student_id=sid, name=name, class_num=payload.class_num,
-                           seat_no=payload.seat_no, gender=payload.gender, excluded=0))
+                           seat_no=payload.seat_no, gender=payload.gender, excluded=0,
+                           grade=grade))
         db.commit()
-        return {"success": True, "student_id": sid}
+        return {"success": True, "student_id": sid, "grade": grade}
     finally:
         db.close()
 

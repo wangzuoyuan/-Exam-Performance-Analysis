@@ -26,9 +26,19 @@ import TrendLineChart from '@/components/TrendLineChart'
 import HomeworkCard from '@/components/HomeworkCard'
 import StudentNotes from '@/components/StudentNotes'
 import { cn } from '@/lib/utils'
+import { formatStageHistory, type StageAlias } from '@/lib/labels'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Table,
@@ -55,6 +65,7 @@ interface MainTrendPoint {
   class_rank?: number | null
   total_full?: number | null
   exam_date?: string | null
+  imported?: boolean
 }
 
 interface SubjectTrendPoint {
@@ -65,6 +76,13 @@ interface SubjectTrendPoint {
   raw_score?: number | null
   grade_percentile?: number | null
   class_avg?: number | null
+  imported?: boolean
+  grade?: number | null
+}
+
+interface StageIdentity {
+  id: number | null
+  aliases: { student_id: string; grade: number; class_num: number | null }[]
 }
 
 interface StudentProfile {
@@ -79,6 +97,9 @@ interface StudentProfile {
   five_trend?: MainTrendPoint[]
   plus3_trend?: MainTrendPoint[]
   san3_trend?: MainTrendPoint[]
+  identity?: StageIdentity
+  /** 注意：键是字符串（如 "1"），使用时需 parse 为 number */
+  class_by_grade?: Record<string, number>
 }
 
 type TotalTypeKey = '主三门' | '五门' | '+3' | '3+3'
@@ -97,6 +118,15 @@ function safeNum(v: unknown): number | null {
 
 function hasSubjectScore(point: SubjectTrendPoint): boolean {
   return safeNum(point.raw_score) !== null
+}
+
+// 取 main_total_trend 中最后一场考试的 grade（用于新学生判定，独立于渲染期的 latestGrade）。
+function latestGradePreCheck(profile: StudentProfile): number {
+  const trend = profile.main_total_trend || []
+  for (let i = trend.length - 1; i >= 0; i--) {
+    if (trend[i].grade != null) return trend[i].grade as number
+  }
+  return 2
 }
 
 function formatPercent(v: number | null | undefined): string {
@@ -342,6 +372,14 @@ export default function StudentPage() {
   const [profile, setProfile] = useState<StudentProfile | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [importOpen, setImportOpen] = useState(false)
+  const [linkOpen, setLinkOpen] = useState(false)
+  const [importText, setImportText] = useState('')
+  const [importBusy, setImportBusy] = useState(false)
+  const [importMsg, setImportMsg] = useState<string | null>(null)
+  const [linkSid, setLinkSid] = useState('')
+  const [linkBusy, setLinkBusy] = useState(false)
+  const [linkMsg, setLinkMsg] = useState<string | null>(null)
 
   useEffect(() => {
     if (!studentId) return
@@ -532,6 +570,152 @@ export default function StudentPage() {
     }
   }, [mainTrend])
 
+  // 主三门趋势学段背景带：按 grade 字段切分连续考试区间。
+  // grade=1 → 高一（brand-50），grade=2/3 → 高二及以上（slate-100）。
+  const mainReferenceAreas = useMemo(() => {
+    if (mainTrend.length === 0) return []
+    type Band = { grade: number | null; x1: string; x2: string }
+    const bands: Band[] = []
+    for (const p of mainTrend) {
+      const g = p.grade ?? null
+      const last = bands[bands.length - 1]
+      if (last && last.grade === g) {
+        last.x2 = p.exam_name
+      } else {
+        bands.push({ grade: g, x1: p.exam_name, x2: p.exam_name })
+      }
+    }
+    const fillFor = (g: number | null) => {
+      if (g === 1) return '#eff6ff' // brand-50
+      return '#f1f5f9' // slate-100
+    }
+    return bands.map((b) => ({ x1: b.x1, x2: b.x2, fill: fillFor(b.grade) }))
+  }, [mainTrend])
+
+  const hasImportedPoint = useMemo(
+    () => mainTrend.some((p) => p.imported === true),
+    [mainTrend],
+  )
+
+  // 新学生判定：identity 仅有当前学段（aliases <= 1）且无更低年级趋势数据。
+  const isNewStudent = useMemo(() => {
+    if (!profile?.identity) return false
+    const aliases = profile.identity.aliases || []
+    if (aliases.length > 1) return false
+    const currentGrade =
+      aliases.length === 1 ? aliases[0].grade : latestGradePreCheck(profile)
+    const hasLowerGradeData = mainTrend.some(
+      (p) => p.grade != null && p.grade < currentGrade,
+    )
+    return !hasLowerGradeData
+  }, [profile, mainTrend])
+
+  // 同步按钮的 busy/msg：打开对话框时清空上次状态
+  useEffect(() => {
+    if (importOpen) {
+      setImportText('')
+      setImportMsg(null)
+    }
+  }, [importOpen])
+  useEffect(() => {
+    if (linkOpen) {
+      setLinkSid('')
+      setLinkMsg(null)
+    }
+  }, [linkOpen])
+
+  function reloadProfile() {
+    if (!studentId) return
+    fetch(`/api/students/${studentId}`)
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json()
+      })
+      .then((data: StudentProfile) => setProfile(data))
+      .catch(() => {
+        /* 忽略重载错误，用户可手动刷新 */
+      })
+  }
+
+  // 导入高一成绩：每行「考试名,科目,原始分[,等级分][,年级百分位][,学籍排名]」
+  async function submitImportHistory() {
+    if (!studentId || !profile) return
+    const rows: Record<string, unknown>[] = []
+    for (const raw of importText.split(/\r?\n/)) {
+      const line = raw.trim()
+      if (!line) continue
+      const parts = line.split(/[,\t，\s]+/).map((s) => s.trim()).filter(Boolean)
+      if (parts.length < 2) continue
+      const [exam_label, subject, raw_score, grade_score, grade_percentile, xueji_rank] = parts
+      rows.push({
+        exam_label,
+        kind: 'subject',
+        subject,
+        raw_score: raw_score != null && raw_score !== '' ? Number(raw_score) : null,
+        grade_score: grade_score != null && grade_score !== '' ? Number(grade_score) : null,
+        grade_percentile:
+          grade_percentile != null && grade_percentile !== '' ? Number(grade_percentile) : null,
+        xueji_rank: xueji_rank != null && xueji_rank !== '' ? Number(xueji_rank) : null,
+        grade: 1,
+      })
+    }
+    if (rows.length === 0) {
+      setImportMsg('请先粘贴成绩行')
+      return
+    }
+    setImportBusy(true)
+    setImportMsg(null)
+    try {
+      const res = await fetch('/api/rollover/import-history', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ student_id: studentId, name: profile.name, rows }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setImportMsg(`已导入 ${data?.imported ?? rows.length} 条高一成绩`)
+        reloadProfile()
+      } else {
+        setImportMsg('导入失败，请重试')
+      }
+    } catch {
+      setImportMsg('导入失败，请重试')
+    } finally {
+      setImportBusy(false)
+    }
+  }
+
+  // 关联高一学号
+  async function submitLink() {
+    if (!studentId || !profile) return
+    const g1 = linkSid.trim()
+    if (!g1) return
+    setLinkBusy(true)
+    setLinkMsg(null)
+    try {
+      const res = await fetch('/api/rollover/link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          g2_student_id: studentId,
+          g1_student_id: g1,
+          name: profile.name,
+        }),
+      })
+      if (res.ok) {
+        setLinkMsg('已关联，正在刷新…')
+        reloadProfile()
+        setLinkOpen(false)
+      } else {
+        setLinkMsg('关联失败，请确认高一学号是否存在')
+      }
+    } catch {
+      setLinkMsg('关联失败，请重试')
+    } finally {
+      setLinkBusy(false)
+    }
+  }
+
   if (loading) {
     return <StudentDetailSkeleton />
   }
@@ -604,7 +788,30 @@ export default function StudentPage() {
                 {' · '}
                 {latestGrade ? `高${latestGrade}` : DASH}
               </p>
+              {profile.identity && (
+                <p className="mt-0.5 text-xs text-slate-400">
+                  学段履历：{formatStageHistory(profile.identity.aliases as StageAlias[])}
+                </p>
+              )}
             </div>
+            {isNewStudent && (
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <button
+                  type="button"
+                  onClick={() => setImportOpen(true)}
+                  className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50"
+                >
+                  导入高一成绩
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLinkOpen(true)}
+                  className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50"
+                >
+                  关联高一学号
+                </button>
+              </div>
+            )}
             {xueji && (
               <div className="flex items-center gap-2">
                 <Badge className={xueji.className}>{xueji.label}</Badge>
@@ -706,14 +913,23 @@ export default function StudentPage() {
                     exam_name: p.exam_name,
                     rank: safeNum(p.xueji_rank) ?? undefined,
                     score: safeNum(p.total_score) ?? undefined,
+                    imported: p.imported === true,
                   }))}
                   yDataKey="rank"
                   color="#2563eb"
                   invertY
+                  referenceAreas={mainReferenceAreas}
+                  importedKey="imported"
                 />
                 <p className="mt-2 text-xs text-slate-400">
                   学籍排名越小越好，线越高代表排名越好
                 </p>
+                {hasImportedPoint && (
+                  <p className="mt-1 inline-flex items-center gap-1.5 text-xs text-slate-400">
+                    <span className="inline-block h-2 w-2 rounded-full border border-slate-400 bg-slate-300/40" />
+                    导入·不计年级排名（淡化空心点）
+                  </p>
+                )}
               </>
             ) : (
               <EmptyState title="趋势图数据待补" hint="尚无主三门考试记录" />
@@ -881,6 +1097,78 @@ export default function StudentPage() {
             )}
           </CardContent>
         </Card>
+
+        {/* 导入高一成绩（新学生） */}
+        <Dialog open={importOpen} onOpenChange={setImportOpen}>
+          <DialogContent className="max-w-2xl max-sm:h-screen max-sm:w-screen max-sm:max-w-none max-sm:rounded-none max-sm:p-4">
+            <DialogHeader>
+              <DialogTitle>导入高一成绩 · {profile.name || DASH}</DialogTitle>
+              <DialogDescription>
+                把该生的高一历史成绩粘贴进来，建立身份并写入。导入后该生会出现在跨学年趋势中（淡化空心点）。
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-2">
+              <label className="text-sm text-slate-600">
+                每行一条：
+                <code className="rounded bg-slate-100 px-1">
+                  考试名,科目,原始分,等级分,年级百分位,学籍排名
+                </code>
+                （后三项可省）
+              </label>
+              <textarea
+                value={importText}
+                onChange={(e) => setImportText(e.target.value)}
+                placeholder={'期中,语文,98\n期中,数学,85'}
+                rows={7}
+                className="w-full rounded-md border border-slate-200 p-2 font-mono text-sm text-base"
+              />
+            </div>
+            {importMsg && (
+              <div className="text-sm text-slate-600">{importMsg}</div>
+            )}
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setImportOpen(false)}>
+                关闭
+              </Button>
+              <Button onClick={submitImportHistory} disabled={importBusy}>
+                {importBusy ? '导入中…' : '导入'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* 关联高一学号（新学生） */}
+        <Dialog open={linkOpen} onOpenChange={setLinkOpen}>
+          <DialogContent className="max-sm:h-screen max-sm:w-screen max-sm:max-w-none max-sm:rounded-none max-sm:p-4">
+            <DialogHeader>
+              <DialogTitle>关联高一学号 · {profile.name || DASH}</DialogTitle>
+              <DialogDescription>
+                输入该生的高一学号，建立跨学年关联（用于连续跨学年趋势）。
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-2">
+              <label className="text-sm text-slate-600">高一学号</label>
+              <input
+                value={linkSid}
+                onChange={(e) => setLinkSid(e.target.value)}
+                placeholder="高一学号"
+                className="w-full rounded-md border border-slate-200 p-2 text-base font-mono"
+              />
+            </div>
+            {linkMsg && <div className="text-sm text-slate-600">{linkMsg}</div>}
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setLinkOpen(false)}>
+                取消
+              </Button>
+              <Button
+                onClick={submitLink}
+                disabled={linkBusy || !linkSid.trim()}
+              >
+                {linkBusy ? '关联中…' : '确认关联'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </TooltipProvider>
   )

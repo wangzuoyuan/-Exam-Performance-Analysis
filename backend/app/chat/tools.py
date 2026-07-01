@@ -82,19 +82,166 @@ def list_exams(grade: Optional[int] = None, year_range: Optional[tuple] = None) 
     return [{"id": e.id, "name": e.name, "grade": e.grade, "exam_date": e.exam_date} for e in exams]
 
 def student_lookup(name: Optional[str] = None, student_id: Optional[str] = None) -> list:
-    """按姓名/学号定位学生"""
-    from app.db.models import SubjectScore
+    """按姓名/学号定位学生。返回按「人」去重的结果：同一人多个学号合并为一行，
+    带上 person_id 与合并后的全部 student_id 列表。"""
+    from app.analysis.identity import identity_of, person_ids
+    from app.db.models import StudentIdentity, SubjectScore
     from app.db.models import get_db
 
     db = next(get_db())
-    query = db.query(SubjectScore.student_id, SubjectScore.name).distinct()
-    if student_id:
-        query = query.filter(SubjectScore.student_id == student_id)
-    if name:
-        query = query.filter(SubjectScore.name.like(f"%{name}%"))
-    results = query.all()
-    db.close()
-    return [{"student_id": r[0], "name": r[1]} for r in results]
+    try:
+        query = db.query(SubjectScore.student_id, SubjectScore.name).distinct()
+        if student_id:
+            # 同一人可能跨学年换了学号，按 person 取并集
+            ids = person_ids(db, str(student_id))
+            query = query.filter(SubjectScore.student_id.in_(ids))
+        if name:
+            query = query.filter(SubjectScore.name.like(f"%{name}%"))
+        results = query.all()
+
+        if not results:
+            return []
+
+        # 把原始 (student_id, name) 行按 identity 聚合成「人」
+        person_buckets: dict = {}  # identity_id(or None) -> {"student_ids": set, "name": str}
+        for sid, nm in results:
+            iid = identity_of(db, sid)
+            bucket = person_buckets.get(iid)
+            if bucket is None:
+                bucket = {"student_ids": set(), "name": nm or sid}
+                person_buckets[iid] = bucket
+            bucket["student_ids"].add(sid)
+            if nm and (not bucket["name"] or bucket["name"] == sid):
+                bucket["name"] = nm
+
+        rows = []
+        for iid, bucket in person_buckets.items():
+            sids = sorted(bucket["student_ids"])
+            # 取一个代表学号（最早出现的，保持稳定）
+            rep_sid = sids[0]
+            rows.append(
+                {
+                    "student_id": rep_sid,
+                    "name": bucket["name"],
+                    "person_id": iid,
+                    "all_student_ids": sids,
+                }
+            )
+        return rows
+    finally:
+        db.close()
+
+
+def student_identity_lookup(name: Optional[str] = None, student_id: Optional[str] = None) -> dict:
+    """查一个学生的「人」身份：identity_id、展示名、各学年学号履历。
+    用于跨学年学号继承确认、查看某生历史学号、辨认同名。"""
+    from app.analysis.identity import aliases_of, identity_of, name_candidates
+    from app.db.models import Exam, SubjectScore, StudentIdentity, get_db
+
+    db = next(get_db())
+    try:
+        # ── 解析到目标 identity / 学号 ──
+        resolved_sid = None
+        if student_id:
+            sid = str(student_id)
+            # 校验该学号在成绩库确有记录（避免查无此号也返回 identity）
+            exists = (
+                db.query(SubjectScore.student_id)
+                .filter(SubjectScore.student_id == sid)
+                .first()
+            )
+            if not exists:
+                return {"error": "未找到学生", "student_id": student_id, "name": name}
+            resolved_sid = sid
+        elif name:
+            # 跨年级按姓名找候选；同名必须人工消歧
+            cands = []
+            for grade in (1, 2, 3):
+                cands.extend(name_candidates(db, name, target_grade=grade))
+            # 去重（同一 student_id 可能在多个 grade 命中）
+            seen = set()
+            uniq = []
+            for c in cands:
+                if c["student_id"] in seen:
+                    continue
+                seen.add(c["student_id"])
+                uniq.append(c)
+            if not uniq:
+                return {"error": "未找到学生", "student_id": student_id, "name": name}
+            if len(uniq) > 1:
+                return {
+                    "error": "匹配到多个学生，请指定学号",
+                    "candidates": uniq,
+                }
+            resolved_sid = uniq[0]["student_id"]
+        else:
+            return {"error": "需提供 student_id 或 name"}
+
+        iid = identity_of(db, resolved_sid)
+        # 取一个展示名：优先 identity.display_name，否则该学号最近一次成绩里的 name
+        display_name = None
+        ident_row = None
+        if iid is not None:
+            ident_row = db.query(StudentIdentity).filter(StudentIdentity.id == iid).first()
+            display_name = ident_row.display_name if ident_row else None
+        if not display_name:
+            nm_row = (
+                db.query(SubjectScore.name)
+                .join(Exam, Exam.id == SubjectScore.exam_id)
+                .filter(
+                    SubjectScore.student_id == resolved_sid,
+                    SubjectScore.name.isnot(None),
+                )
+                .order_by(Exam.exam_date.desc().nullslast(), Exam.id.desc())
+                .first()
+            )
+            display_name = (nm_row[0] if nm_row else None) or resolved_sid
+
+        # ── 组装学号履历 ──
+        aliases = aliases_of(db, iid) if iid is not None else []
+        # 该 alias 学号在成绩库里的班级（取最近一次有 class_num 的记录）
+        def class_num_of(sid: str):
+            row = (
+                db.query(SubjectScore.class_num)
+                .join(Exam, Exam.id == SubjectScore.exam_id)
+                .filter(
+                    SubjectScore.student_id == sid,
+                    SubjectScore.class_num.isnot(None),
+                )
+                .order_by(Exam.exam_date.desc().nullslast(), Exam.id.desc())
+                .first()
+            )
+            return row[0] if row else None
+
+        if aliases:
+            alias_payload = [
+                {
+                    "student_id": a.student_id,
+                    "grade": a.grade,
+                    "class_num": class_num_of(a.student_id),
+                    "link_source": a.link_source,
+                }
+                for a in aliases
+            ]
+        else:
+            # 未链接：单学号，视为独立一个人
+            alias_payload = [
+                {
+                    "student_id": resolved_sid,
+                    "grade": None,
+                    "class_num": class_num_of(resolved_sid),
+                    "link_source": None,
+                }
+            ]
+
+        return {
+            "identity_id": iid,
+            "display_name": display_name,
+            "aliases": alias_payload,
+            "note": "学段履历（高一/高二学号是否继承）：identity_id 非 null 表示这些学号已挂接为同一人；null 表示仅查到单一学号、未做跨学年合并。",
+        }
+    finally:
+        db.close()
 
 def student_exam_detail(student_id: str, exam_id: int) -> dict:
     """某生某次考试的完整成绩"""
@@ -121,25 +268,32 @@ def student_exam_detail(student_id: str, exam_id: int) -> dict:
 
 
 def student_trend(student_id: str, total_type: str = "主三门", exam_ids: Optional[list[int]] = None) -> dict:
-    """跨次趋势。跨学年调用方应使用主三门。"""
+    """跨次趋势。跨学年调用方应使用主三门。自动合并同一人的多个学号。"""
+    from app.analysis.identity import person_ids
     from app.analysis.trends import compute_student_trend
     from app.db.models import Exam, TotalScore
     from app.db.models import get_db
 
     db = next(get_db())
-    if exam_ids is None:
-        exam_ids = [
-            row[0]
-            for row in db.query(TotalScore.exam_id)
-            .join(Exam, Exam.id == TotalScore.exam_id)
-            .filter(TotalScore.student_id == student_id, TotalScore.total_type == total_type)
-            .order_by(Exam.grade, Exam.exam_date)
-            .distinct()
-            .all()
-        ]
-    result = compute_student_trend(student_id, total_type, exam_ids, db)
-    db.close()
-    return result
+    try:
+        ids = person_ids(db, str(student_id))
+        if exam_ids is None:
+            exam_ids = [
+                row[0]
+                for row in db.query(TotalScore.exam_id)
+                .join(Exam, Exam.id == TotalScore.exam_id)
+                .filter(
+                    TotalScore.student_id.in_(ids),
+                    TotalScore.total_type == total_type,
+                )
+                .order_by(Exam.grade, Exam.exam_date)
+                .distinct()
+                .all()
+            ]
+        result = compute_student_trend(ids, total_type, exam_ids, db)
+        return result
+    finally:
+        db.close()
 
 
 def student_learning_profile(
@@ -147,9 +301,11 @@ def student_learning_profile(
     name: Optional[str] = None,
     subject_limit: int = 5,
 ) -> dict[str, Any]:
-    """学生整体学习画像：总分趋势、单科强弱项、进退步科目。"""
+    """学生整体学习画像：总分趋势、单科强弱项、进退步科目。自动合并同一人
+    跨学年的多个学号（person_ids），按人聚合展示。"""
     from collections import defaultdict
 
+    from app.analysis.identity import identity_of, person_ids
     from app.db.models import Exam, SubjectScore, TotalScore
     from app.db.models import get_db
 
@@ -173,11 +329,15 @@ def student_learning_profile(
 
     resolved_student_id = students[0][0]
     resolved_name = students[0][1] or resolved_student_id
+    # 同一人的全部学号（跨学年合并）；未链接时退化为单学号集合
+    ids = person_ids(db, resolved_student_id)
+    person_identity = identity_of(db, resolved_student_id)
+    alternate_ids = sorted(sid for sid in ids if sid != resolved_student_id)
 
     exam_rows = (
         db.query(Exam)
         .join(TotalScore, Exam.id == TotalScore.exam_id)
-        .filter(TotalScore.student_id == resolved_student_id)
+        .filter(TotalScore.student_id.in_(ids))
         .order_by(Exam.grade, Exam.exam_date, Exam.id)
         .distinct()
         .all()
@@ -186,7 +346,7 @@ def student_learning_profile(
 
     totals = (
         db.query(TotalScore)
-        .filter(TotalScore.student_id == resolved_student_id)
+        .filter(TotalScore.student_id.in_(ids))
         .all()
     )
     totals_by_type: dict[str, list[TotalScore]] = defaultdict(list)
@@ -199,7 +359,7 @@ def student_learning_profile(
 
     subjects = (
         db.query(SubjectScore)
-        .filter(SubjectScore.student_id == resolved_student_id)
+        .filter(SubjectScore.student_id.in_(ids))
         .all()
     )
     subjects_by_name: dict[str, list[SubjectScore]] = defaultdict(list)
@@ -378,6 +538,9 @@ def student_learning_profile(
             "name": resolved_name,
             "current_grade": latest_exam.grade if latest_exam else None,
             "latest_exam": exam_payload(latest_exam.id) if latest_exam else None,
+            "person_id": person_identity,
+            "all_student_ids": sorted(ids),
+            "alternate_ids": alternate_ids,
         },
         "available_exams": [exam_payload(exam.id) for exam in exam_rows],
         "main_total_trend": main_total_trend,
@@ -1136,9 +1299,13 @@ def student_notes(student_id: Optional[str] = None, name: Optional[str] = None, 
                 "candidates": [{"student_id": m.student_id, "name": m.name} for m in matches],
             }
         roster = matches[0]
+        # 同一人跨学年可能换学号，合并 person 全部学号的档案
+        from app.analysis.identity import person_ids
+
+        note_ids = person_ids(db, roster.student_id)
         rows = (
             db.query(StudentNote)
-            .filter(StudentNote.student_id == roster.student_id)
+            .filter(StudentNote.student_id.in_(note_ids))
             .order_by(StudentNote.date.desc(), StudentNote.id.desc())
             .limit(max(1, min(limit, 100)))
             .all()
@@ -1222,6 +1389,7 @@ def homework_grade_correlation(
 TOOL_FUNCTIONS = {
     "list_exams": list_exams,
     "student_lookup": student_lookup,
+    "student_identity_lookup": student_identity_lookup,
     "student_exam_detail": student_exam_detail,
     "student_trend": student_trend,
     "student_learning_profile": student_learning_profile,
@@ -1280,6 +1448,17 @@ TOOLS = [
     {
         "name": "student_lookup",
         "description": "按姓名/学号定位学生",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "student_id": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "student_identity_lookup",
+        "description": "查某个学生的「人」身份与学号履历：identity_id、展示名、各学年（高一/高二/高三）用过的学号及班级、链接来源。用于确认跨学年学号是否已合并为同一人、查看某生历史学号、辨认同名学生。学生可能跨学年换过学号，本工具返回 aliases 列出该人全部学号。",
         "input_schema": {
             "type": "object",
             "properties": {

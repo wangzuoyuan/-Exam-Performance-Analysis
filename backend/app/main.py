@@ -55,21 +55,38 @@ def root():
 @app.get("/api/teacher")
 def get_teacher():
     """获取班主任信息（延迟初始化）"""
-    from app.db.models import SessionLocal, Teacher
+    from app.db.models import SessionLocal, Teacher, Exam, SubjectScore, StudentAlias
     db = SessionLocal()
-    teacher = db.query(Teacher).first()
-    if not teacher:
-        teacher = Teacher()
-        db.add(teacher)
-        db.commit()
-        db.refresh(teacher)
-    db.close()
+    try:
+        teacher = db.query(Teacher).first()
+        if not teacher:
+            teacher = Teacher()
+            db.add(teacher)
+            db.commit()
+            db.refresh(teacher)
+        # 升级待办信号：已上传高二成绩 且 身份映射表仍为空（尚未执行 rollover）
+        has_g2 = (
+            db.query(SubjectScore)
+            .join(Exam, Exam.id == SubjectScore.exam_id)
+            .filter(Exam.grade == 2)
+            .first()
+            is not None
+        )
+        identity_empty = db.query(StudentAlias).count() == 0
+        has_pending_rollover = bool(has_g2 and identity_empty)
+        # 作业看板当前年级（homework_setting.active_grade；缺省回落库内最大年级）
+        from app.rollover.service import get_active_grade  # noqa
+        active_grade = get_active_grade(db)
+    finally:
+        db.close()
     return {
         "id": teacher.id,
         "name": teacher.name,
         "target_class_high1": teacher.target_class_high1,
         "target_class_high2": teacher.target_class_high2,
         "target_class_high3": teacher.target_class_high3,
+        "has_pending_rollover": has_pending_rollover,
+        "active_grade": active_grade,
     }
 
 @app.patch("/api/teacher")
@@ -130,12 +147,19 @@ async def bind_class(request: Request, class_num: Optional[int] = None, grade: i
 from app.db.models import Base, engine  # noqa
 Base.metadata.create_all(bind=engine)
 
+try:
+    from app.db.migrate_homeroom import migrate as _migrate_homeroom  # noqa
+    _migrate_homeroom()
+except Exception as _e:  # noqa
+    print(f"[migrate_homeroom] skipped: {_e}")
+
 from app.ingest.router import router as ingest_router  # noqa
 from app.analysis.router import router as analysis_router  # noqa
 from app.chat.session import router as chat_router  # noqa
 from app.homework.router import router as homework_router  # noqa
 from app.notes.router import router as notes_router  # noqa
 from app.backup.router import router as backup_router  # noqa
+from app.rollover.router import router as rollover_router  # noqa
 from app.auth_router import router as auth_router  # noqa
 
 app.include_router(auth_router, prefix="/api")
@@ -145,3 +169,4 @@ app.include_router(chat_router, prefix="/api")
 app.include_router(homework_router, prefix="/api")
 app.include_router(notes_router, prefix="/api")
 app.include_router(backup_router, prefix="/api")
+app.include_router(rollover_router, prefix="/api")

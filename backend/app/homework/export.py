@@ -38,24 +38,36 @@ def _unique_join(values):
 
 
 def export_daily_report(target_date, db=None):
-    """导出某天的缺交记录 Excel。无任何记录则不生成文件，返回 None。"""
+    """导出某天的缺交记录 Excel。无任何记录则不生成文件，返回 None。
+
+    名册按 active_grade 收口，避免高一+高二名册并存后日清单混入其他年级。
+    """
+    from app.homework.service import get_active_grade
+
     own_db = db is None
     if own_db:
         db = next(get_db())
     try:
-        roster = {r.student_id: r for r in db.query(ClassRoster).all()}
+        active_grade = get_active_grade(db)
+        roster = {
+            r.student_id: r
+            for r in db.query(ClassRoster).filter(ClassRoster.grade == active_grade).all()
+        }
+        active_sids = set(roster.keys())
 
-        # 缺交记录（含说明/特殊情况备注）
+        # 缺交记录（含说明/特殊情况备注）——仅当前学年学生，避免串年级
         records = (
             db.query(HomeworkRecord)
             .filter(HomeworkRecord.date == target_date)
             .all()
         )
+        records = [r for r in records if r.student_id in active_sids]
         specials = (
             db.query(SpecialRecord)
             .filter(SpecialRecord.date == target_date)
             .all()
         )
+        specials = [s for s in specials if s.student_id in active_sids]
         if not records and not specials:
             return None
 

@@ -11,6 +11,7 @@ import {
   Users,
   NotebookPen,
   GraduationCap,
+  RefreshCw,
   Pencil,
   Check,
   X,
@@ -22,6 +23,8 @@ export interface TeacherSummary {
   name?: string | null
   current_class?: number | null
   current_grade?: number | null
+  active_grade?: number | null
+  has_pending_rollover?: boolean
 }
 
 interface NavItem {
@@ -67,6 +70,12 @@ const NAV_ITEMS: NavItem[] = [
     label: '作业跟踪',
     icon: NotebookPen,
     match: (p) => p.startsWith('/homework'),
+  },
+  {
+    href: '/settings/rollover',
+    label: '升级换届',
+    icon: RefreshCw,
+    match: (p) => p.startsWith('/settings/rollover'),
   },
 ]
 
@@ -183,6 +192,10 @@ export function SidebarContent({ teacher, onNameChange }: SidebarContentProps) {
           )}
           <div className="mt-2 text-xs text-slate-500">当前班级</div>
           <div className="mt-0.5 text-sm font-medium text-slate-100">{classLabel}</div>
+          <div className="mt-2 text-xs text-slate-500">作业看板当前</div>
+          <div className="mt-0.5 text-sm font-medium text-slate-100">
+            {teacher?.active_grade != null ? `高${teacher.active_grade}` : '—'}
+          </div>
         </div>
       </div>
     </div>

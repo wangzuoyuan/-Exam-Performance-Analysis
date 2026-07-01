@@ -34,6 +34,17 @@ def get_semester(db):
     return cfg
 
 
+def get_active_grade(db) -> int:
+    """当前作业学年（单一来源：rollover.service.get_active_grade）。
+
+    读 homework_setting.active_grade；缺省回落 max(class_roster.grade) ->
+    max(Exam.grade) -> 1。homework 模块 lazy-import rollover 以避免循环，并
+    保持全应用一处定义。
+    """
+    from app.rollover.service import get_active_grade as _gag
+    return _gag(db)
+
+
 def set_semester(db, data):
     for key in ("semester_start", "semester_end", "semester_name"):
         if key in data and data[key] is not None:
@@ -55,8 +66,17 @@ def _subject_keywords(subject):
 
 
 def _base_miss_query(db, start, end, student=None, subject=None,
-                     respect_excluded=True):
-    """缺交有效记录基础查询（join 花名册），返回 (HomeworkRecord, ClassRoster)。"""
+                     respect_excluded=True, grade=None):
+    """缺交有效记录基础查询（join 花名册），返回 (HomeworkRecord, ClassRoster)。
+
+    年级收口：当 respect_excluded=True（即看板/排行/预警路径）时按 active_grade
+    收口，避免高一+高二名册并存后看板串年级。grade 显式传入则覆盖 active_grade；
+    grade=0 表示不收口（跨学年查询用）。student 模糊查询路径（respect_excluded
+    被绕过）同样按 active_grade 收口。
+    """
+    if grade is None:
+        grade = get_active_grade(db)
+    active_grade = grade
     q = (
         db.query(HomeworkRecord, ClassRoster)
         .join(ClassRoster, ClassRoster.student_id == HomeworkRecord.student_id)
@@ -65,6 +85,8 @@ def _base_miss_query(db, start, end, student=None, subject=None,
             HomeworkRecord.subject != "全科",
         )
     )
+    if active_grade:
+        q = q.filter(ClassRoster.grade == active_grade)
     if start and end:
         q = q.filter(HomeworkRecord.date >= start, HomeworkRecord.date <= end)
     if student:
@@ -203,8 +225,15 @@ def warnings(db, start, end):
 
 
 def student_summary(db, student_id=None, name=None):
-    """单个学生本学期作业概况：缺交总数、按科目分布、迟到/请假次数、
-    当前连续缺交预警。姓名多义时返回候选。"""
+    """单个学生作业概况（跨学年可视）：缺交总数、按科目分布、迟到/请假次数、
+    当前连续缺交预警。姓名多义时返回候选。
+
+    缺交/特殊记录按「同一人」全部学号聚合（person_ids），跨学年可见——换届后
+    班主任从高二学号打开卡片也能看到该生高一的缺交历史。展示表头用 active_grade
+    名册行（找不到时回退任一别名学号的名册行）。当前连续缺交预警仅当前学年
+    （warnings 本身按 active_grade 收口，streak 是当前学期的）。"""
+    from app.analysis.identity import person_ids
+
     roster_q = db.query(ClassRoster)
     if student_id:
         roster_q = roster_q.filter(ClassRoster.student_id == student_id)
@@ -221,13 +250,27 @@ def student_summary(db, student_id=None, name=None):
             "candidates": [{"student_id": m.student_id, "name": m.name} for m in matches],
         }
     roster = matches[0]
+
+    # 同一人全部学号（无 alias 时退化为 {student_id}，与换届前一致）
+    active_grade = get_active_grade(db)
+    ids = person_ids(db, roster.student_id)
+
+    # 展示表头：优先 active_grade 名册行，回退任一别名学号的名册行
+    header = (
+        db.query(ClassRoster)
+        .filter(ClassRoster.student_id.in_(ids), ClassRoster.grade == active_grade)
+        .first()
+    )
+    if header is None:
+        header = roster
+
     sem = get_semester(db)
     start, end = sem["semester_start"], sem["semester_end"]
 
     miss_rows = (
         db.query(HomeworkRecord)
         .filter(
-            HomeworkRecord.student_id == roster.student_id,
+            HomeworkRecord.student_id.in_(ids),
             (HomeworkRecord.remark.is_(None)) | (HomeworkRecord.remark == ""),
             HomeworkRecord.subject != "全科",
             HomeworkRecord.date >= start,
@@ -242,7 +285,7 @@ def student_summary(db, student_id=None, name=None):
     special_rows = (
         db.query(SpecialRecord)
         .filter(
-            SpecialRecord.student_id == roster.student_id,
+            SpecialRecord.student_id.in_(ids),
             SpecialRecord.date >= start,
             SpecialRecord.date <= end,
         )
@@ -252,10 +295,11 @@ def student_summary(db, student_id=None, name=None):
     for s in special_rows:
         special_counts[s.type] += 1
 
-    # 该生当前连续缺交预警
+    # 该生当前连续缺交预警（warnings 已按 active_grade 收口，仅当前学年 streak）
     all_warn = warnings(db, start, end)
     student_warnings = [
-        w for w in (all_warn["serious"] + all_warn["warning"]) if w["name"] == roster.name
+        w for w in (all_warn["serious"] + all_warn["warning"])
+        if w.get("student_id") in ids or w["name"] == roster.name
     ]
 
     recent_records = [
@@ -265,10 +309,10 @@ def student_summary(db, student_id=None, name=None):
 
     return {
         "student": {
-            "student_id": roster.student_id,
-            "name": roster.name,
-            "class_num": roster.class_num,
-            "excluded": bool(roster.excluded),
+            "student_id": header.student_id,
+            "name": header.name,
+            "class_num": header.class_num,
+            "excluded": bool(header.excluded),
         },
         "semester": sem,
         "total_misses": len(miss_rows),
@@ -325,12 +369,15 @@ def grade_correlation(db, class_num, exam_id=None, total_type="主三门",
     if exam_id is None:
         exam_id = _latest_exam_id(db)
 
+    active_grade = get_active_grade(db)
     roster = {
         r.student_id: r
-        for r in db.query(ClassRoster).filter(ClassRoster.class_num == class_num).all()
+        for r in db.query(ClassRoster).filter(
+            ClassRoster.class_num == class_num, ClassRoster.grade == active_grade
+        ).all()
     }
 
-    # 学期内缺交次数（subject 非空时只算该科）
+    # 学期内缺交次数（subject 非空时只算该科）；_base_miss_query 已按 active_grade 收口
     miss_rows = _base_miss_query(db, start, end, subject=subject, respect_excluded=True).all()
     miss_by_sid = defaultdict(int)
     for rec, _ in miss_rows:
@@ -417,14 +464,16 @@ def subject_correlation_ranking(db, class_num, exam_id=None, start=None, end=Non
     if exam_id is None:
         exam_id = _latest_exam_id(db)
 
+    active_grade = get_active_grade(db)
     excluded = {
         r.student_id
         for r in db.query(ClassRoster).filter(
-            ClassRoster.class_num == class_num, ClassRoster.excluded == 1
+            ClassRoster.class_num == class_num, ClassRoster.excluded == 1,
+            ClassRoster.grade == active_grade,
         ).all()
     }
 
-    # 一次取全学期缺交，按 (科目, 学生) 计数
+    # 一次取全学期缺交，按 (科目, 学生) 计数；_base_miss_query 已按 active_grade 收口
     miss_rows = _base_miss_query(db, start, end, respect_excluded=True).all()
     miss_by_subj_sid = defaultdict(lambda: defaultdict(int))
     for rec, _ in miss_rows:
@@ -471,10 +520,12 @@ def weekly_focus(db, class_num=6, today=None):
     today = today or date.today().isoformat()
     week_start = (date.fromisoformat(today) - timedelta(days=6)).isoformat()
 
+    active_grade = get_active_grade(db)
     roster = {
         r.student_id: r
         for r in db.query(ClassRoster).filter(
-            ClassRoster.class_num == class_num, ClassRoster.excluded == 0
+            ClassRoster.class_num == class_num, ClassRoster.excluded == 0,
+            ClassRoster.grade == active_grade,
         ).all()
     }
     reasons = defaultdict(list)  # student_id -> [理由标签]

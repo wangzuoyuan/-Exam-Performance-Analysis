@@ -8,6 +8,7 @@ import {
   CalendarOff,
   CheckCircle2,
   ClipboardList,
+  RefreshCw,
   School,
   Upload,
 } from 'lucide-react'
@@ -62,6 +63,8 @@ interface TeacherInfo {
   target_class_high1: number | null
   target_class_high2: number | null
   target_class_high3: number | null
+  has_pending_rollover?: boolean
+  active_grade?: number | null
 }
 
 interface FocusStudent {
@@ -296,6 +299,28 @@ export default function Dashboard() {
 
       {/* 本周关注（主动提醒） */}
       <WeeklyFocusCard />
+
+      {/* 升级换届提醒 */}
+      {teacher?.has_pending_rollover && (
+        <Card className="border-brand-500/20 bg-brand-50/50">
+          <CardContent className="flex flex-col gap-3 p-6 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <CardTitle className="text-base text-slate-900">
+                检测到高二成绩，部分学生学号已变更
+              </CardTitle>
+              <CardDescription className="mt-1">
+                去做升级换届以接续学情。
+              </CardDescription>
+            </div>
+            <Button asChild variant="default">
+              <Link href="/settings/rollover">
+                <RefreshCw className="h-4 w-4" />
+                前往升级换届
+              </Link>
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
       {/* 初始化提示 */}
       {showUploadPrompt && (

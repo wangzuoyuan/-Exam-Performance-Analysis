@@ -16,6 +16,20 @@ import {
   TableRow,
 } from '@/components/ui/table'
 
+interface TeacherInfo {
+  active_grade?: number | null
+}
+
+async function safeJson<T>(url: string): Promise<T | null> {
+  try {
+    const res = await fetch(url)
+    if (!res.ok) return null
+    return (await res.json()) as T
+  } catch {
+    return null
+  }
+}
+
 interface ManageRecord {
   id: number
   name: string
@@ -35,6 +49,7 @@ export default function HomeworkManagePage() {
   // 先把 URL 上的 date/student/subject 读进来再触发加载，避免「无筛选请求」
   // 与「带筛选请求」竞争、前者后到把结果覆盖成全量。
   const [ready, setReady] = useState(false)
+  const [activeGrade, setActiveGrade] = useState<number | null>(null)
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
@@ -42,6 +57,9 @@ export default function HomeworkManagePage() {
     setStudent(params.get('student') || '')
     setSubject(params.get('subject') || '')
     setReady(true)
+    safeJson<TeacherInfo>('/api/teacher').then((t) => {
+      setActiveGrade(t?.active_grade ?? null)
+    })
   }, [])
 
   const load = useCallback(async () => {
@@ -80,6 +98,15 @@ export default function HomeworkManagePage() {
         <ChevronLeft className="h-4 w-4" />
         返回作业看板
       </Link>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Button asChild variant="outline" size="sm">
+          <Link href="/settings/rollover">升级换届</Link>
+        </Button>
+        <Badge variant="secondary">
+          当前看板年级：{activeGrade != null ? `高${activeGrade}` : '—'}
+        </Badge>
+      </div>
 
       <Card>
         <CardHeader>

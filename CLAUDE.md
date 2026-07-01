@@ -28,6 +28,8 @@ npm run build                       # 生产构建
 # 后端测试
 cd backend && source .venv/bin/activate && pytest tests/
 pytest tests/test_excel_parser.py::test_xxx  # 单个用例
+# 换届/身份子系统用例：test_identity / test_rollover / test_student_union /
+#   test_migrate_homeroom / test_chat_tools_union（按人合并口径）
 
 # 日志
 tail -f ~/.exam-tracker/backend.log
@@ -36,11 +38,13 @@ tail -f ~/.exam-tracker/frontend.log
 
 ## 架构概览
 
-**后端**：FastAPI + SQLite（`~/.exam-tracker/db.sqlite`），通过 SQLAlchemy 访问。三个路由模块挂载在 `/api` 前缀下：`ingest`（上传）/ `analysis`（查询）/ `chat`（SSE 流式对话）。
+**后端**：FastAPI + SQLite（`~/.exam-tracker/db.sqlite`），通过 SQLAlchemy 访问。路由模块挂载在 `/api` 前缀下：`ingest`（上传）/ `analysis`（查询）/ `chat`（SSE 流式对话）/ `homework`（作业）/ `notes`（档案）/ `backup`（备份恢复）/ `rollover`（升级换届，跨学年身份接续）。
 
 **前端**：Next.js 14 App Router + shadcn/ui + Recharts + Tailwind。全局布局由 `Shell.tsx`（侧边栏 + Topbar）管理，`ChatDrawer` 在 `layout.tsx` 全局挂载。页面：`/`(仪表盘，含「本周关注」「数据备份」卡) `/upload` `/compare` `/exam` `/student`（学生页含作业卡片、成长/谈话档案、「导出家长会一页纸」入口）`/student/[id]/report`(打印友好一页纸) `/homework`(作业，含 `/manage` `/warnings` `/correlation` `/settings` 子页)。
 
 **数据库**：成绩相关 6 张表——`teacher`、`exam`、`upload`、`subject_score`、`total_score`、`class_average`；另有 `analysis_config`（段位阈值，单行 id=1）。作业相关 4 张表（原 Flask「作业跟踪」合并而来）——`class_roster`（花名册，主键真实学号 `student_id`，含座号/性别/`excluded`）、`homework_record`、`special_record`、`homework_setting`。档案 1 张表——`student_note`（成长/谈话档案：category 谈话/观察/家访/家长沟通/奖惩、content、follow_up 跟进项）。作业与档案均按真实学号 `student_id` 与成绩表关联。
+
+**身份层（跨学年身份接续，升级换届后引入）**：3 张新表——`student_identity`（「人」聚合根，含 `display_name`/`gender`/`ext_key`，后者预留身份证/全国学籍号，默认不用）、`student_alias`（学号→identity 映射，`grade` 区分学年，一人可多号，唯一约束 `uq_alias_student`）、`imported_history`（手工导入的历史分数，**与全年级排名/班均/段位计算完全隔离**，仅个人画像展示）。新列 `class_roster.grade`（名册行所属年级 1/2/3，支持换届后高一/高二名册并存）；`homework_setting.active_grade` 是一行 KV（key=`active_grade`，缺省回落库内最大年级）。`analysis/identity.py` 是身份子系统对外唯一契约：`identity_of` / `person_ids` / `ensure_identity` / `link_aliases` / `unlink_alias` / `name_candidates` / `import_crosswalk`。**核心不变式**：`person_ids(db, sid)` 在学号未链接时退化为 `{sid}`——单学年分析仍按 `class_num` 过滤，只有以学生为中心的跨学年读侧才解析 identity，因此零回归。`db/migrate_homeroom.py` 在启动时跑（`main.py` 调用），PRAGMA 门控、幂等可重跑；遗留的教学版残留（孤立的 `teaching_class*` 表、`class_roster.class_label` 列）原样保留不动。
 
 ## 部署（Docker / 群晖 NAS）
 
@@ -70,7 +74,8 @@ tail -f ~/.exam-tracker/frontend.log
 | DELETE | `/api/exams/{id}` | 删除考试及所有关联数据（级联） |
 | GET  | `/api/exams/{id}` | 考试详情：含 `students[]`、`rank_bands`、`rank_distribution`、`class_averages`、`stats` |
 | GET  | `/api/focus-list/{id}` | 重点关注名单（临界段/薄弱段/严重偏科），支持 `?class_num=` |
-| GET  | `/api/students/{id}` | 学生跨学年画像：含 `main_total_trend`（每项含 `class_rank`）、`five_trend`、`plus3_trend`、`san3_trend`、`subject_trend` |
+| GET  | `/api/students` | 学生列表（按「人」去重）：合并同一人多学号，返回当前班级/学号 + 历史学号 + 最近主三门摘要，`?search=` 模糊匹配 |
+| GET  | `/api/students/{id}` | 学生跨学年画像：含 `main_total_trend`（每项含 `class_rank`）、`five_trend`、`plus3_trend`、`san3_trend`、`subject_trend`；带 `identity.aliases`（每个学号各年级 class_num）、`class_by_grade`（JSON 字符串键）、每个趋势点 `imported` 标记、合并 `imported_history`（隔离，不进排名/班均） |
 | GET  | `/api/class/compare` | 班级横向对比，支持 `?exam_id=` |
 | GET  | `/api/subject-weakness/{id}` | 单科薄弱名单，支持 `?class_num=` |
 | GET  | `/api/band-trend` | 历次考试三段（高分/临界/薄弱）人数趋势，支持 `?grade=&class_num=` |
@@ -79,6 +84,8 @@ tail -f ~/.exam-tracker/frontend.log
 | GET  | `/api/rank-frequency` | 多场考试各排名区间频次统计 |
 | GET  | `/api/analysis-config` | 读取段位阈值 |
 | PUT  | `/api/analysis-config` | 保存段位阈值 |
+
+> 注：`GET /api/teacher` 现返回 `active_grade` + `has_pending_rollover`；`POST /api/uploads/commit`、旧版 `/api/uploads` 在检测到高二名册而身份层为空时返回 `suggest_rollover: true`。
 
 ### chat router
 | 方法 | 路径 | 说明 |
@@ -116,13 +123,29 @@ tail -f ~/.exam-tracker/frontend.log
 | GET  | `/api/backup/{name}/download` | 下载备份 |
 | POST | `/api/restore` | 恢复（先自动备份当前库，再覆盖，建议重启） |
 
-## 对话工具集（19 个只读工具，`chat/tools.py`）
+### rollover router（`/api/rollover`，`rollover/router.py`，升级换届）
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET  | `/api/rollover/preview` | 换届预览：检测高二候选名册、未链接学号四态分布、待办状态 |
+| POST | `/api/rollover/roster` | 建高二名册（绑定高二班 + 写 `class_roster` grade=2 行） |
+| POST | `/api/rollover/link` | 逐人判定：把高一学号与高二学号链接为同一 identity |
+| POST | `/api/rollover/link-batch` | 批量链接（四态：已确认/待定/新增/无高一匹配） |
+| DELETE | `/api/rollover/link/{student_id}` | 解除某学号的 identity 链接 |
+| POST | `/api/rollover/crosswalk` | 导入高一↔高二学号对照表，批量建 identity |
+| POST | `/api/rollover/import-history` | 导入手工历史分数到 `imported_history`（隔离） |
+| PATCH | `/api/rollover/active-grade` | 切换作业看板当前年级（`homework_setting.active_grade`） |
+
+## 对话工具集（20 个只读工具，`chat/tools.py`）
 
 成绩 15 个：`list_exams` / `student_lookup` / `student_exam_detail` / `student_trend` / `student_learning_profile` / `class_trend` / `compare_classes` / `focus_list` / `subject_weakness` / `subject_progress_ranking` / `multi_exam_progress_ranking` / `band_trend` / `custom_rank_band_trend` / `rank_range_filter` / `rank_frequency_stat`
+
+身份 1 个：`student_identity_lookup`（按姓名/学号返回该「人」的学段履历：历次学号、各年级班级、跨学年链接状态）
 
 作业 3 个：`student_homework_summary` / `class_homework_ranking` / `homework_grade_correlation`（支持 `subject`，总览附各科皮尔逊相关排序）
 
 档案 1 个：`student_notes`（读取某生成长/谈话档案，结合成绩与缺交辅助起草谈话提纲/家长沟通稿）
+
+**跨学年按人合并口径**：5 个以学生为中心的工具（`student_lookup` / `student_trend` / `student_learning_profile` / `student_notes` / `student_homework_summary`）按 `person_ids(db, sid)` 合并同一人的多个学号；班级工具（`focus_list` / `subject_weakness` / `class_trend` / `compare_classes` / `band_trend`）仍是单学年，按 `class_num` 过滤。
 
 新增工具：在 `tools.py` 里添加函数 + 注册到 `TOOL_FUNCTIONS` 字典和 `TOOLS` 列表，`session.py` 的 `execute_tool()` 自动调度。
 
@@ -130,7 +153,7 @@ tail -f ~/.exam-tracker/frontend.log
 
 **上传链路**：`ingest/router.py` → `filename_parser.py`（文件名解析年级/学期/考试类型）→ `excel_parser.py`（解析 Excel，高一固定列 vs 高二/三 3+3 两种 schema）→ 写入 SQLite。首次上传后弹窗确认班号 → `POST /api/teacher/bind-class`。
 
-**读端链路**：`analysis/router.py` 直接用 SQLAlchemy 查询，**没有使用** `analysis/trends.py` / `class_compare.py` / `focus_list.py` / `cross_year.py`（它们是早期抽象，router 内联了逻辑）。改查询逻辑只需改 `router.py`。
+**读端链路**：`analysis/router.py` 直接用 SQLAlchemy 查询，**没有使用** `analysis/trends.py` / `class_compare.py` / `focus_list.py` / `cross_year.py`（它们是早期抽象，router 内联了逻辑）。改查询逻辑只需改 `router.py`。学生为中心的端点（`/api/students`、`/api/students/{id}`）经 `analysis/identity.py` 解析 `person_ids`，跨学年合并同一人多个学号；班级端点仍是单学年、按 `class_num` 过滤。`active_grade` 驱动作业看板/排行/预警的单年口径（`homework/service._base_miss_query` 过滤 `ClassRoster.grade == active_grade`）；`student_homework_summary` 按 `person_ids` 合并展示（跨学年可见），但看板仍单年。
 
 **段位阈值**：所有段位计算（`rank_bands`、`focus-list`、`band-trend`、AI 工具）必须调用 `analysis/config.py` 的 `get_band_config()`，不能硬编码默认值。用户在前端修改后，页面展示与 AI 问答口径同步。
 
@@ -147,6 +170,7 @@ tail -f ~/.exam-tracker/frontend.log
 - **高一单科 / 高二高三语数英**：用 `grade_percentile`（百分位降低 = 进步）
 - **高二高三 +3 选考单科**：用 `grade_score`（等级分）；等级分精确值为 70/67/64/61/58/55/52/49/46/43/40
 - `raw_score` 只用于单点描述（"该次原始分为X"），不得用于趋势计算
+- **跨学年身份**：学生可能跨学年换学号；以学生为中心的查询已自动合并同一人的多个学号（`person_ids`），班级口径仍按当年行政班；作业看板/排行/预警只统计 `active_grade` 名册（单年）。
 
 ## 前端开发要点
 

@@ -119,6 +119,7 @@ class ClassRoster(Base):
     student_id = Column(String, primary_key=True)  # 真实学号，如 7250601
     name = Column(String, nullable=False)
     class_num = Column(Integer, nullable=True)
+    grade = Column(Integer, nullable=True)  # 该名册行所属年级 1/2/3（换届后高一/高二名册并存）
     seat_no = Column(Integer, nullable=True)        # 班内座号（原作业库 student_no）
     gender = Column(String, nullable=True)
     excluded = Column(Integer, nullable=False, default=0)
@@ -126,6 +127,7 @@ class ClassRoster(Base):
     __table_args__ = (
         Index("idx_roster_class", "class_num"),
         Index("idx_roster_name", "name"),
+        Index("idx_roster_grade", "grade"),
     )
 
 
@@ -166,6 +168,66 @@ class HomeworkSetting(Base):
     __tablename__ = "homework_setting"
     key = Column(String, primary_key=True)
     value = Column(String, nullable=True)
+
+
+# ────────────────────────────── 学生身份与历史档案（班主任版） ──────────────────────────────
+# StudentIdentity 是「同一个人」的唯一聚合根，跨年级/跨班用；StudentAlias 把
+# 每学年的真实学号挂回 identity（一人多号，grade 区分学年）。ImportedHistory
+# 存班主任手工导入的历史分数，与全年级排名/班均/段位计算【完全隔离】——它只
+# 用于跨学年个人画像展示，绝不参与任何聚合统计。
+
+class StudentIdentity(Base):
+    """「同一个学生」的聚合根。display_name/gender 是班主任人工确认的
+    规范化展示名（与 SubjectScore.name 的各班录入口径解耦）。ext_key 预留
+    身份证/全国学籍号，默认不采集。"""
+    __tablename__ = "student_identity"
+    id = Column(Integer, primary_key=True)
+    display_name = Column(String, nullable=True)
+    gender = Column(String, nullable=True)
+    ext_key = Column(String, nullable=True, index=True)  # 预留 身份证/全国学籍号，默认不用
+    note = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class StudentAlias(Base):
+    """把某学年某班的真实学号 student_id 挂回某个 StudentIdentity。
+    一人可有多条（不同年级学号不同），UNIQUE(student_id) 保证一个学号只认
+    一个身份。link_source 记录这条挂接是怎么建立的。"""
+    __tablename__ = "student_alias"
+    id = Column(Integer, primary_key=True)
+    identity_id = Column(Integer, ForeignKey("student_identity.id"), nullable=False)
+    student_id = Column(String, nullable=False)
+    grade = Column(Integer, nullable=True)
+    link_source = Column(String, nullable=False, default="name_confirmed")  # name_confirmed/crosswalk/manual/ext_key
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("student_id", name="uq_alias_student"),
+        Index("idx_alias_identity", "identity_id"),
+    )
+
+
+class ImportedHistory(Base):
+    """班主任手工导入的历史成绩（从旧班主任本子/Excel 搬来的过往考试）。
+    与 SubjectScore/TotalScore 完全隔离——不参与全年级排名、班均、段位
+    任何聚合计算，仅用于跨学年个人画像展示。"""
+    __tablename__ = "imported_history"
+    id = Column(Integer, primary_key=True)
+    identity_id = Column(Integer, ForeignKey("student_identity.id"), nullable=False)
+    grade = Column(Integer, nullable=False, default=1)
+    exam_label = Column(String, nullable=True)
+    exam_seq = Column(Integer, nullable=True)
+    kind = Column(String, nullable=False)  # subject/total
+    subject = Column(String, nullable=True)
+    total_type = Column(String, nullable=True)
+    raw_score = Column(Float, nullable=True)
+    grade_score = Column(Float, nullable=True)
+    grade_percentile = Column(Float, nullable=True)
+    xueji_rank = Column(Integer, nullable=True)
+
+    __table_args__ = (
+        Index("idx_imp_identity", "identity_id"),
+    )
 
 
 # ────────────────────────────── 学生成长 / 谈话档案 ──────────────────────────────

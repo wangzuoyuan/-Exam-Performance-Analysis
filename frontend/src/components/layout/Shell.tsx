@@ -9,6 +9,8 @@ interface RawTeacher {
   target_class_high1?: number | null
   target_class_high2?: number | null
   target_class_high3?: number | null
+  active_grade?: number | null
+  has_pending_rollover?: boolean
 }
 
 function normalizeTeacher(raw: RawTeacher | null): TeacherSummary | null {
@@ -24,6 +26,8 @@ function normalizeTeacher(raw: RawTeacher | null): TeacherSummary | null {
     name: raw.name ?? null,
     current_grade: hit ? hit[0] : null,
     current_class: hit ? (hit[1] as number) : null,
+    active_grade: raw.active_grade ?? null,
+    has_pending_rollover: raw.has_pending_rollover ?? false,
   }
 }
 

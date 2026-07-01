@@ -16,6 +16,7 @@ const SEGMENT_LABELS: Record<string, string> = {
   compare: '班级对比',
   exam: '考试列表',
   student: '学生检索',
+  settings: '系统设置',
 }
 
 interface Crumb {

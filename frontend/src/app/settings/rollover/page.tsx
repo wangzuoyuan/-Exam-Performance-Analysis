@@ -1,0 +1,1337 @@
+'use client'
+
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import Link from 'next/link'
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ChevronLeft,
+  Link2,
+  Loader2,
+  Plus,
+  RefreshCw,
+  Sparkles,
+  Table as TableIcon,
+  Upload,
+} from 'lucide-react'
+
+import { cn } from '@/lib/utils'
+import { formatClassLabel } from '@/lib/labels'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from '@/components/ui/tabs'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+
+// ─────────────────────────── 类型 ───────────────────────────
+
+interface TeacherInfo {
+  target_class_high1: number | null
+  target_class_high2: number | null
+  target_class_high3: number | null
+  has_pending_rollover: boolean
+  active_grade: number
+}
+
+interface PrevAlias {
+  student_id: string
+  grade: number
+  class_num: number | null
+}
+interface InheritedRow {
+  student_id: string
+  name: string | null
+  identity_id: number
+  prev_aliases: PrevAlias[]
+}
+interface Candidate {
+  student_id: string
+  name: string
+  class_num: number | null
+  latest_exam_name: string | null
+  latest_main_score: number | null
+  latest_main_rank: number | null
+  already_linked: boolean
+}
+interface AmbiguousRow {
+  student_id: string
+  name: string | null
+  candidates: Candidate[]
+}
+interface SimpleRow {
+  student_id: string
+  name: string | null
+}
+interface LeftClassRow {
+  student_id: string
+  name: string | null
+  class_num: number
+}
+interface Preview {
+  inherited: InheritedRow[]
+  ambiguous: AmbiguousRow[]
+  new: SimpleRow[]
+  unmatched: SimpleRow[]
+  left_class: LeftClassRow[]
+  summary: {
+    inherited: number
+    ambiguous: number
+    new: number
+    unmatched: number
+    left_class: number
+  }
+}
+
+interface RosterResult {
+  created: number
+  updated: number
+  total: number
+}
+interface CrosswalkResult {
+  linked: number
+  conflict: number
+  skipped: number
+}
+interface ImportResult {
+  identity_id: number | null
+  imported: number
+}
+
+const DASH = '—'
+
+async function safeJson<T>(url: string): Promise<T | null> {
+  try {
+    const res = await fetch(url)
+    if (!res.ok) return null
+    return (await res.json()) as T
+  } catch {
+    return null
+  }
+}
+
+const CLASS_NUMS = Array.from({ length: 30 }, (_, i) => i + 1)
+
+// ─────────────────────────── 页面 ───────────────────────────
+
+export default function RolloverWizardPage() {
+  const [tab, setTab] = useState<'step1' | 'step2' | 'step3'>('step1')
+
+  const [teacher, setTeacher] = useState<TeacherInfo | null>(null)
+  const [activeGrade, setActiveGrade] = useState<number | null>(null)
+
+  // Step 1
+  const [targetGrade, setTargetGrade] = useState<string>('2')
+  const [classNum, setClassNum] = useState<string>('')
+  const [bindMsg, setBindMsg] = useState<string | null>(null)
+  const [rosterText, setRosterText] = useState('')
+  const [rosterBusy, setRosterBusy] = useState(false)
+  const [rosterMsg, setRosterMsg] = useState<string | null>(null)
+
+  // Step 2
+  const [preview, setPreview] = useState<Preview | null>(null)
+  const [previewBusy, setPreviewBusy] = useState(false)
+  const [msg, setMsg] = useState<string | null>(null)
+  const [crosswalkOpen, setCrosswalkOpen] = useState(false)
+
+  const loadTeacher = useCallback(async () => {
+    const t = await safeJson<TeacherInfo>('/api/teacher')
+    if (t) {
+      setTeacher(t)
+      setActiveGrade(t.active_grade)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadTeacher().catch(() => {})
+  }, [loadTeacher])
+
+  // 当目标年级变化时，按 target_class_high{2/3} 预填班号
+  useEffect(() => {
+    if (!teacher) return
+    const g = Number(targetGrade)
+    const prefilled =
+      g === 2 ? teacher.target_class_high2 : g === 3 ? teacher.target_class_high3 : null
+    setClassNum(prefilled != null ? String(prefilled) : '')
+  }, [targetGrade, teacher])
+
+  const effectiveClassNum = useMemo(() => {
+    const n = Number(classNum)
+    return Number.isFinite(n) && n > 0 ? n : null
+  }, [classNum])
+
+  // ─── Step 1 动作 ───
+  async function bindClass() {
+    if (effectiveClassNum == null) return
+    setBindMsg(null)
+    const g = Number(targetGrade)
+    const res = await fetch(
+      `/api/teacher/bind-class?class_num=${effectiveClassNum}&grade=${g}`,
+      { method: 'POST' },
+    )
+    if (res.ok) {
+      setBindMsg(`已绑定 高${g}（${effectiveClassNum} 班）`)
+      await loadTeacher()
+    } else {
+      setBindMsg('绑定失败')
+    }
+  }
+
+  // 把粘贴文本解析成 [{student_id,name}]，容错：一行一个，逗号/制表符分隔
+  function parseRosterText(text: string): { student_id: string; name?: string }[] {
+    const out: { student_id: string; name?: string }[] = []
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim()
+      if (!line) continue
+      const parts = line.split(/[,\t，\s]+/).map((s) => s.trim()).filter(Boolean)
+      if (parts.length === 0) continue
+      const student_id = parts[0]
+      const name = parts[1] || undefined
+      out.push({ student_id, name })
+    }
+    return out
+  }
+
+  async function buildRosterFromScores() {
+    if (effectiveClassNum == null) return
+    setRosterBusy(true)
+    setRosterMsg(null)
+    try {
+      const res = await fetch('/api/rollover/roster', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from_scores: true,
+          grade: Number(targetGrade),
+          class_num: effectiveClassNum,
+        }),
+      })
+      if (res.ok) {
+        const data: RosterResult = await res.json()
+        setRosterMsg(`已从成绩派生名册：新增 ${data.created}、更新 ${data.updated}、共 ${data.total}`)
+      } else {
+        setRosterMsg('派生名册失败，请确认已上传该班成绩')
+      }
+    } finally {
+      setRosterBusy(false)
+    }
+  }
+
+  async function buildRosterFromText() {
+    if (effectiveClassNum == null) return
+    const rows = parseRosterText(rosterText)
+    if (rows.length === 0) {
+      setRosterMsg('请先粘贴学生（每行一个：学号,姓名）')
+      return
+    }
+    setRosterBusy(true)
+    setRosterMsg(null)
+    try {
+      const res = await fetch('/api/rollover/roster', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from_scores: false,
+          grade: Number(targetGrade),
+          class_num: effectiveClassNum,
+          rows: rows.map((r) => ({ student_id: r.student_id, name: r.name ?? null })),
+        }),
+      })
+      if (res.ok) {
+        const data: RosterResult = await res.json()
+        setRosterMsg(`名册已写入：新增 ${data.created}、更新 ${data.updated}、共 ${data.total}`)
+        setRosterText('')
+      } else {
+        setRosterMsg('写入名册失败')
+      }
+    } finally {
+      setRosterBusy(false)
+    }
+  }
+
+  // ─── Step 2 动作 ───
+  const loadPreview = useCallback(async () => {
+    if (effectiveClassNum == null) {
+      setPreview(null)
+      return
+    }
+    setPreviewBusy(true)
+    try {
+      const data = await safeJson<Preview>(
+        `/api/rollover/preview?grade=${Number(targetGrade)}&class_num=${effectiveClassNum}`,
+      )
+      setPreview(data)
+    } finally {
+      setPreviewBusy(false)
+    }
+  }, [effectiveClassNum, targetGrade])
+
+  async function linkG1(g2_sid: string, g1_sid: string, name?: string | null) {
+    setMsg(null)
+    const res = await fetch('/api/rollover/link', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ g2_student_id: g2_sid, g1_student_id: g1_sid, name: name ?? null }),
+    })
+    if (res.ok) {
+      setMsg(`已关联 ${name ?? g2_sid} → 高一 ${g1_sid}`)
+      await loadPreview()
+    } else {
+      setMsg('关联失败')
+    }
+  }
+
+  async function markNew(g2_sid: string, name?: string | null) {
+    // 不传 g1_student_id：作为独立新学生解析/建立 identity，不挂高一学号
+    setMsg(null)
+    const res = await fetch('/api/rollover/link', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ g2_student_id: g2_sid, name: name ?? null, grade: Number(targetGrade) }),
+    })
+    if (res.ok) {
+      setMsg(`已确认 ${name ?? g2_sid} 为新学生（不关联高一）`)
+      await loadPreview()
+    } else {
+      setMsg('操作失败')
+    }
+  }
+
+  async function unlink(student_id: string) {
+    if (!confirm(`解除 ${student_id} 的跨学年关联？`)) return
+    setMsg(null)
+    const res = await fetch(`/api/rollover/link/${student_id}`, { method: 'DELETE' })
+    if (res.ok) {
+      setMsg(`已解除关联 ${student_id}`)
+      await loadPreview()
+    } else {
+      setMsg('解除失败')
+    }
+  }
+
+  // ─── Step 3 动作 ───
+  async function switchActiveGrade() {
+    if (activeGrade == null) return
+    setMsg(null)
+    const res = await fetch('/api/rollover/active-grade', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grade: activeGrade }),
+    })
+    if (res.ok) {
+      setMsg(`作业看板已切换到 高${activeGrade}`)
+    } else {
+      setMsg('切换失败')
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      <Link
+        href="/"
+        className="inline-flex items-center gap-1 text-sm text-slate-600 hover:text-slate-900"
+      >
+        <ChevronLeft className="h-4 w-4" />
+        返回仪表盘
+      </Link>
+
+      <div>
+        <h1 className="text-xl font-semibold tracking-tight text-slate-900">升级换届向导</h1>
+        <p className="mt-1 text-sm text-slate-500">
+          把高一身份、作业名册平滑迁移到高二 / 高三。系统绝不按姓名自动合并——每个同名都需你亲自辨认。
+        </p>
+      </div>
+
+      {teacher?.has_pending_rollover && (
+        <Card className="border-warning-500 bg-warning-50">
+          <CardContent className="flex items-start gap-2 py-3">
+            <AlertTriangle className="mt-0.5 h-4 w-4 text-warning-700" />
+            <div className="text-sm text-warning-700">
+              检测到已上传高二成绩但尚未完成身份迁移。请按下面的三步把高一历史挂到高二学号上，学生画像里的跨学年趋势才能连续。
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)}>
+        <TabsList className="w-full justify-start">
+          <TabsTrigger value="step1">1 · 设定高二班</TabsTrigger>
+          <TabsTrigger value="step2">2 · 逐人判定</TabsTrigger>
+          <TabsTrigger value="step3">3 · 切换看板年级</TabsTrigger>
+        </TabsList>
+
+        {/* ───────────── Step 1 ───────────── */}
+        <TabsContent value="step1" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">目标年级与行政班</CardTitle>
+              <CardDescription>
+                选择你要结转到的年级与班号。确认后会写入「我的班级」绑定（高一历史按此班号匹配）。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex flex-wrap items-end gap-4">
+                <div className="w-36 space-y-1.5">
+                  <label className="text-xs font-medium text-slate-600">目标年级</label>
+                  <Select value={targetGrade} onValueChange={setTargetGrade}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="2">高二</SelectItem>
+                      <SelectItem value="3">高三</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="w-32 space-y-1.5">
+                  <label className="text-xs font-medium text-slate-600">行政班</label>
+                  <Select value={classNum} onValueChange={setClassNum}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="选择班号" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CLASS_NUMS.map((n) => (
+                        <SelectItem key={n} value={String(n)}>
+                          {n} 班
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Button onClick={bindClass} disabled={effectiveClassNum == null}>
+                  确认绑定
+                </Button>
+                {bindMsg && <span className="text-sm text-success-600">{bindMsg}</span>}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">建作业花名册</CardTitle>
+              <CardDescription>
+                花名册是作业看板 / 缺交统计的基础。若已上传该班成绩，可一键派生；否则粘贴名单。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  variant="outline"
+                  onClick={buildRosterFromScores}
+                  disabled={effectiveClassNum == null || rosterBusy}
+                >
+                  {rosterBusy ? (
+                    <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Sparkles className="mr-1 h-4 w-4" />
+                  )}
+                  从该班成绩派生名册
+                </Button>
+                <span className="text-xs text-slate-400">（需先上传高{targetGrade} 学生分数表）</span>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm text-slate-600">
+                  或粘贴名单（每行一个：<code className="rounded bg-slate-100 px-1">学号,姓名</code>，逗号 / 制表符 / 空格分隔均可）
+                </label>
+                <textarea
+                  value={rosterText}
+                  onChange={(e) => setRosterText(e.target.value)}
+                  placeholder={'20250201,张三\n20250202,李四'}
+                  rows={6}
+                  className="w-full rounded-md border border-slate-200 p-2 font-mono text-sm text-base"
+                />
+                <div className="flex items-center gap-3">
+                  <Button
+                    variant="outline"
+                    onClick={buildRosterFromText}
+                    disabled={effectiveClassNum == null || rosterBusy}
+                  >
+                    <Plus className="mr-1 h-4 w-4" />
+                    写入名册
+                  </Button>
+                  {rosterMsg && <span className="text-sm text-slate-600">{rosterMsg}</span>}
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end">
+                <Button variant="ghost" onClick={() => setTab('step2')}>
+                  下一步 · 逐人判定 →
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* ───────────── Step 2 ───────────── */}
+        <TabsContent value="step2" className="space-y-6">
+          <PreviewStep
+            preview={preview}
+            busy={previewBusy}
+            classNum={effectiveClassNum}
+            grade={Number(targetGrade)}
+            msg={msg}
+            onLoad={loadPreview}
+            onLink={linkG1}
+            onMarkNew={markNew}
+            onUnlink={unlink}
+            crosswalkOpen={crosswalkOpen}
+            setCrosswalkOpen={setCrosswalkOpen}
+            onCrosswalkDone={loadPreview}
+            setMsg={setMsg}
+          />
+        </TabsContent>
+
+        {/* ───────────── Step 3 ───────────── */}
+        <TabsContent value="step3" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">切换作业看板年级</CardTitle>
+              <CardDescription>
+                作业看板、排行、预警只看「当前年级」。切换后，历史高一缺交仍在每个学生的画像里可见，但不再混入看板。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex flex-wrap items-end gap-4">
+                <div className="w-40 space-y-1.5">
+                  <label className="text-xs font-medium text-slate-600">当前看板年级</label>
+                  <Select
+                    value={activeGrade != null ? String(activeGrade) : undefined}
+                    onValueChange={(v) => setActiveGrade(Number(v))}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="选择年级" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="1">高一</SelectItem>
+                      <SelectItem value="2">高二</SelectItem>
+                      <SelectItem value="3">高三</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Button onClick={switchActiveGrade} disabled={activeGrade == null}>
+                  把作业看板切到高{activeGrade ?? DASH}
+                </Button>
+                {msg && <span className="text-sm text-success-600">{msg}</span>}
+              </div>
+              <p className="text-xs text-slate-400">
+                当前服务端年级：
+                <span className="ml-1 font-medium text-slate-600">
+                  高{teacher?.active_grade ?? DASH}
+                </span>
+              </p>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+    </div>
+  )
+}
+
+// ─────────────────────────── Step 2 子组件 ───────────────────────────
+
+interface PreviewStepProps {
+  preview: Preview | null
+  busy: boolean
+  classNum: number | null
+  grade: number
+  msg: string | null
+  onLoad: () => void
+  onLink: (g2_sid: string, g1_sid: string, name?: string | null) => void
+  onMarkNew: (g2_sid: string, name?: string | null) => void
+  onUnlink: (student_id: string) => void
+  crosswalkOpen: boolean
+  setCrosswalkOpen: (v: boolean) => void
+  onCrosswalkDone: () => void
+  setMsg: (m: string | null) => void
+}
+
+function PreviewStep({
+  preview,
+  busy,
+  classNum,
+  grade,
+  msg,
+  onLoad,
+  onLink,
+  onMarkNew,
+  onUnlink,
+  crosswalkOpen,
+  setCrosswalkOpen,
+  onCrosswalkDone,
+  setMsg,
+}: PreviewStepProps) {
+  return (
+    <>
+      <Card>
+        <CardHeader>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <CardTitle className="text-base">逐人判定</CardTitle>
+              <CardDescription>
+                按高{grade}
+                {classNum != null ? ` ${classNum} 班` : ''} 的学生，分四类核对跨学年身份。
+              </CardDescription>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => setCrosswalkOpen(true)}>
+                <Upload className="mr-1 h-4 w-4" />
+                导入对照表
+              </Button>
+              <Button variant="outline" size="sm" onClick={onLoad} disabled={busy || classNum == null}>
+                {busy ? (
+                  <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="mr-1 h-4 w-4" />
+                )}
+                刷新
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {msg && <div className="text-sm text-success-600">{msg}</div>}
+          {preview ? (
+            <div className="flex flex-wrap gap-2 text-xs text-slate-500">
+              <Badge variant="success">继承 {preview.summary.inherited}</Badge>
+              <Badge variant="warning">同名待确认 {preview.summary.ambiguous}</Badge>
+              <Badge className="border-transparent bg-brand-50 text-brand-700">新学生 {preview.summary.new}</Badge>
+              <Badge variant="secondary">无成绩 {preview.summary.unmatched}</Badge>
+              <Badge variant="outline">离班 {preview.summary.left_class}</Badge>
+            </div>
+          ) : (
+            <div className="text-sm text-slate-400">
+              {classNum == null ? '请先在 Step 1 选定班级。' : '点击「刷新」生成分类。'}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {preview && (
+        <>
+          {/* 继承 */}
+          <BucketCard
+            title="继承"
+            tone="success"
+            hint="已自动关联到高一学号（同名且学号匹配）。可解除关联。"
+            count={preview.summary.inherited}
+            empty="暂无继承学生"
+            rows={preview.inherited.map((r) => ({
+              key: r.student_id,
+              student_id: r.student_id,
+              name: r.name,
+              extra:
+                r.prev_aliases.length > 0
+                  ? r.prev_aliases
+                      .map((a) => `高${a.grade}${a.class_num ?? '-'}班·${a.student_id}`)
+                      .join(' / ')
+                  : null,
+              actions: (
+                <Button variant="ghost" size="sm" onClick={() => onUnlink(r.student_id)}>
+                  <Link2 className="mr-1 h-3.5 w-3.5" />
+                  解除关联
+                </Button>
+              ),
+            }))}
+          />
+
+          {/* 同名待确认 */}
+          <AmbiguousBucket
+            rows={preview.ambiguous}
+            onLink={onLink}
+            onMarkNew={onMarkNew}
+          />
+
+          {/* 新学生 */}
+          <NewBucket rows={preview.new} onLink={onLink} setMsg={setMsg} />
+
+          {/* 无成绩 */}
+          <BucketCard
+            title="无成绩数据"
+            tone="slate"
+            hint="花名册里有、但高二级暂无成绩。等高二成绩上传 / 核对学号后再次刷新即可。"
+            count={preview.summary.unmatched}
+            empty="暂无"
+            rows={preview.unmatched.map((r) => ({
+              key: r.student_id,
+              student_id: r.student_id,
+              name: r.name,
+              extra: null,
+              actions: <span className="text-xs text-slate-400">等待成绩上传</span>,
+            }))}
+          />
+
+          {/* 离班（仅提示） */}
+          {preview.left_class.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  高{grade - 1}在班 · 高{grade}未见
+                  <Badge variant="outline">{preview.summary.left_class}</Badge>
+                </CardTitle>
+                <CardDescription>
+                  这些学生去年还在你的班，但本年未出现。可能是转班 / 转学，仅作提示，无需操作。
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex flex-wrap gap-2">
+                  {preview.left_class.map((s) => (
+                    <Badge key={s.student_id} variant="outline">
+                      {s.name ?? s.student_id}
+                      <span className="ml-1 text-slate-400">高{grade - 1}{s.class_num}班</span>
+                    </Badge>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+        </>
+      )}
+
+      <CrosswalkDialog
+        open={crosswalkOpen}
+        onOpenChange={setCrosswalkOpen}
+        onDone={onCrosswalkDone}
+      />
+    </>
+  )
+}
+
+// ─── 通用桶卡片（桌面表 + 移动卡片） ───
+interface BucketRow {
+  key: string
+  student_id: string
+  name: string | null
+  extra: string | null
+  actions: React.ReactNode
+}
+
+function BucketCard({
+  title,
+  tone,
+  hint,
+  count,
+  empty,
+  rows,
+}: {
+  title: string
+  tone: 'success' | 'warning' | 'brand' | 'slate'
+  hint: string
+  count: number
+  empty: string
+  rows: BucketRow[]
+}) {
+  const badge = {
+    success: <Badge variant="success">继承</Badge>,
+    warning: <Badge variant="warning">同名待确认</Badge>,
+    brand: <Badge className="border-transparent bg-brand-50 text-brand-700">新学生</Badge>,
+    slate: <Badge variant="secondary">无成绩</Badge>,
+  }[tone]
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          {title}
+          {badge}
+          <span className="text-sm font-normal text-slate-400">{count}</span>
+        </CardTitle>
+        <CardDescription>{hint}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {rows.length === 0 ? (
+          <div className="py-6 text-center text-sm text-slate-400">{empty}</div>
+        ) : (
+          <>
+            {/* 桌面表格 */}
+            <div className="hidden overflow-x-auto md:block">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-40">学号</TableHead>
+                    <TableHead>姓名</TableHead>
+                    <TableHead>关联信息</TableHead>
+                    <TableHead className="text-right">操作</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {rows.map((r) => (
+                    <TableRow key={r.key} className="hover:bg-slate-50">
+                      <TableCell className="font-mono text-slate-500">{r.student_id}</TableCell>
+                      <TableCell className="font-medium">{r.name ?? DASH}</TableCell>
+                      <TableCell className="text-slate-500">{r.extra ?? DASH}</TableCell>
+                      <TableCell className="text-right">{r.actions}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+            {/* 移动卡片 */}
+            <div className="space-y-2 md:hidden">
+              {rows.map((r) => (
+                <div key={r.key} className="rounded-md border border-slate-200 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium">{r.name ?? DASH}</span>
+                    {r.actions}
+                  </div>
+                  <div className="mt-1 font-mono text-xs text-slate-500">{r.student_id}</div>
+                  {r.extra && <div className="mt-1 text-xs text-slate-500">{r.extra}</div>}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// ─── 同名待确认（带候选 Dialog） ───
+function AmbiguousBucket({
+  rows,
+  onLink,
+  onMarkNew,
+}: {
+  rows: AmbiguousRow[]
+  onLink: (g2_sid: string, g1_sid: string, name?: string | null) => void
+  onMarkNew: (g2_sid: string, name?: string | null) => void
+}) {
+  const [openFor, setOpenFor] = useState<AmbiguousRow | null>(null)
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          同名待确认
+          <Badge variant="warning">同名待确认</Badge>
+          <span className="text-sm font-normal text-slate-400">{rows.length}</span>
+        </CardTitle>
+        <CardDescription>
+          这些高二学生与高一某生同名，但学号不同。点「辨认」逐个确认——切勿批量自动合并，避免把两个同名误并为一人。
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {rows.length === 0 ? (
+          <div className="py-6 text-center text-sm text-slate-400">暂无同名待确认</div>
+        ) : (
+          <>
+            <div className="hidden overflow-x-auto md:block">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-40">高二学号</TableHead>
+                    <TableHead>姓名</TableHead>
+                    <TableHead>候选数</TableHead>
+                    <TableHead className="text-right">操作</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {rows.map((r) => (
+                    <TableRow key={r.student_id} className="hover:bg-slate-50">
+                      <TableCell className="font-mono text-slate-500">{r.student_id}</TableCell>
+                      <TableCell className="font-medium">{r.name ?? DASH}</TableCell>
+                      <TableCell>
+                        <Badge variant="warning">{r.candidates.length} 个高一同名</Badge>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Button variant="outline" size="sm" onClick={() => setOpenFor(r)}>
+                          辨认
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+            <div className="space-y-2 md:hidden">
+              {rows.map((r) => (
+                <div key={r.student_id} className="rounded-md border border-slate-200 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium">{r.name ?? DASH}</span>
+                    <Button variant="outline" size="sm" onClick={() => setOpenFor(r)}>
+                      辨认
+                    </Button>
+                  </div>
+                  <div className="mt-1 font-mono text-xs text-slate-500">{r.student_id}</div>
+                  <div className="mt-1">
+                    <Badge variant="warning">{r.candidates.length} 个高一同名</Badge>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </CardContent>
+
+      <CandidateDialog
+        row={openFor}
+        onOpenChange={(v) => !v && setOpenFor(null)}
+        onLink={(g1_sid) => {
+          if (openFor) onLink(openFor.student_id, g1_sid, openFor.name)
+          setOpenFor(null)
+        }}
+        onMarkNew={() => {
+          if (openFor) onMarkNew(openFor.student_id, openFor.name)
+          setOpenFor(null)
+        }}
+      />
+    </Card>
+  )
+}
+
+function CandidateDialog({
+  row,
+  onOpenChange,
+  onLink,
+  onMarkNew,
+}: {
+  row: AmbiguousRow | null
+  onOpenChange: (v: boolean) => void
+  onLink: (g1_sid: string) => void
+  onMarkNew: () => void
+}) {
+  return (
+    <Dialog open={row != null} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl max-sm:h-screen max-sm:w-screen max-sm:max-w-none max-sm:rounded-none max-sm:p-4">
+        <DialogHeader>
+          <DialogTitle>辨认同名 · {row?.name ?? ''}</DialogTitle>
+          <DialogDescription>
+            高二学号 <span className="font-mono">{row?.student_id}</span>。请逐一对比下面的高一候选人，确认是否为同一人。
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="max-h-[60vh] space-y-2 overflow-y-auto">
+          {row?.candidates.map((c) => (
+            <div
+              key={c.student_id}
+              className={cn(
+                'rounded-md border border-slate-200 p-3',
+                c.already_linked && 'bg-slate-50',
+              )}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="space-y-0.5">
+                  <div className="font-medium">
+                    {c.name}
+                    {c.already_linked && (
+                      <Badge className="ml-2 border-transparent bg-slate-100 text-slate-500">
+                        已被关联
+                      </Badge>
+                    )}
+                  </div>
+                  <div className="font-mono text-xs text-slate-500">高一学号 {c.student_id}</div>
+                  <div className="text-xs text-slate-500">
+                    高一行政班：
+                    {formatClassLabel(1, c.class_num) ?? DASH}
+                    {' · '}
+                    {c.latest_exam_name ?? '无考试'}：
+                    主三门 {c.latest_main_score ?? DASH} 分 / 名次 {c.latest_main_rank ?? DASH}
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  onClick={() => onLink(c.student_id)}
+                  disabled={c.already_linked}
+                  title={c.already_linked ? '该高一学号已被关联到别人' : undefined}
+                >
+                  是某某（关联）
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <DialogFooter className="flex-col gap-2 sm:flex-row sm:justify-between">
+          <Button variant="ghost" onClick={onMarkNew}>
+            都不是 · 新学生
+          </Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            稍后处理
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ─── 新学生（导入高一成绩 / 手动关联） ───
+function NewBucket({
+  rows,
+  onLink,
+  setMsg,
+}: {
+  rows: SimpleRow[]
+  onLink: (g2_sid: string, g1_sid: string, name?: string | null) => void
+  setMsg: (m: string | null) => void
+}) {
+  const [importFor, setImportFor] = useState<SimpleRow | null>(null)
+  const [linkFor, setLinkFor] = useState<SimpleRow | null>(null)
+  const [manualSid, setManualSid] = useState('')
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          新学生
+          <Badge className="border-transparent bg-brand-50 text-brand-700">新学生</Badge>
+          <span className="text-sm font-normal text-slate-400">{rows.length}</span>
+        </CardTitle>
+        <CardDescription>
+          没有匹配到高一同名的学生。如确有高一历史，可手动关联学号或直接导入高一成绩。
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {rows.length === 0 ? (
+          <div className="py-6 text-center text-sm text-slate-400">暂无新学生</div>
+        ) : (
+          <>
+            <div className="hidden overflow-x-auto md:block">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-40">学号</TableHead>
+                    <TableHead>姓名</TableHead>
+                    <TableHead className="text-right">操作</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {rows.map((r) => (
+                    <TableRow key={r.student_id} className="hover:bg-slate-50">
+                      <TableCell className="font-mono text-slate-500">{r.student_id}</TableCell>
+                      <TableCell className="font-medium">{r.name ?? DASH}</TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex justify-end gap-2">
+                          <Button variant="outline" size="sm" onClick={() => setImportFor(r)}>
+                            <Upload className="mr-1 h-3.5 w-3.5" />
+                            导入高一成绩
+                          </Button>
+                          <Button variant="ghost" size="sm" onClick={() => setLinkFor(r)}>
+                            <Link2 className="mr-1 h-3.5 w-3.5" />
+                            手动关联
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+            <div className="space-y-2 md:hidden">
+              {rows.map((r) => (
+                <div key={r.student_id} className="space-y-2 rounded-md border border-slate-200 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium">{r.name ?? DASH}</span>
+                  </div>
+                  <div className="font-mono text-xs text-slate-500">{r.student_id}</div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" size="sm" onClick={() => setImportFor(r)}>
+                      <Upload className="mr-1 h-3.5 w-3.5" />
+                      导入高一成绩
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => setLinkFor(r)}>
+                      <Link2 className="mr-1 h-3.5 w-3.5" />
+                      手动关联
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </CardContent>
+
+      <ImportHistoryDialog row={importFor} onOpenChange={(v) => !v && setImportFor(null)} setMsg={setMsg} />
+
+      <Dialog open={linkFor != null} onOpenChange={(v) => !v && setLinkFor(null)}>
+        <DialogContent className="max-sm:h-screen max-sm:w-screen max-sm:max-w-none max-sm:rounded-none max-sm:p-4">
+          <DialogHeader>
+            <DialogTitle>手动关联高一学号 · {linkFor?.name ?? ''}</DialogTitle>
+            <DialogDescription>
+              输入该生的高一学号，建立跨学年关联（用于连续跨学年趋势）。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <label className="text-sm text-slate-600">高一学号</label>
+            <input
+              value={manualSid}
+              onChange={(e) => setManualSid(e.target.value)}
+              placeholder="高一学号"
+              className="w-full rounded-md border border-slate-200 p-2 text-base font-mono"
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setLinkFor(null)
+                setManualSid('')
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              disabled={!manualSid.trim() || linkFor == null}
+              onClick={() => {
+                if (linkFor) onLink(linkFor.student_id, manualSid.trim(), linkFor.name)
+                setLinkFor(null)
+                setManualSid('')
+              }}
+            >
+              确认关联
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  )
+}
+
+function ImportHistoryDialog({
+  row,
+  onOpenChange,
+  setMsg,
+}: {
+  row: SimpleRow | null
+  onOpenChange: (v: boolean) => void
+  setMsg: (m: string | null) => void
+}) {
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<ImportResult | null>(null)
+
+  useEffect(() => {
+    if (row) {
+      setText('')
+      setResult(null)
+    }
+  }, [row])
+
+  // 每行：考试名,科目,原始分[,等级分][,年级百分位][,学籍排名]
+  function parseRows(text: string) {
+    const out: Record<string, unknown>[] = []
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim()
+      if (!line) continue
+      const parts = line.split(/[,\t，\s]+/).map((s) => s.trim()).filter(Boolean)
+      if (parts.length < 2) continue
+      const [exam_label, subject, raw_score, grade_score, grade_percentile, xueji_rank] = parts
+      out.push({
+        exam_label,
+        kind: 'subject',
+        subject,
+        raw_score: raw_score != null && raw_score !== '' ? Number(raw_score) : null,
+        grade_score: grade_score != null && grade_score !== '' ? Number(grade_score) : null,
+        grade_percentile:
+          grade_percentile != null && grade_percentile !== '' ? Number(grade_percentile) : null,
+        xueji_rank: xueji_rank != null && xueji_rank !== '' ? Number(xueji_rank) : null,
+        grade: 1,
+      })
+    }
+    return out
+  }
+
+  async function submit() {
+    if (!row) return
+    const rows = parseRows(text)
+    if (rows.length === 0) {
+      setResult(null)
+      setMsg('请先粘贴成绩行')
+      return
+    }
+    setBusy(true)
+    try {
+      const res = await fetch('/api/rollover/import-history', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ student_id: row.student_id, name: row.name, rows }),
+      })
+      if (res.ok) {
+        const data: ImportResult = await res.json()
+        setResult(data)
+        setMsg(`已导入 ${data.imported} 条高一成绩`)
+      } else {
+        setMsg('导入失败')
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog open={row != null} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl max-sm:h-screen max-sm:w-screen max-sm:max-w-none max-sm:rounded-none max-sm:p-4">
+        <DialogHeader>
+          <DialogTitle>导入高一成绩 · {row?.name ?? ''}</DialogTitle>
+          <DialogDescription>
+            把该生的高一历史成绩粘贴进来，建立身份并写入。导入后该生自动从「新学生」移到「继承」。
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          <label className="text-sm text-slate-600">
+            每行一条：<code className="rounded bg-slate-100 px-1">考试名,科目,原始分,等级分,年级百分位,学籍排名</code>（后三项可省）
+          </label>
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={'期中,语文,98\n期中,数学,85'}
+            rows={7}
+            className="w-full rounded-md border border-slate-200 p-2 font-mono text-sm text-base"
+          />
+        </div>
+        {result && (
+          <div className="flex items-center gap-2 text-sm text-success-600">
+            <CheckCircle2 className="h-4 w-4" />
+            导入完成：{result.imported} 条
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            关闭
+          </Button>
+          <Button onClick={submit} disabled={busy || row == null}>
+            {busy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Upload className="mr-1 h-4 w-4" />}
+            导入
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ─── 导入对照表（批量 link） ───
+function CrosswalkDialog({
+  open,
+  onOpenChange,
+  onDone,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  onDone: () => void
+}) {
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<CrosswalkResult | null>(null)
+
+  useEffect(() => {
+    if (open) {
+      setText('')
+      setResult(null)
+    }
+  }, [open])
+
+  // 每行：高一学号,高二学号[,姓名]
+  function parseRows(text: string) {
+    const out: { g1_sid: string; g2_sid: string; name?: string }[] = []
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim()
+      if (!line) continue
+      const parts = line.split(/[,\t，\s]+/).map((s) => s.trim()).filter(Boolean)
+      if (parts.length < 2) continue
+      out.push({ g1_sid: parts[0], g2_sid: parts[1], name: parts[2] || undefined })
+    }
+    return out
+  }
+
+  async function submit() {
+    const rows = parseRows(text)
+    if (rows.length === 0) {
+      setResult(null)
+      return
+    }
+    setBusy(true)
+    try {
+      const res = await fetch('/api/rollover/crosswalk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows }),
+      })
+      if (res.ok) {
+        const data: CrosswalkResult = await res.json()
+        setResult(data)
+        onDone()
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl max-sm:h-screen max-sm:w-screen max-sm:max-w-none max-sm:rounded-none max-sm:p-4">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <TableIcon className="h-5 w-5" />
+            导入对照表（批量关联）
+          </DialogTitle>
+          <DialogDescription>
+            把高一学号与高二学号成对粘贴，一次批量建立关联。冲突 / 跳过会在下方提示。
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          <label className="text-sm text-slate-600">
+            每行一对：<code className="rounded bg-slate-100 px-1">高一学号,高二学号[,姓名]</code>
+          </label>
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={'20240101,20250201,张三\n20240102,20250202,李四'}
+            rows={8}
+            className="w-full rounded-md border border-slate-200 p-2 font-mono text-sm text-base"
+          />
+        </div>
+        {result && (
+          <div className="flex flex-wrap items-center gap-3 text-sm">
+            <span className="inline-flex items-center gap-1 text-success-600">
+              <CheckCircle2 className="h-4 w-4" />
+              关联 {result.linked}
+            </span>
+            {result.conflict > 0 && (
+              <span className="inline-flex items-center gap-1 text-warning-700">
+                <AlertTriangle className="h-4 w-4" />
+                冲突 {result.conflict}（学号已关联到别人，未合并）
+              </span>
+            )}
+            {result.skipped > 0 && (
+              <span className="text-slate-500">跳过 {result.skipped}（已是同一身份）</span>
+            )}
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            关闭
+          </Button>
+          <Button onClick={submit} disabled={busy}>
+            {busy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Upload className="mr-1 h-4 w-4" />}
+            导入对照表
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}

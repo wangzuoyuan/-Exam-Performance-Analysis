@@ -30,9 +30,11 @@ def _serialize(n: StudentNote) -> dict:
 async def list_notes(student_id: str):
     db = next(get_db())
     try:
+        from app.analysis.identity import person_ids
+        ids = person_ids(db, student_id)
         rows = (
             db.query(StudentNote)
-            .filter(StudentNote.student_id == student_id)
+            .filter(StudentNote.student_id.in_(ids))
             .order_by(StudentNote.date.desc(), StudentNote.id.desc())
             .all()
         )

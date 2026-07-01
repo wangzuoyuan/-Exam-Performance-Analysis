@@ -282,6 +282,22 @@ async def commit_files(payload: CommitRequest):
     if detected_class:
         response["detected_class"] = detected_class
         response["detected_grade"] = detected_grade or 1
+        # 检测到比班主任已绑定的最高年级更高年级的数据 → 建议执行 rollover
+        from app.db.models import SessionLocal, Teacher
+        _db = SessionLocal()
+        try:
+            teacher = _db.query(Teacher).first()
+            if teacher is not None:
+                bound_max_grade = max(
+                    {g for g, col in [(1, teacher.target_class_high1),
+                                      (2, teacher.target_class_high2),
+                                      (3, teacher.target_class_high3)] if col is not None},
+                    default=0,
+                )
+                if detected_grade and detected_grade > bound_max_grade:
+                    response["suggest_rollover"] = True
+        finally:
+            _db.close()
     return JSONResponse(response)
 
 
@@ -312,6 +328,22 @@ async def upload_files(files: List[UploadFile] = File(...)):
     if detected_class:
         response["detected_class"] = detected_class
         response["detected_grade"] = detected_grade or 1
+        # 检测到比班主任已绑定的最高年级更高年级的数据 → 建议执行 rollover
+        from app.db.models import SessionLocal, Teacher
+        _db = SessionLocal()
+        try:
+            teacher = _db.query(Teacher).first()
+            if teacher is not None:
+                bound_max_grade = max(
+                    {g for g, col in [(1, teacher.target_class_high1),
+                                      (2, teacher.target_class_high2),
+                                      (3, teacher.target_class_high3)] if col is not None},
+                    default=0,
+                )
+                if detected_grade and detected_grade > bound_max_grade:
+                    response["suggest_rollover"] = True
+        finally:
+            _db.close()
     return JSONResponse(response)
 
 

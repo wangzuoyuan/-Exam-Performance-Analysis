@@ -16,3 +16,19 @@ export function formatClassLabel(
   if (grade == null || classNum == null) return null
   return `${formatGradeLabel(grade)}${classNum}班`
 }
+
+export interface StageAlias {
+  grade: number
+  class_num: number | null
+  student_id: string
+}
+
+export function formatStageHistory(aliases: StageAlias[]): string {
+  if (!aliases || aliases.length === 0) return '—'
+  const segments = aliases.map(
+    (a) =>
+      `${formatGradeLabel(a.grade)}(${a.class_num ?? '-'})班·${a.student_id}`,
+  )
+  if (segments.length === 1) return segments[0]
+  return segments.join(' -> ')
+}

@@ -46,3 +46,49 @@ def test_note_crud_and_followup(client):
 def test_empty_content_rejected(client):
     r = client.post("/api/notes", json={"student_id": SID, "content": "   "})
     assert r.status_code == 400
+
+
+def test_notes_visible_across_linked_student_ids(client):
+    """挂在 g1 学号的档案，经 g2 学号查询可见（person union，03 期）。
+
+    用 identity 层把两个合成学号链为同一人，建档案于一号、从另一号验证可见，
+    最后清理（删 note + unlink + 删 identity），不污染其它用例。
+    """
+    from app.db.models import SessionLocal, StudentIdentity, StudentNote, StudentAlias
+    from app.analysis.identity import ensure_identity, link_aliases, unlink_alias
+
+    G1, G2 = "union_g1_note", "union_g2_note"
+    s = SessionLocal()
+    try:
+        iid = ensure_identity(s, display_name="档案联合测试")
+        link_aliases(s, iid, [(G1, 1), (G2, 2)], "manual")
+    finally:
+        s.close()
+
+    # 档案挂在 g1 学号
+    r = client.post(
+        "/api/notes",
+        json={"student_id": G1, "category": "观察", "content": "档案联合测试内容"},
+    )
+    assert r.status_code == 200, r.text
+    nid = r.json()["id"]
+
+    try:
+        # 经 g2 学号查询可见（person union）
+        rows = client.get(f"/api/notes/{G2}").json()
+        assert any(n["id"] == nid for n in rows), "g2 学号应能看到 g1 学号的档案"
+        # 经 g1 学号查询同样可见
+        rows2 = client.get(f"/api/notes/{G1}").json()
+        assert any(n["id"] == nid for n in rows2)
+    finally:
+        # 清理：删 note + unlink 两个 alias + 删 identity
+        client.delete(f"/api/notes/{nid}")
+        s = SessionLocal()
+        try:
+            unlink_alias(s, G1)
+            unlink_alias(s, G2)
+            s.query(StudentIdentity).filter(StudentIdentity.id == iid).delete()
+            s.query(StudentNote).filter(StudentNote.student_id.in_([G1, G2])).delete()
+            s.commit()
+        finally:
+            s.close()

@@ -603,171 +603,514 @@ async def get_focus_list(exam_id: int, class_num: Optional[int] = None):
 
 @router.get("/students/{student_id}")
 async def get_student(student_id: str):
-    """获取学生画像（跨学年）- Step 5"""
-    from app.db.models import SessionLocal, TotalScore, SubjectScore, Exam
+    """获取学生画像（跨学年）- Step 5
+
+    03 期改造：按「人」聚合。person_ids(db, student_id) 返回同一人的全部
+    学段学号（无 alias 时退化为 {student_id}，行为与换届前一致）；过滤全部
+    按 .in_(ids)。identity_of 返回 identity_id 时合并 ImportedHistory（手工
+    导入的历史成绩，与排名/均分计算完全隔离），并在响应里带上 identity / aliases。
+    """
+    from app.db.models import (
+        SessionLocal,
+        TotalScore,
+        SubjectScore,
+        Exam,
+        ImportedHistory,
+        StudentIdentity,
+    )
+    from app.analysis.identity import person_ids, identity_of, aliases_of
 
     db = SessionLocal()
+    try:
+        # 同一人的全部学号（无 alias 退化为 {student_id}）
+        ids = person_ids(db, student_id)
+        iid = identity_of(db, student_id)
 
-    # 获取该生所有考试（按年级分组）
-    exams = db.query(Exam).join(TotalScore, Exam.id == TotalScore.exam_id).filter(
-        TotalScore.student_id == student_id
-    ).order_by(Exam.grade, Exam.exam_date).all()
+        # 获取该生所有考试（按年级分组）—— 同一人所有学号的考试并集
+        exams = db.query(Exam).join(TotalScore, Exam.id == TotalScore.exam_id).filter(
+            TotalScore.student_id.in_(ids)
+        ).order_by(Exam.grade, Exam.exam_date).all()
 
-    if not exams:
-        db.close()
-        raise HTTPException(404, "该学生无成绩记录")
+        if not exams and iid is None:
+            raise HTTPException(404, "该学生无成绩记录")
 
-    grades = set(e.grade for e in exams)
-    has_cross_year = len(grades) > 1
+        grades = set(e.grade for e in exams)
+        has_cross_year = len(grades) > 1
 
-    # 主三门趋势（跨学年只取主三门）
-    main_totals = db.query(TotalScore).filter(
-        TotalScore.student_id == student_id,
-        TotalScore.total_type == "主三门"
-    ).order_by(TotalScore.exam_id).all()
+        # 主三门趋势（跨学年只取主三门）
+        main_totals = db.query(TotalScore).filter(
+            TotalScore.student_id.in_(ids),
+            TotalScore.total_type == "主三门"
+        ).order_by(TotalScore.exam_id).all()
 
-    # 五门总分趋势（高一：语数英物化）
-    five_totals = db.query(TotalScore).filter(
-        TotalScore.student_id == student_id,
-        TotalScore.total_type == "五门"
-    ).order_by(TotalScore.exam_id).all()
+        # 五门总分趋势（高一：语数英物化）
+        five_totals = db.query(TotalScore).filter(
+            TotalScore.student_id.in_(ids),
+            TotalScore.total_type == "五门"
+        ).order_by(TotalScore.exam_id).all()
 
-    # +3 总分趋势（高二/高三用）
-    plus3_totals = db.query(TotalScore).filter(
-        TotalScore.student_id == student_id,
-        TotalScore.total_type == "+3"
-    ).order_by(TotalScore.exam_id).all()
+        # +3 总分趋势（高二/高三用）
+        plus3_totals = db.query(TotalScore).filter(
+            TotalScore.student_id.in_(ids),
+            TotalScore.total_type == "+3"
+        ).order_by(TotalScore.exam_id).all()
 
-    # 3+3 学籍排名趋势（高二/高三用）
-    san3_totals = db.query(TotalScore).filter(
-        TotalScore.student_id == student_id,
-        TotalScore.total_type == "3+3"
-    ).order_by(TotalScore.exam_id).all()
+        # 3+3 学籍排名趋势（高二/高三用）
+        san3_totals = db.query(TotalScore).filter(
+            TotalScore.student_id.in_(ids),
+            TotalScore.total_type == "3+3"
+        ).order_by(TotalScore.exam_id).all()
 
-    # 返回全部单科成绩；学生详情页的历次明细需要展示加三学科。
-    subject_scores = db.query(SubjectScore).filter(
-        SubjectScore.student_id == student_id
-    ).order_by(SubjectScore.exam_id).all()
+        # 返回全部单科成绩；学生详情页的历次明细需要展示加三学科。
+        subject_scores = db.query(SubjectScore).filter(
+            SubjectScore.student_id.in_(ids)
+        ).order_by(SubjectScore.exam_id).all()
 
-    # 姓名
-    name_row = db.query(SubjectScore).filter(SubjectScore.student_id == student_id).first()
-    name = name_row.name if name_row and name_row.name else student_id
+        # 姓名：优先 identity.display_name（人工确认），否则取成绩录入的 name
+        name = student_id
+        if iid is not None:
+            ident = db.query(StudentIdentity).filter(StudentIdentity.id == iid).first()
+            if ident and ident.display_name:
+                name = ident.display_name
+        if name == student_id:
+            name_row = db.query(SubjectScore).filter(SubjectScore.student_id.in_(ids)).first()
+            if name_row and name_row.name:
+                name = name_row.name
 
-    # 构建考试ID到名称的映射
-    exam_map = {e.id: e for e in exams}
-
-    # 计算每场考试该生的主三门班级排名（按本班内 total_score 降序）
-    # 先构建 (exam_id, student_id) -> class_num 映射
-    student_class_by_exam: dict[int, int] = {}
-    for s in subject_scores:
-        if s.class_num is not None and s.exam_id not in student_class_by_exam:
-            student_class_by_exam[s.exam_id] = s.class_num
-
-    class_rank_by_exam: dict[int, int | None] = {}
-    for t in main_totals:
-        cls = student_class_by_exam.get(t.exam_id)
-        if cls is None or t.total_score is None:
-            class_rank_by_exam[t.exam_id] = None
-            continue
-        # 同班同考试的所有 student_id
-        peer_ids = [
-            row[0]
-            for row in db.query(SubjectScore.student_id)
-            .filter(SubjectScore.exam_id == t.exam_id, SubjectScore.class_num == cls)
-            .distinct()
-            .all()
-        ]
-        if not peer_ids:
-            class_rank_by_exam[t.exam_id] = None
-            continue
-        peer_totals = (
-            db.query(TotalScore.total_score)
-            .filter(
-                TotalScore.exam_id == t.exam_id,
-                TotalScore.total_type == "主三门",
-                TotalScore.student_id.in_(peer_ids),
-                TotalScore.total_score.isnot(None),
+        # ── ImportedHistory 合并（仅展示，不参与任何排名/均分计算）──
+        imported_rows = []
+        if iid is not None:
+            imported_rows = (
+                db.query(ImportedHistory)
+                .filter(ImportedHistory.identity_id == iid)
+                .order_by(ImportedHistory.grade, ImportedHistory.exam_seq)
+                .all()
             )
-            .all()
-        )
-        peer_scores = [row[0] for row in peer_totals]
-        # 排名 = 严格高于本人的人数 + 1
-        class_rank_by_exam[t.exam_id] = sum(1 for s in peer_scores if s > t.total_score) + 1
 
-    # 班级 / 学籍：取该生历次记录中出现最多的取值（前端头部展示与学籍徽章用）
-    class_counter = Counter(s.class_num for s in subject_scores if s.class_num is not None)
-    class_num_value = class_counter.most_common(1)[0][0] if class_counter else None
-    xueji_counter = Counter(s.xueji for s in subject_scores if s.xueji is not None)
-    xueji_code_value = xueji_counter.most_common(1)[0][0] if xueji_counter else None
+        # 构建考试ID到名称的映射
+        exam_map = {e.id: e for e in exams}
 
-    db.close()
+        # 计算每场考试该生的主三门班级排名（按本班内 total_score 降序）
+        # 先构建 (exam_id, student_id) -> class_num 映射
+        student_class_by_exam: dict[int, int] = {}
+        for s in subject_scores:
+            if s.class_num is not None and s.exam_id not in student_class_by_exam:
+                student_class_by_exam[s.exam_id] = s.class_num
 
-    def exam_sort_key(exam_id):
-        e = exam_map.get(exam_id)
-        return (e.grade if e else 0, e.exam_date if e else "")
+        class_rank_by_exam: dict[int, int | None] = {}
+        for t in main_totals:
+            cls = student_class_by_exam.get(t.exam_id)
+            if cls is None or t.total_score is None:
+                class_rank_by_exam[t.exam_id] = None
+                continue
+            # 同班同考试的所有 student_id
+            peer_ids = [
+                row[0]
+                for row in db.query(SubjectScore.student_id)
+                .filter(SubjectScore.exam_id == t.exam_id, SubjectScore.class_num == cls)
+                .distinct()
+                .all()
+            ]
+            if not peer_ids:
+                class_rank_by_exam[t.exam_id] = None
+                continue
+            peer_totals = (
+                db.query(TotalScore.total_score)
+                .filter(
+                    TotalScore.exam_id == t.exam_id,
+                    TotalScore.total_type == "主三门",
+                    TotalScore.student_id.in_(peer_ids),
+                    TotalScore.total_score.isnot(None),
+                )
+                .all()
+            )
+            peer_scores = [row[0] for row in peer_totals]
+            # 排名 = 严格高于本人的人数 + 1
+            class_rank_by_exam[t.exam_id] = sum(1 for s in peer_scores if s > t.total_score) + 1
 
-    main_totals_sorted = sorted(main_totals, key=lambda t: exam_sort_key(t.exam_id))
-    five_totals_sorted = sorted(five_totals, key=lambda t: exam_sort_key(t.exam_id))
-    plus3_totals_sorted = sorted(plus3_totals, key=lambda t: exam_sort_key(t.exam_id))
-    san3_totals_sorted = sorted(san3_totals, key=lambda t: exam_sort_key(t.exam_id))
-    subject_scores_sorted = sorted(subject_scores, key=lambda s: exam_sort_key(s.exam_id))
-    subject_scores_with_score = [
-        s for s in subject_scores_sorted if s.raw_score is not None or s.grade_score is not None
-    ]
+        # 班级 / 学籍：取该生历次记录中出现最多的取值（前端头部展示与学籍徽章用）
+        # 按年级分别取众数班级：class_by_grade[grade] = 该年级出现最多的 class_num
+        class_by_grade: dict[int, int] = {}
+        grade_class_counter: dict[int, Counter] = {}
+        for s in subject_scores:
+            if s.class_num is None or s.exam_id is None:
+                continue
+            exam = exam_map.get(s.exam_id)
+            if exam is None or exam.grade is None:
+                continue
+            grade_class_counter.setdefault(exam.grade, Counter())[s.class_num] += 1
+        for g, counter in grade_class_counter.items():
+            if counter:
+                class_by_grade[g] = counter.most_common(1)[0][0]
+        # 标量班级（向后兼容）：取最高年级的班级
+        class_num_value = class_by_grade[max(grades)] if grades else None
+        xueji_counter = Counter(s.xueji for s in subject_scores if s.xueji is not None)
+        xueji_code_value = xueji_counter.most_common(1)[0][0] if xueji_counter else None
 
-    return {
-        "student_id": student_id,
-        "name": name,
-        "has_cross_year": has_cross_year,
-        "grades": sorted(list(grades)),
-        "class_num": class_num_value,
-        "xueji_code": xueji_code_value,
-        "main_total_trend": [{
+        # identity / aliases（aliases 的 class_num 派生：该学号首个非空 class_num）
+        identity_aliases = []
+        if iid is not None:
+            for a in aliases_of(db, iid):
+                cn_row = (
+                    db.query(SubjectScore.class_num)
+                    .filter(
+                        SubjectScore.student_id == a.student_id,
+                        SubjectScore.class_num.isnot(None),
+                    )
+                    .first()
+                )
+                identity_aliases.append({
+                    "student_id": a.student_id,
+                    "grade": a.grade,
+                    "class_num": cn_row[0] if cn_row else None,
+                })
+
+        def exam_sort_key(exam_id):
+            e = exam_map.get(exam_id)
+            return (e.grade if e else 0, e.exam_date if e else "")
+
+        main_totals_sorted = sorted(main_totals, key=lambda t: exam_sort_key(t.exam_id))
+        five_totals_sorted = sorted(five_totals, key=lambda t: exam_sort_key(t.exam_id))
+        plus3_totals_sorted = sorted(plus3_totals, key=lambda t: exam_sort_key(t.exam_id))
+        san3_totals_sorted = sorted(san3_totals, key=lambda t: exam_sort_key(t.exam_id))
+        subject_scores_sorted = sorted(subject_scores, key=lambda s: exam_sort_key(s.exam_id))
+        subject_scores_with_score = [
+            s for s in subject_scores_sorted if s.raw_score is not None or s.grade_score is not None
+        ]
+
+        def _exam_attr(exam_id, attr, fallback=None):
+            e = exam_map.get(exam_id)
+            return getattr(e, attr) if e is not None else fallback
+
+        main_total_trend = [{
             "exam_id": t.exam_id,
-            "exam_name": exam_map[t.exam_id].name if t.exam_id in exam_map else str(t.exam_id),
-            "exam_date": exam_map[t.exam_id].exam_date if t.exam_id in exam_map else None,
-            "grade": exam_map[t.exam_id].grade if t.exam_id in exam_map else None,
+            "exam_name": _exam_attr(t.exam_id, "name", str(t.exam_id) if t.exam_id else ""),
+            "exam_date": _exam_attr(t.exam_id, "exam_date"),
+            "grade": _exam_attr(t.exam_id, "grade"),
             "total_score": t.total_score,
             "xueji_rank": t.xueji_rank,
             "grade_percentile": t.grade_percentile,
             "class_rank": class_rank_by_exam.get(t.exam_id),
-        } for t in main_totals_sorted],
-        "five_trend": [{
+            "imported": False,
+        } for t in main_totals_sorted]
+
+        five_trend = [{
             "exam_id": t.exam_id,
-            "exam_name": exam_map[t.exam_id].name if t.exam_id in exam_map else str(t.exam_id),
-            "exam_date": exam_map[t.exam_id].exam_date if t.exam_id in exam_map else None,
-            "grade": exam_map[t.exam_id].grade if t.exam_id in exam_map else None,
+            "exam_name": _exam_attr(t.exam_id, "name", str(t.exam_id) if t.exam_id else ""),
+            "exam_date": _exam_attr(t.exam_id, "exam_date"),
+            "grade": _exam_attr(t.exam_id, "grade"),
             "total_score": t.total_score,
             "xueji_rank": t.xueji_rank,
             "grade_percentile": t.grade_percentile,
-        } for t in five_totals_sorted],
-        "subject_trend": [{
+            "imported": False,
+        } for t in five_totals_sorted]
+
+        subject_trend = [{
             "exam_id": s.exam_id,
-            "exam_name": exam_map[s.exam_id].name if s.exam_id in exam_map else str(s.exam_id),
-            "exam_date": exam_map[s.exam_id].exam_date if s.exam_id in exam_map else None,
+            "exam_name": _exam_attr(s.exam_id, "name", str(s.exam_id) if s.exam_id else ""),
+            "exam_date": _exam_attr(s.exam_id, "exam_date"),
+            "grade": _exam_attr(s.exam_id, "grade"),
             "subject": s.subject,
             "raw_score": s.raw_score,
             "grade_percentile": s.grade_percentile,
-        } for s in subject_scores_with_score],
-        "plus3_trend": [{
+            "imported": False,
+        } for s in subject_scores_with_score]
+
+        plus3_trend = [{
             "exam_id": t.exam_id,
-            "exam_name": exam_map[t.exam_id].name if t.exam_id in exam_map else str(t.exam_id),
-            "exam_date": exam_map[t.exam_id].exam_date if t.exam_id in exam_map else None,
-            "grade": exam_map[t.exam_id].grade if t.exam_id in exam_map else None,
+            "exam_name": _exam_attr(t.exam_id, "name", str(t.exam_id) if t.exam_id else ""),
+            "exam_date": _exam_attr(t.exam_id, "exam_date"),
+            "grade": _exam_attr(t.exam_id, "grade"),
             "total_score": t.total_score,
             "xueji_rank": t.xueji_rank,
             "grade_percentile": t.grade_percentile,
-        } for t in plus3_totals_sorted],
-        "san3_trend": [{
+            "imported": False,
+        } for t in plus3_totals_sorted]
+
+        san3_trend = [{
             "exam_id": t.exam_id,
-            "exam_name": exam_map[t.exam_id].name if t.exam_id in exam_map else str(t.exam_id),
-            "exam_date": exam_map[t.exam_id].exam_date if t.exam_id in exam_map else None,
-            "grade": exam_map[t.exam_id].grade if t.exam_id in exam_map else None,
+            "exam_name": _exam_attr(t.exam_id, "name", str(t.exam_id) if t.exam_id else ""),
+            "exam_date": _exam_attr(t.exam_id, "exam_date"),
+            "grade": _exam_attr(t.exam_id, "grade"),
             "total_score": t.total_score,
             "xueji_rank": t.xueji_rank,
             "grade_percentile": t.grade_percentile,
-        } for t in san3_totals_sorted],
-    }
+            "imported": False,
+        } for t in san3_totals_sorted]
+
+        # ── ImportedHistory 合并到对应 trend 列表（导入点 exam_id=None，imported=True）──
+        if imported_rows:
+            for row in imported_rows:
+                g = row.grade if row.grade is not None else 0
+                label = row.exam_label or ""
+                if row.kind == "total":
+                    point = {
+                        "exam_id": None,
+                        "exam_name": label,
+                        "exam_date": None,
+                        "grade": g,
+                        "total_score": row.raw_score,
+                        "xueji_rank": row.xueji_rank,
+                        "grade_percentile": row.grade_percentile,
+                        "imported": True,
+                    }
+                    tt = row.total_type
+                    if tt == "主三门":
+                        point["class_rank"] = None
+                        main_total_trend.append(point)
+                    elif tt == "五门":
+                        five_trend.append(point)
+                    elif tt == "+3":
+                        plus3_trend.append(point)
+                    elif tt == "3+3":
+                        san3_trend.append(point)
+                elif row.kind == "subject":
+                    subject_trend.append({
+                        "exam_id": None,
+                        "exam_name": label,
+                        "exam_date": None,
+                        "grade": g,
+                        "subject": row.subject,
+                        "raw_score": row.raw_score,
+                        "grade_percentile": row.grade_percentile,
+                        "imported": True,
+                    })
+
+            def _sort_key(p):
+                # 真实点按 (grade, exam_date)；导入点 exam_date=None 排在同年级真实点之后
+                return (p.get("grade") or 0, p.get("exam_date") or "", 1 if p.get("imported") else 0)
+
+            main_total_trend.sort(key=_sort_key)
+            five_trend.sort(key=_sort_key)
+            subject_trend.sort(key=_sort_key)
+            plus3_trend.sort(key=_sort_key)
+            san3_trend.sort(key=_sort_key)
+
+        return {
+            "student_id": student_id,
+            "name": name,
+            "has_cross_year": has_cross_year,
+            "grades": sorted(list(grades)),
+            "class_num": class_num_value,
+            "class_by_grade": class_by_grade,
+            "xueji_code": xueji_code_value,
+            "main_total_trend": main_total_trend,
+            "five_trend": five_trend,
+            "subject_trend": subject_trend,
+            "plus3_trend": plus3_trend,
+            "san3_trend": san3_trend,
+            "identity": {"id": iid, "aliases": identity_aliases},
+        }
+    finally:
+        db.close()
+
+@router.get("/students")
+async def list_students(search: Optional[str] = Query(None)):
+    """学生列表（按「人」去重）—— 03 期 §2.3。
+
+    把所有学号按 identity 聚合：有 alias 的归到同一 identity（一桶多号），
+    无 alias 的学号各成一桶。每桶挑一个代表学号（出现在最高年级、且最近
+    考试的学号），返回 {student_id, name, current_grade, class_num, history,
+    latest_exam_name, latest_main_score, latest_main_rank}。
+    ?search= 按 name / student_id 服务端模糊匹配。
+    """
+    from collections import defaultdict
+    from app.db.models import (
+        SessionLocal,
+        SubjectScore,
+        Exam,
+        TotalScore,
+        Teacher,
+        StudentIdentity,
+    )
+    from app.analysis.identity import identity_of
+
+    db = SessionLocal()
+    try:
+        # 收集所有 (student_id, name) —— 与原学生搜索口径一致（全部学生）
+        rows = (
+            db.query(SubjectScore.student_id, SubjectScore.name)
+            .filter(SubjectScore.student_id.isnot(None))
+            .distinct()
+            .all()
+        )
+
+        # 服务端搜索：按 name 或 student_id 模糊
+        if search:
+            kw = f"%{search}%"
+            rows = [
+                (sid, nm)
+                for (sid, nm) in rows
+                if (nm and kw.replace("%", "") in nm)
+                or (sid and search in sid)
+            ]
+
+        if not rows:
+            return []
+
+        # name 取每个学号的第一个非空 name
+        name_by_sid: dict[str, str] = {}
+        for sid, nm in rows:
+            if sid is None:
+                continue
+            if sid not in name_by_sid and nm:
+                name_by_sid[sid] = nm
+        all_sids = [sid for sid, _ in rows if sid is not None]
+        # 去重学号
+        all_sids = list(dict.fromkeys(all_sids))
+
+        # 按人分桶：iid 相同归一桶；无 iid 的学号用 ("sid", sid) 哨兵各成单桶
+        buckets: dict = defaultdict(list)  # key -> [student_id, ...]
+        sid_to_iid: dict[str, Optional[int]] = {}
+        for sid in all_sids:
+            iid = identity_of(db, sid)
+            sid_to_iid[sid] = iid
+            key = iid if iid is not None else ("sid", sid)
+            buckets[key].append(sid)
+
+        # 预取每个学号出现过的 (max_grade, latest_exam_date, latest_exam_id) ——
+        # 通过 SubjectScore JOIN Exam 聚合，避免 N+1
+        grade_info: dict[str, dict] = {}  # sid -> {max_grade, latest_date, latest_exam_id}
+        agg_rows = (
+            db.query(
+                SubjectScore.student_id,
+                Exam.grade,
+                Exam.exam_date,
+                Exam.id,
+            )
+            .join(Exam, Exam.id == SubjectScore.exam_id)
+            .filter(SubjectScore.student_id.in_(all_sids))
+            .all()
+        )
+        for sid, g, d, eid in agg_rows:
+            info = grade_info.setdefault(
+                sid, {"max_grade": None, "latest_date": None, "latest_exam_id": None}
+            )
+            cur_g = info["max_grade"]
+            if g is not None and (cur_g is None or g > cur_g):
+                info["max_grade"] = g
+                # 换到更高年级时重置最近考试
+                info["latest_date"] = d
+                info["latest_exam_id"] = eid
+            elif g is not None and cur_g is not None and g == cur_g:
+                # 同年级内取最近考试
+                if d is not None and (info["latest_date"] is None or d > info["latest_date"]):
+                    info["latest_date"] = d
+                    info["latest_exam_id"] = eid
+            elif g is None and info["latest_exam_id"] is None:
+                # 没有年级信息的兜底
+                info["latest_date"] = d
+                info["latest_exam_id"] = eid
+
+        # 每个学号在其最高年级内的班级（首个非空 class_num）
+        class_in_grade: dict[str, Optional[int]] = {}
+        if all_sids:
+            cn_rows = (
+                db.query(SubjectScore.student_id, SubjectScore.class_num, Exam.grade)
+                .join(Exam, Exam.id == SubjectScore.exam_id)
+                .filter(
+                    SubjectScore.student_id.in_(all_sids),
+                    SubjectScore.class_num.isnot(None),
+                )
+                .all()
+            )
+            for sid, cn, g in cn_rows:
+                mg = grade_info.get(sid, {}).get("max_grade")
+                if mg is not None and g == mg:
+                    if class_in_grade.get(sid) is None:
+                        class_in_grade[sid] = cn
+
+        # 每桶挑代表学号：(max_grade desc, latest_date desc) 最大的那个
+        def _rep_key(sid):
+            info = grade_info.get(sid, {})
+            return (info.get("max_grade") or 0, info.get("latest_date") or "")
+
+        results = []
+        # 代表学号最近一场考试的主三门分数/排名
+        rep_latest_exam_ids: set[int] = set()
+        for key, sids in buckets.items():
+            rep_sid = max(sids, key=_rep_key)
+            info = grade_info.get(rep_sid, {})
+            latest_exam_id = info.get("latest_exam_id")
+            if latest_exam_id is not None:
+                rep_latest_exam_ids.add(latest_exam_id)
+
+        # 批量取代表学号最近考试主三门（一次查询）
+        rep_totals: dict[tuple[str, int], TotalScore] = {}
+        if rep_latest_exam_ids:
+            ts_rows = (
+                db.query(TotalScore)
+                .filter(
+                    TotalScore.exam_id.in_(rep_latest_exam_ids),
+                    TotalScore.total_type == "主三门",
+                )
+                .all()
+            )
+            for t in ts_rows:
+                rep_totals[(t.student_id, t.exam_id)] = t
+
+        # 考试名映射
+        exam_name_map: dict[int, str] = {}
+        if rep_latest_exam_ids:
+            for e in db.query(Exam).filter(Exam.id.in_(rep_latest_exam_ids)).all():
+                exam_name_map[e.id] = e.name
+
+        for key, sids in buckets.items():
+            rep_sid = max(sids, key=_rep_key)
+            info = grade_info.get(rep_sid, {})
+            latest_exam_id = info.get("latest_exam_id")
+            current_grade = info.get("max_grade")
+            class_num = class_in_grade.get(rep_sid)
+            name = name_by_sid.get(rep_sid, rep_sid)
+
+            # identity display_name 优先（已链接时）
+            iid = key if isinstance(key, int) else None
+            if iid is not None:
+                ident = db.query(StudentIdentity).filter(StudentIdentity.id == iid).first()
+                if ident and ident.display_name:
+                    name = ident.display_name
+
+            latest_main_score = None
+            latest_main_rank = None
+            latest_exam_name = exam_name_map.get(latest_exam_id) if latest_exam_id else None
+            ts = rep_totals.get((rep_sid, latest_exam_id)) if latest_exam_id else None
+            if ts is not None:
+                latest_main_score = ts.total_score
+                latest_main_rank = ts.xueji_rank if ts.xueji_rank is not None else ts.grade_percentile
+
+            # history：除代表外的其它学号
+            history = []
+            for sid in sids:
+                if sid == rep_sid:
+                    continue
+                history.append({
+                    "student_id": sid,
+                    "grade": grade_info.get(sid, {}).get("max_grade"),
+                    "class_num": class_in_grade.get(sid),
+                })
+
+            # 搜索过滤（针对桶内代表 name/sid；上面已对原始行过滤，这里再兜底）
+            if search:
+                hay = f"{name} {rep_sid}"
+                if search not in hay:
+                    continue
+
+            results.append({
+                "student_id": rep_sid,
+                "name": name,
+                "current_grade": current_grade,
+                "class_num": class_num,
+                "history": history,
+                "latest_exam_name": latest_exam_name,
+                "latest_main_score": latest_main_score,
+                "latest_main_rank": latest_main_rank,
+            })
+
+        # 排序：current_grade desc, 然后按 name
+        results.sort(key=lambda r: (-(r["current_grade"] or 0), r["name"] or ""))
+        return results
+    finally:
+        db.close()
 
 @router.get("/class/compare")
 async def compare_classes(exam_id: Optional[int] = None):
