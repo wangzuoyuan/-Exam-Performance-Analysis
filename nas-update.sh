@@ -49,7 +49,7 @@ attempt=1
 
 while [ "$attempt" -le "$HEALTH_ATTEMPTS" ]; do
   if sudo "$DOCKER" exec "${PROJECT_NAME}-caddy-1" wget -qO- -T 3 "$HEALTH_URL" >/dev/null 2>&1; then
-    echo "✅ 更新完成，服务健康。外网访问 https://meng5638.asuscomm.com:9500"
+    echo "✅ 更新完成，服务健康。外网访问 https://grade.zuoyuan.wang:9500"
     exit 0
   fi
 
