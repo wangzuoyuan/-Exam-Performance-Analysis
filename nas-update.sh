@@ -40,10 +40,25 @@ echo "==> [4/5] 重启 caddy（让它重新解析到新前端容器）"
 sudo "$DOCKER" compose -p "$PROJECT_NAME" restart caddy
 
 echo "==> [5/5] 健康检查"
-sleep 3
-if sudo "$DOCKER" exec "${PROJECT_NAME}-caddy-1" wget -qO- http://localhost:8080/api/health >/dev/null 2>&1; then
-  echo "✅ 更新完成，服务健康。外网访问 https://meng5638.asuscomm.com:9500"
-else
-  echo "⚠️ 健康检查未通过，请查看容器日志：sudo $DOCKER compose -p $PROJECT_NAME logs --tail 50"
-  exit 1
-fi
+# 首次启动时后端可能需要执行数据库迁移；给 Caddy 和后端最多 60 秒就绪时间，
+# 避免固定等待 3 秒造成“容器正常、脚本误报失败”。
+HEALTH_URL="http://localhost:8080/api/health"
+HEALTH_ATTEMPTS=30
+HEALTH_DELAY=2
+attempt=1
+
+while [ "$attempt" -le "$HEALTH_ATTEMPTS" ]; do
+  if sudo "$DOCKER" exec "${PROJECT_NAME}-caddy-1" wget -qO- -T 3 "$HEALTH_URL" >/dev/null 2>&1; then
+    echo "✅ 更新完成，服务健康。外网访问 https://meng5638.asuscomm.com:9500"
+    exit 0
+  fi
+
+  echo "    等待服务就绪（$attempt/$HEALTH_ATTEMPTS）..."
+  sleep "$HEALTH_DELAY"
+  attempt=$((attempt + 1))
+done
+
+echo "⚠️ 60 秒内健康检查仍未通过，当前容器状态和最近日志如下："
+sudo "$DOCKER" compose -p "$PROJECT_NAME" ps || true
+sudo "$DOCKER" compose -p "$PROJECT_NAME" logs --tail 50 || true
+exit 1
