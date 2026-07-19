@@ -5,6 +5,8 @@ import { NotebookPen } from 'lucide-react'
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { Skeleton } from '@/components/ui/skeleton'
+import { StatePanel } from '@/components/patterns/StatePanel'
 
 interface WarnItem {
   name: string
@@ -29,19 +31,33 @@ interface HomeworkSummary {
 
 export default function HomeworkCard({ studentId }: { studentId: string }) {
   const [data, setData] = useState<HomeworkSummary | null>(null)
-  const [loaded, setLoaded] = useState(false)
+  const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [error, setError] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
 
   useEffect(() => {
     if (!studentId) return
-    fetch(`/api/homework/student/${studentId}`)
-      .then((r) => r.json())
-      .then(setData)
-      .catch(() => setData({ error: '加载失败' }))
-      .finally(() => setLoaded(true))
-  }, [studentId])
-
-  // 该生不在作业花名册（如非6班）时不显示卡片
-  if (loaded && (!data || data.error)) return null
+    const controller = new AbortController()
+    setState('loading')
+    setError(null)
+    setData(null)
+    fetch(`/api/homework/student/${studentId}`, { cache: 'no-store', signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('无法读取该生作业记录')
+        return (await response.json()) as HomeworkSummary
+      })
+      .then((result) => {
+        if (result.error) throw new Error(result.error)
+        setData(result)
+        setState('ready')
+      })
+      .catch((cause) => {
+        if (cause instanceof DOMException && cause.name === 'AbortError') return
+        setError(cause instanceof Error ? cause.message : '无法读取该生作业记录')
+        setState('error')
+      })
+    return () => controller.abort()
+  }, [reloadKey, studentId])
 
   const subjects = Object.entries(data?.miss_by_subject || {})
   const specials = Object.entries(data?.special_counts || {})
@@ -57,6 +73,21 @@ export default function HomeworkCard({ studentId }: { studentId: string }) {
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
+        {state === 'loading' ? (
+          <div className="space-y-3" role="status" aria-label="正在加载作业记录">
+            <Skeleton className="h-9 w-32" />
+            <Skeleton className="h-16 w-full" />
+          </div>
+        ) : state === 'error' ? (
+          <StatePanel
+            tone="error"
+            title="作业记录加载失败"
+            description={error}
+            action={<button type="button" onClick={() => setReloadKey((key) => key + 1)} className="min-h-11 rounded-md border border-border px-4 text-sm font-bold hover:bg-muted">重新加载</button>}
+            className="border-0 p-0"
+          />
+        ) : (
+          <>
         <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2">
           <div>
             <span className="text-3xl font-semibold text-slate-900">
@@ -141,6 +172,8 @@ export default function HomeworkCard({ studentId }: { studentId: string }) {
         <p className="text-xs text-slate-400">
           仅含缺交、请假、迟到等记录，不代表作业完成质量。
         </p>
+          </>
+        )}
       </CardContent>
     </Card>
   )

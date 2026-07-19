@@ -7,9 +7,10 @@ import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
 interface ToolCall {
+  id: string
   name: string
-  input: Record<string, any>
-  output?: any
+  input: Record<string, unknown>
+  output?: unknown
   error?: string
 }
 
@@ -43,15 +44,16 @@ export default function ToolCallCard({ toolCall, collapsed = true }: ToolCallCar
   const status = getStatus(toolCall)
 
   return (
-    <Card className="overflow-hidden py-2 px-3">
+    <Card className="overflow-hidden px-3 py-1.5">
       <button
         type="button"
         onClick={() => setIsCollapsed(!isCollapsed)}
-        className="flex w-full items-center justify-between gap-2 text-left"
+        className="flex min-h-11 w-full items-center justify-between gap-2 text-left"
+        aria-expanded={!isCollapsed}
       >
         <div className="flex min-w-0 items-center gap-2">
-          <Wrench className="h-3.5 w-3.5 shrink-0 text-slate-500" />
-          <span className="truncate font-mono text-xs text-slate-700">
+          <Wrench className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <span className="truncate font-mono text-xs text-foreground">
             {toolCall.name}
           </span>
           <Badge variant={STATUS_VARIANT[status]} className="shrink-0">
@@ -73,7 +75,7 @@ export default function ToolCallCard({ toolCall, collapsed = true }: ToolCallCar
               <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-slate-400">
                 参数
               </div>
-              <pre className="overflow-auto rounded bg-slate-50 p-2 text-xs text-slate-700">
+              <pre className="overflow-auto rounded bg-secondary p-2 text-xs text-foreground">
                 {JSON.stringify(toolCall.input, null, 2)}
               </pre>
             </div>
@@ -92,7 +94,7 @@ export default function ToolCallCard({ toolCall, collapsed = true }: ToolCallCar
               <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-slate-400">
                 结果
               </div>
-              <pre className="overflow-auto rounded bg-slate-50 p-2 text-xs text-slate-700">
+              <pre className="overflow-auto rounded bg-secondary p-2 text-xs text-foreground">
                 {typeof toolCall.output === 'string'
                   ? toolCall.output
                   : JSON.stringify(toolCall.output, null, 2)}

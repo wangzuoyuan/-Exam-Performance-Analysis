@@ -5,7 +5,7 @@ import os
 
 from starlette.responses import JSONResponse as _JSONResponse  # noqa: E402
 
-app = FastAPI(title="成绩追踪 API", version="0.1.0")
+app = FastAPI(title="成绩分析（班主任版）API", version="2.0.0")
 
 # 生产同源（经反代）时无需 CORS；本地 dev 前端 3000 → 后端 8000 跨源需放行。
 # 额外可用 CORS_ORIGINS（逗号分隔）显式追加来源。
@@ -46,16 +46,23 @@ os.makedirs(f"{EXAM_TRACKER_DIR}/raw", exist_ok=True)
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "version": "0.1.0"}
+    return {"ok": True, "version": "2.0.0"}
 
 @app.get("/")
 def root():
-    return {"message": "成绩追踪 API", "docs": "/docs"}
+    return {"message": "成绩分析（班主任版）API", "docs": "/docs"}
 
 @app.get("/api/teacher")
 def get_teacher():
     """获取班主任信息（延迟初始化）"""
-    from app.db.models import SessionLocal, Teacher, Exam, SubjectScore, StudentAlias
+    from app.db.models import (
+        SessionLocal,
+        Teacher,
+        Exam,
+        SubjectScore,
+        ClassRoster,
+        StudentAlias,
+    )
     db = SessionLocal()
     try:
         teacher = db.query(Teacher).first()
@@ -64,16 +71,57 @@ def get_teacher():
             db.add(teacher)
             db.commit()
             db.refresh(teacher)
-        # 升级待办信号：已上传高二成绩 且 身份映射表仍为空（尚未执行 rollover）
-        has_g2 = (
-            db.query(SubjectScore)
-            .join(Exam, Exam.id == SubjectScore.exam_id)
-            .filter(Exam.grade == 2)
-            .first()
-            is not None
-        )
-        identity_empty = db.query(StudentAlias).count() == 0
-        has_pending_rollover = bool(has_g2 and identity_empty)
+        # 升级待办只看教师已绑定班级中实际有数据的最高年级。
+        # 低年级或其他班级的 alias 不能压制当前班未完成的身份接续。
+        has_pending_rollover = False
+        bound_classes = {
+            2: teacher.target_class_high2,
+            3: teacher.target_class_high3,
+        }
+        for grade in (3, 2):
+            class_num = bound_classes[grade]
+            if class_num is None:
+                continue
+
+            score_ids = {
+                row[0]
+                for row in (
+                    db.query(SubjectScore.student_id)
+                    .join(Exam, Exam.id == SubjectScore.exam_id)
+                    .filter(Exam.grade == grade, SubjectScore.class_num == class_num)
+                    .distinct()
+                    .all()
+                )
+            }
+            roster_ids = {
+                row[0]
+                for row in (
+                    db.query(ClassRoster.student_id)
+                    .filter(
+                        ClassRoster.grade == grade,
+                        ClassRoster.class_num == class_num,
+                    )
+                    .distinct()
+                    .all()
+                )
+            }
+            current_student_ids = score_ids | roster_ids
+            if not current_student_ids:
+                continue
+
+            linked_student_ids = {
+                row[0]
+                for row in (
+                    db.query(StudentAlias.student_id)
+                    .filter(
+                        StudentAlias.grade == grade,
+                        StudentAlias.student_id.in_(current_student_ids),
+                    )
+                    .all()
+                )
+            }
+            has_pending_rollover = bool(current_student_ids - linked_student_ids)
+            break
         # 作业看板当前年级（homework_setting.active_grade；缺省回落库内最大年级）
         from app.rollover.service import get_active_grade  # noqa
         active_grade = get_active_grade(db)
@@ -113,19 +161,24 @@ async def bind_class(request: Request, class_num: Optional[int] = None, grade: i
     """绑定班级（隐式初始化确认）"""
     from app.db.models import SessionLocal, Teacher
 
-    if class_num is None:
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        class_num = body.get("class_num")
-        grade = body.get("grade", grade)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    has_body_class = "class_num" in body
+    if has_body_class:
+        class_num = body["class_num"]
+    grade = body.get("grade", grade)
 
-    if class_num is None:
-        raise HTTPException(status_code=422, detail="class_num is required")
-
-    class_num = int(class_num)
     grade = int(grade)
+    if grade not in (1, 2, 3):
+        raise HTTPException(status_code=422, detail="grade must be 1, 2, or 3")
+    if class_num is None and not has_body_class:
+        raise HTTPException(status_code=422, detail="class_num is required")
+    if class_num is not None:
+        class_num = int(class_num)
+        if class_num <= 0:
+            raise HTTPException(status_code=422, detail="class_num must be positive")
     db = SessionLocal()
     teacher = db.query(Teacher).first()
     if not teacher:

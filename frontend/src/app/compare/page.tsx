@@ -18,8 +18,6 @@ import {
   ChevronsUpDown,
   ArrowUp,
   ArrowDown,
-  Download,
-  Printer,
   Info,
   Inbox,
 } from 'lucide-react'
@@ -51,6 +49,10 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { PageHeader } from '@/components/patterns/PageHeader'
+import { FilterBar } from '@/components/patterns/FilterBar'
+import { StatePanel } from '@/components/patterns/StatePanel'
+import { useHomeroomScope } from '@/components/providers/HomeroomScopeProvider'
 
 // ---------- 类型 ----------
 interface ExamMeta {
@@ -119,7 +121,7 @@ const METRIC_DEFS: Record<
     source: 'compare',
     field: 'main_total_avg',
     desc: '语数英总分',
-    color: '#3b82f6',
+    color: '#3b6ea5',
   },
   five: {
     id: 'five',
@@ -128,7 +130,7 @@ const METRIC_DEFS: Record<
     source: 'compare',
     field: 'five_total_avg',
     desc: '语数英物化总分',
-    color: '#14b8a6',
+    color: '#3f8f6e',
   },
   plus3: {
     id: 'plus3',
@@ -137,7 +139,7 @@ const METRIC_DEFS: Record<
     source: 'compare',
     field: 'plus3_avg',
     desc: '选科三门总分',
-    color: '#55d6c2',
+    color: '#c98a4b',
   },
   total33: {
     id: 'total33',
@@ -146,20 +148,17 @@ const METRIC_DEFS: Record<
     source: 'compare',
     field: 'total_avg',
     desc: '语数英 + 选科总分',
-    color: '#ff6b6b',
+    color: '#c0504f',
   },
 }
 
 const SUBJECT_COLORS = [
-  '#2563eb',
-  '#0891b2',
-  '#0f766e',
-  '#7c3aed',
-  '#d97706',
-  '#dc2626',
-  '#16a34a',
-  '#4f46e5',
-  '#be123c',
+  '#3b6ea5',
+  '#c98a4b',
+  '#3f8f6e',
+  '#b5741f',
+  '#7b6ca8',
+  '#5a8fa8',
 ]
 
 const GRADE1_SUBJECT_ORDER = ['语文', '数学', '英语', '物理', '化学', '生物', '政治', '历史', '地理']
@@ -188,8 +187,10 @@ type SortKey = 'class_num' | 'main_total_avg' | 'diff' | 'rank'
 type SortDir = 'asc' | 'desc'
 
 export default function ComparePage() {
+  const { activeScope, loading: scopeLoading, error: scopeError } = useHomeroomScope()
   const [exams, setExams] = useState<ExamMeta[]>([])
   const [examsLoading, setExamsLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   const [selectedExam, setSelectedExam] = useState<number | null>(null)
   const [compareMetric, setCompareMetric] = useState<string>('main3')
@@ -200,53 +201,62 @@ export default function ComparePage() {
   const [examDetail, setExamDetail] = useState<ExamDetailResp | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
 
-  const [targetClassByGrade, setTargetClassByGrade] = useState<Record<number, number | null>>({})
-
   const [sortKey, setSortKey] = useState<SortKey>('main_total_avg')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
 
   // ---------- fetch: exams ----------
   useEffect(() => {
+    if (scopeLoading) return
+    if (!activeScope) {
+      setExams([])
+      setSelectedExam(null)
+      setExamsLoading(false)
+      return
+    }
+    const controller = new AbortController()
     setExamsLoading(true)
-    fetch('/api/exams')
-      .then(r => r.json())
+    setLoadError(null)
+    fetch(`/api/exams?grade=${activeScope.grade}`, { cache: 'no-store', signal: controller.signal })
+      .then(async r => {
+        if (!r.ok) throw new Error('无法读取考试列表')
+        return r.json()
+      })
       .then(d => {
         const list: ExamMeta[] = d.exams || []
         setExams(list)
-        if (list.length > 0 && selectedExam === null) {
-          setSelectedExam(list[0].id)
-        }
+        setSelectedExam(list[0]?.id ?? null)
       })
-      .catch(console.error)
-      .finally(() => setExamsLoading(false))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // ---------- fetch: teacher (本班) ----------
-  useEffect(() => {
-    fetch('/api/teacher')
-      .then(r => r.json())
-      .then(d => {
-        setTargetClassByGrade({
-          1: d?.target_class_high1 != null ? Number(d.target_class_high1) : null,
-          2: d?.target_class_high2 != null ? Number(d.target_class_high2) : null,
-          3: d?.target_class_high3 != null ? Number(d.target_class_high3) : null,
-        })
+      .catch(cause => {
+        if (cause instanceof DOMException && cause.name === 'AbortError') return
+        setLoadError(cause instanceof Error ? cause.message : '无法读取考试列表')
       })
-      .catch(console.error)
-  }, [])
+      .finally(() => {
+        if (!controller.signal.aborted) setExamsLoading(false)
+      })
+    return () => controller.abort()
+  }, [activeScope, scopeLoading])
 
   // ---------- fetch: /api/class/compare (排名表 数据源) ----------
   useEffect(() => {
+    const controller = new AbortController()
     setCompareLoading(true)
     const url = selectedExam
       ? `/api/class/compare?exam_id=${selectedExam}`
       : '/api/class/compare'
-    fetch(url)
-      .then(r => r.json())
+    fetch(url, { cache: 'no-store', signal: controller.signal })
+      .then(async r => {
+        if (!r.ok) throw new Error('班级对比加载失败')
+        return r.json()
+      })
       .then(d => setCompareData(d.exams || []))
-      .catch(console.error)
-      .finally(() => setCompareLoading(false))
+      .catch(cause => {
+        if (cause instanceof DOMException && cause.name === 'AbortError') return
+        setLoadError(cause instanceof Error ? cause.message : '班级对比加载失败')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setCompareLoading(false)
+      })
+    return () => controller.abort()
   }, [selectedExam])
 
   // ---------- fetch: /api/exams/{id} (单科均分) ----------
@@ -255,15 +265,23 @@ export default function ComparePage() {
       setExamDetail(null)
       return
     }
+    const controller = new AbortController()
     setDetailLoading(true)
-    fetch(`/api/exams/${selectedExam}`)
-      .then(r => r.json())
-      .then((d: ExamDetailResp) => setExamDetail(d))
-      .catch(err => {
-        console.error(err)
-        setExamDetail(null)
+    fetch(`/api/exams/${selectedExam}`, { cache: 'no-store', signal: controller.signal })
+      .then(async r => {
+        if (!r.ok) throw new Error('考试详情加载失败')
+        return r.json()
       })
-      .finally(() => setDetailLoading(false))
+      .then((d: ExamDetailResp) => setExamDetail(d))
+      .catch(cause => {
+        if (cause instanceof DOMException && cause.name === 'AbortError') return
+        setExamDetail(null)
+        setLoadError(cause instanceof Error ? cause.message : '考试详情加载失败')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setDetailLoading(false)
+      })
+    return () => controller.abort()
   }, [selectedExam])
 
   // ---------- 派生：本场对比 ----------
@@ -339,7 +357,7 @@ export default function ComparePage() {
     ? compareMetric
     : 'main3'
   const metricDef = metricOptions.find(option => option.id === activeMetric) || METRIC_DEFS.main3
-  const targetClass = currentGrade ? targetClassByGrade[currentGrade] ?? null : null
+  const targetClass = currentGrade === activeScope?.grade ? activeScope.classNum : null
 
   useEffect(() => {
     if (metricOptions.length > 0 && !metricOptions.some(option => option.id === compareMetric)) {
@@ -383,8 +401,8 @@ export default function ComparePage() {
     }
     const subject = metricDef.id.replace('subject-pair:', '')
     return [
-      { key: `${subject}原始均分`, name: `${subject}原始均分`, color: '#2563eb' },
-      { key: `${subject}等级均分`, name: `${subject}等级均分`, color: '#0f766e' },
+      { key: `${subject}原始均分`, name: `${subject}原始均分`, color: '#3b6ea5' },
+      { key: `${subject}等级均分`, name: `${subject}等级均分`, color: '#3f8f6e' },
     ]
   }, [metricDef])
 
@@ -475,48 +493,45 @@ export default function ComparePage() {
   const isLoadingChart = detailLoading || examsLoading
   const isLoadingTable = compareLoading || examsLoading
 
+  if (!scopeLoading && !activeScope) {
+    return (
+      <StatePanel
+        tone={scopeError ? 'error' : 'first-use'}
+        title={scopeError ? '无法读取班级范围' : '请先绑定行政班'}
+        description={scopeError || '班级对比会突出当前班级，因此必须先选择已绑定的年级和行政班。'}
+      />
+    )
+  }
+
+  if (loadError && !examsLoading) {
+    return <StatePanel tone="error" title="班级对比加载失败" description={loadError} />
+  }
+
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="space-y-6">
+      <div className="space-y-5">
         {/* ---------- 顶部标题 ---------- */}
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
-              班级对比
-            </h1>
-            <p className="mt-1 text-sm text-slate-500">
-              跨班级各科均分横向对比，本班高亮
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            {/* TODO: 导出 CSV / 打印 暂未实现 */}
-            <Button variant="outline" size="sm" disabled>
-              <Download className="mr-1.5 h-4 w-4" />
-              导出 CSV
-            </Button>
-            <Button variant="outline" size="sm" disabled>
-              <Printer className="mr-1.5 h-4 w-4" />
-              打印
-            </Button>
-          </div>
-        </div>
+        <PageHeader
+          eyebrow={activeScope?.label ?? 'Class comparison'}
+          title="班级对比"
+          description="横向比较同一场考试的各班均分，并突出当前班级，不改变全年级统计口径。"
+        />
 
         {/* ---------- Filter 行（sticky） ---------- */}
-        <div
+        <FilterBar
           className={cn(
-            'sticky top-14 z-20 -mx-1 rounded-xl border border-slate-200',
-            'bg-white/80 backdrop-blur supports-[backdrop-filter]:bg-white/70',
+            'z-10 bg-white/95 backdrop-blur sm:sticky sm:top-14',
           )}
         >
           <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-4">
             <div className="flex w-full items-center gap-2 sm:w-auto">
               <span className="shrink-0 text-sm font-medium text-slate-700">选择考试</span>
               <Select
-                value={selectedExam ? String(selectedExam) : undefined}
+                value={selectedExam ? String(selectedExam) : ''}
                 onValueChange={v => setSelectedExam(Number(v))}
                 disabled={examsLoading || exams.length === 0}
               >
-                <SelectTrigger className="h-9 w-full sm:w-[260px]">
+                <SelectTrigger className="h-11 w-full sm:w-[260px]">
                   <SelectValue placeholder={examsLoading ? '加载中…' : '请选择考试'} />
                 </SelectTrigger>
                 <SelectContent>
@@ -536,7 +551,7 @@ export default function ComparePage() {
                 onValueChange={setCompareMetric}
                 disabled={metricOptions.length === 0}
               >
-                <SelectTrigger className="h-9 w-full sm:w-[220px]">
+                <SelectTrigger className="h-11 w-full sm:w-[220px]">
                   <SelectValue placeholder="请选择统计口径" />
                 </SelectTrigger>
                 <SelectContent>
@@ -565,7 +580,7 @@ export default function ComparePage() {
               )}
             </div>
           </div>
-        </div>
+        </FilterBar>
 
         {/* ---------- 主体 ---------- */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
@@ -579,7 +594,8 @@ export default function ComparePage() {
                 <TooltipTrigger asChild>
                   <button
                     type="button"
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-400 hover:bg-slate-50 hover:text-slate-600"
+                    aria-label="查看班级对比图说明"
+                    className="inline-flex h-11 w-11 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
                   >
                     <Info className="h-4 w-4" />
                   </button>
@@ -599,6 +615,10 @@ export default function ComparePage() {
                   height={380}
                 />
               ) : (
+                <div
+                  role="img"
+                  aria-label={`${currentExamMeta?.name ?? '当前考试'}各班${metricDef.short}柱状图，共${chartData.length}个班级`}
+                >
                 <ResponsiveContainer width="100%" height={380}>
                   <BarChart
                     data={chartData}
@@ -606,26 +626,26 @@ export default function ComparePage() {
                   >
                     <CartesianGrid
                       strokeDasharray="3 3"
-                      stroke="#e2e8f0"
+                      stroke="#ece7e0"
                       vertical={false}
                     />
                     <XAxis
                       dataKey="classLabel"
-                      tick={{ fill: '#475569', fontSize: 12 }}
+                      tick={{ fill: '#6b7580', fontSize: 12 }}
                       tickLine={false}
-                      axisLine={{ stroke: '#cbd5e1' }}
+                      axisLine={{ stroke: '#d9d2c7' }}
                     />
                     <YAxis
                       domain={[0, 'dataMax + 20']}
-                      tick={{ fill: '#475569', fontSize: 12 }}
+                      tick={{ fill: '#6b7580', fontSize: 12 }}
                       tickLine={false}
-                      axisLine={{ stroke: '#cbd5e1' }}
+                      axisLine={{ stroke: '#d9d2c7' }}
                     />
                     <RTooltip
                       cursor={{ fill: 'rgba(148, 163, 184, 0.08)' }}
                       contentStyle={{
                         borderRadius: 8,
-                        border: '1px solid #e2e8f0',
+                        border: '1px solid #d9d2c7',
                         fontSize: 12,
                         boxShadow: '0 4px 12px rgba(15, 23, 42, 0.08)',
                       }}
@@ -667,6 +687,7 @@ export default function ComparePage() {
                     ))}
                   </BarChart>
                 </ResponsiveContainer>
+                </div>
               )}
             </CardContent>
           </Card>

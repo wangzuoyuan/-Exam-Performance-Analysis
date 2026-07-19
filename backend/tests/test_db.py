@@ -1,7 +1,6 @@
 """DB模型测试 - 验证ORM写入和查询能力
 
-使用真实数据库 ~/.exam-tracker/db.sqlite
-每个测试在事务中执行，测试后回滚以保持数据隔离
+使用 conftest 配置的临时数据库；每个测试在事务中执行，测试后回滚。
 """
 
 import pytest
@@ -9,8 +8,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 import app.db.models as models
 
-# 使用与main.py相同的数据库
-TEST_DATABASE_URL = f"sqlite:///{models.engine.url.database}" if hasattr(models.engine, 'url') else "sqlite:///~/.exam-tracker/db.sqlite"
+# 使用测试进程中与 main.py 相同的隔离数据库。
+TEST_DATABASE_URL = f"sqlite:///{models.engine.url.database}"
 
 @pytest.fixture(scope="module")
 def engine():

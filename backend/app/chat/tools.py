@@ -1329,7 +1329,7 @@ def student_notes(student_id: Optional[str] = None, name: Optional[str] = None, 
 
 
 def class_homework_ranking(
-    class_num: int = 6,
+    class_num: Optional[int] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     limit: int = 10,
@@ -1340,10 +1340,13 @@ def class_homework_ranking(
 
     db = next(get_db())
     try:
+        class_num = class_num if class_num is not None else service.get_active_class_num(db)
+        if class_num is None:
+            return {"error": "当前年级尚未绑定班级，请先完成班级配置"}
         sem = service.get_semester(db)
         start = start_date or sem["semester_start"]
         end = end_date or sem["semester_end"]
-        result = service.rankings(db, start, end, limit=limit)
+        result = service.rankings(db, start, end, limit=limit, class_num=class_num)
         return {
             "class_num": class_num,
             "semester": {"start": start, "end": end},
@@ -1358,7 +1361,7 @@ def class_homework_ranking(
 
 
 def homework_grade_correlation(
-    class_num: int = 6,
+    class_num: Optional[int] = None,
     exam_id: Optional[int] = None,
     total_type: str = "主三门",
     subject: Optional[str] = None,
@@ -1374,6 +1377,9 @@ def homework_grade_correlation(
 
     db = next(get_db())
     try:
+        class_num = class_num if class_num is not None else service.get_active_class_num(db)
+        if class_num is None:
+            return {"error": "当前年级尚未绑定班级，请先完成班级配置"}
         result = service.grade_correlation(
             db, class_num, exam_id, total_type, subject=subject
         )
@@ -1410,13 +1416,303 @@ TOOL_FUNCTIONS = {
 }
 
 
-def execute_tool(name: str, args: dict[str, Any]) -> Any:
+_GRADE_SCOPED_TOOLS = {
+    "list_exams",
+    "subject_progress_ranking",
+    "multi_exam_progress_ranking",
+    "band_trend",
+    "custom_rank_band_trend",
+    "rank_frequency_stat",
+}
+
+_CLASS_SCOPED_TOOLS = {
+    "class_trend",
+    "subject_weakness",
+    "multi_exam_progress_ranking",
+    "band_trend",
+    "custom_rank_band_trend",
+    "rank_range_filter",
+    "rank_frequency_stat",
+    "class_homework_ranking",
+    "homework_grade_correlation",
+}
+
+_EXAM_ARGUMENTS = ("exam_id", "start_exam_id", "end_exam_id")
+_STUDENT_SCOPED_TOOLS = {
+    "student_lookup",
+    "student_identity_lookup",
+    "student_exam_detail",
+    "student_trend",
+    "student_learning_profile",
+    "student_homework_summary",
+    "student_notes",
+}
+
+# These tools return one student's grades, homework or private homeroom notes.
+# Unlike student_lookup (a scoped discovery tool), they must resolve a single
+# target inside the verified scope before the underlying function is called.
+_PRIVATE_STUDENT_TOOLS = {
+    "student_identity_lookup",
+    "student_exam_detail",
+    "student_trend",
+    "student_learning_profile",
+    "student_homework_summary",
+    "student_notes",
+}
+
+_STUDENT_SCOPE_ERROR = {"error": "该学生不属于当前班级作用域"}
+
+
+def _student_in_scope(db, student_id: str, grade: int, class_num: int) -> bool:
+    """学生工具允许使用当前学年学号，也允许使用已链接到该学生的历史学号。"""
+    from app.analysis.identity import person_ids
+    from app.db.models import ClassRoster, Exam, SubjectScore
+
+    ids = person_ids(db, str(student_id))
+    roster_match = (
+        db.query(ClassRoster.student_id)
+        .filter(
+            ClassRoster.student_id.in_(ids),
+            ClassRoster.grade == grade,
+            ClassRoster.class_num == class_num,
+        )
+        .first()
+    )
+    if roster_match:
+        return True
+    return (
+        db.query(SubjectScore.student_id)
+        .join(Exam, Exam.id == SubjectScore.exam_id)
+        .filter(
+            SubjectScore.student_id.in_(ids),
+            Exam.grade == grade,
+            SubjectScore.class_num == class_num,
+        )
+        .first()
+        is not None
+    )
+
+
+def _resolve_private_student_in_scope(
+    db,
+    student_id: Any,
+    name: Any,
+    grade: int,
+    class_num: int,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Resolve a private student-tool target before any sensitive query runs.
+
+    Name resolution is deliberately performed inside the current roster/scores
+    first. This prevents a same-name student in another class from being chosen
+    by the legacy tool implementation's global lookup.
+    """
+    from app.db.models import ClassRoster, Exam, SubjectScore
+
+    if student_id is not None:
+        resolved = str(student_id)
+        if not _student_in_scope(db, resolved, grade, class_num):
+            return None, dict(_STUDENT_SCOPE_ERROR)
+        return resolved, None
+
+    if not name:
+        return None, {"error": "需提供 student_id 或 name"}
+
+    pattern = f"%{name}%"
+    candidates = [
+        str(row.student_id)
+        for row in (
+            db.query(ClassRoster.student_id)
+            .filter(
+                ClassRoster.grade == grade,
+                ClassRoster.class_num == class_num,
+                ClassRoster.name.like(pattern),
+            )
+            .all()
+        )
+    ]
+    candidates.extend(
+        str(row.student_id)
+        for row in (
+            db.query(SubjectScore.student_id)
+            .join(Exam, Exam.id == SubjectScore.exam_id)
+            .filter(
+                Exam.grade == grade,
+                SubjectScore.class_num == class_num,
+                SubjectScore.name.like(pattern),
+            )
+            .distinct()
+            .all()
+        )
+    )
+    unique_candidates = list(dict.fromkeys(candidates))
+
+    # Collapse aliases of the same person while retaining a current-scope id.
+    groups: list[list[str]] = []
+    for candidate in unique_candidates:
+        matching_group = next(
+            (group for group in groups if any(_same_student(db, candidate, item) for item in group)),
+            None,
+        )
+        if matching_group is None:
+            groups.append([candidate])
+        else:
+            matching_group.append(candidate)
+
+    if len(groups) == 1:
+        return groups[0][0], None
+    if len(groups) > 1:
+        return None, {
+            "error": "当前班级中匹配到多个学生，请指定学号",
+            "candidates": [
+                {"student_id": group[0], "name": str(name)} for group in groups
+            ],
+        }
+
+    # Distinguish an out-of-scope real student from an unknown search without
+    # ever invoking the private tool or returning any of that student's data.
+    exists_elsewhere = (
+        db.query(ClassRoster.student_id).filter(ClassRoster.name.like(pattern)).first()
+        or db.query(SubjectScore.student_id).filter(SubjectScore.name.like(pattern)).first()
+    )
+    if exists_elsewhere:
+        return None, dict(_STUDENT_SCOPE_ERROR)
+    return None, {"error": "当前班级中未找到匹配学生"}
+
+
+def _same_student(db, left: str, right: str) -> bool:
+    from app.analysis.identity import person_ids
+
+    return right in person_ids(db, left)
+
+
+def _contains_out_of_scope_student(value: Any, db, grade: int, class_num: int) -> bool:
+    """Detect any foreign student reference in a private tool result.
+
+    A whole-result rejection is intentional: locally replacing only a nested
+    ``student`` object can leave sibling fields such as notes or homework intact.
+    """
+    if isinstance(value, list):
+        return any(
+            _contains_out_of_scope_student(item, db, grade, class_num)
+            for item in value
+        )
+    if not isinstance(value, dict):
+        return False
+    referenced_student = value.get("student_id")
+    if referenced_student is not None and not _student_in_scope(
+        db, str(referenced_student), grade, class_num
+    ):
+        return True
+    return any(
+        _contains_out_of_scope_student(item, db, grade, class_num)
+        for item in value.values()
+    )
+
+
+def _filter_student_rows(value: Any, db, grade: int, class_num: int) -> Any:
+    """姓名模糊查询可能返回多个人；在工具边界再做一次班级收口。"""
+    if isinstance(value, list):
+        rows = []
+        for row in value:
+            if (
+                isinstance(row, dict)
+                and row.get("student_id")
+                and not _student_in_scope(db, str(row["student_id"]), grade, class_num)
+            ):
+                continue
+            rows.append(_filter_student_rows(row, db, grade, class_num))
+        return rows
+    if not isinstance(value, dict):
+        return value
+
+    student_id = value.get("student_id")
+    if student_id and not _student_in_scope(db, str(student_id), grade, class_num):
+        return {"error": "该学生不属于当前班级作用域"}
+    filtered = {
+        key: _filter_student_rows(item, db, grade, class_num)
+        for key, item in value.items()
+    }
+    if isinstance(filtered.get("candidates"), list) and not filtered["candidates"] and filtered.get("error"):
+        filtered["error"] = "当前班级中未找到匹配学生"
+    return filtered
+
+
+def execute_tool(
+    name: str,
+    args: dict[str, Any],
+    scope: dict[str, int] | None = None,
+) -> Any:
     if name == "render_chart":
         return {"chart": args}
     func = TOOL_FUNCTIONS.get(name)
     if not func:
         return {"error": f"未知工具: {name}"}
-    return func(**args)
+
+    scoped_args = dict(args or {})
+    if scope is None:
+        return func(**scoped_args)
+
+    grade = int(scope["grade"])
+    class_num = int(scope["class_num"])
+    if name in _GRADE_SCOPED_TOOLS:
+        scoped_args["grade"] = grade
+    if name in _CLASS_SCOPED_TOOLS:
+        scoped_args["class_num"] = class_num
+
+    # 与考试绑定的工具不得通过模型参数跨年级。
+    from app.db.models import Exam, get_db
+
+    db = next(get_db())
+    try:
+        for key in _EXAM_ARGUMENTS:
+            exam_id = scoped_args.get(key)
+            if exam_id is None:
+                continue
+            exam = db.query(Exam).filter(Exam.id == int(exam_id)).first()
+            if exam is None:
+                return {"error": f"考试 {exam_id} 不存在"}
+            if exam.grade != grade:
+                return {"error": "该考试不属于当前班级作用域"}
+        for exam_id in scoped_args.get("exam_ids") or []:
+            exam = db.query(Exam).filter(Exam.id == int(exam_id)).first()
+            if exam is None:
+                return {"error": f"考试 {exam_id} 不存在"}
+            if exam.grade != grade:
+                return {"error": "指定考试中包含不属于当前班级作用域的考试"}
+
+        if name == "compare_classes":
+            class_nums = [int(value) for value in scoped_args.get("class_nums") or []]
+            if class_num not in class_nums:
+                return {"error": "班级对比必须包含当前班级"}
+
+        if name in _PRIVATE_STUDENT_TOOLS:
+            resolved_student_id, resolve_error = _resolve_private_student_in_scope(
+                db,
+                scoped_args.get("student_id"),
+                scoped_args.get("name"),
+                grade,
+                class_num,
+            )
+            if resolve_error is not None:
+                return resolve_error
+            scoped_args["student_id"] = resolved_student_id
+            # Force the verified id so legacy global name queries cannot select
+            # another student with the same name in a different class.
+            scoped_args.pop("name", None)
+        elif name in _STUDENT_SCOPED_TOOLS and scoped_args.get("student_id"):
+            if not _student_in_scope(db, str(scoped_args["student_id"]), grade, class_num):
+                return dict(_STUDENT_SCOPE_ERROR)
+
+        result = func(**scoped_args)
+        if name in _PRIVATE_STUDENT_TOOLS and _contains_out_of_scope_student(
+            result, db, grade, class_num
+        ):
+            return dict(_STUDENT_SCOPE_ERROR)
+        # 关注名单、排名等工具虽未必显式接收 class_num，
+        # 但其中的学生行仍在统一出口边界按当前班级收口。
+        return _filter_student_rows(result, db, grade, class_num)
+    finally:
+        db.close()
 
 def to_openai_tools(tools: list[dict]) -> list[dict]:
     """把 Anthropic 风格 tools 转成 OpenAI function-calling 格式。"""
@@ -1668,7 +1964,7 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "class_num": {"type": "integer", "description": "班号，默认6"},
+                "class_num": {"type": "integer", "description": "班号；不填时使用班主任当前选择的已绑定班级"},
                 "start_date": {"type": "string", "description": "起始日期 YYYY-MM-DD；不填用学期开始"},
                 "end_date": {"type": "string", "description": "结束日期 YYYY-MM-DD；不填用学期结束"},
                 "limit": {"type": "integer", "description": "返回人数，默认10"},
@@ -1681,7 +1977,7 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "class_num": {"type": "integer", "description": "班号，默认6"},
+                "class_num": {"type": "integer", "description": "班号；不填时使用班主任当前选择的已绑定班级"},
                 "exam_id": {"type": "integer", "description": "考试ID；不填取最新一场"},
                 "total_type": {"type": "string", "description": "总分类型，默认主三门（仅总览模式用）"},
                 "subject": {"type": "string", "description": "学科名（语文/数学/英语/物理/化学/生物/政治/历史/地理）；传了就看该科缺交×该科百分位"},

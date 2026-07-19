@@ -5,6 +5,8 @@ import Link from 'next/link'
 import { useParams } from 'next/navigation'
 import { ChevronLeft, Printer } from 'lucide-react'
 
+import { useHomeroomScope } from '@/components/providers/HomeroomScopeProvider'
+
 const DASH = '—'
 
 interface MainTrendPoint {
@@ -26,6 +28,11 @@ interface StudentProfile {
   class_num?: number | null
   main_total_trend: MainTrendPoint[]
   subject_trend: SubjectTrendPoint[]
+}
+interface StudentScopeSummary {
+  student_id: string
+  current_grade?: number | null
+  class_num?: number | null
 }
 interface HomeworkSummary {
   total_misses?: number
@@ -50,25 +57,103 @@ function num(v: unknown): number | null {
 export default function StudentReportPage() {
   const params = useParams<{ id: string }>()
   const studentId = Array.isArray(params?.id) ? params?.id[0] : params?.id
+  const { activeScope, loading: scopeLoading, error: scopeError } = useHomeroomScope()
 
   const [profile, setProfile] = useState<StudentProfile | null>(null)
   const [homework, setHomework] = useState<HomeworkSummary | null>(null)
   const [notes, setNotes] = useState<Note[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [homeworkError, setHomeworkError] = useState<string | null>(null)
+  const [notesError, setNotesError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!studentId) return
-    fetch(`/api/students/${studentId}`).then((r) => r.json()).then(setProfile).catch(() => {})
-    fetch(`/api/homework/student/${studentId}`).then((r) => r.json()).then(setHomework).catch(() => {})
-    fetch(`/api/notes/${studentId}`).then((r) => r.json()).then((d) => setNotes(Array.isArray(d) ? d : [])).catch(() => {})
-  }, [studentId])
+    if (scopeLoading) return
+    if (!studentId || !activeScope) {
+      setProfile(null)
+      setLoading(false)
+      setError(scopeError || '请先绑定并选择行政班')
+      return
+    }
+    const controller = new AbortController()
+    setLoading(true)
+    setError(null)
+    setHomeworkError(null)
+    setNotesError(null)
+    setProfile(null)
 
-  if (!profile) {
-    return <div className="p-8 text-sm text-slate-400">加载中…</div>
+    async function loadReport() {
+      try {
+        const listResponse = await fetch('/api/students', { cache: 'no-store', signal: controller.signal })
+        if (!listResponse.ok) throw new Error('无法验证学生所属班级')
+        const students = (await listResponse.json()) as StudentScopeSummary[]
+        const authorized = students.some(
+          (student) =>
+            student.student_id === studentId &&
+            student.current_grade === activeScope!.grade &&
+            student.class_num === activeScope!.classNum
+        )
+        if (!authorized) throw new Error('该学生不属于当前班级，无法生成家长会一页纸')
+
+        const profileResponse = await fetch(`/api/students/${studentId}`, { cache: 'no-store', signal: controller.signal })
+        if (!profileResponse.ok) throw new Error('无法读取学生报告')
+        const profileData = (await profileResponse.json()) as StudentProfile
+        const [homeworkResult, notesResult] = await Promise.allSettled([
+          fetch(`/api/homework/student/${studentId}`, { cache: 'no-store', signal: controller.signal }).then(async (response) => {
+            if (!response.ok) throw new Error('作业记录读取失败')
+            return (await response.json()) as HomeworkSummary
+          }),
+          fetch(`/api/notes/${studentId}`, { cache: 'no-store', signal: controller.signal }).then(async (response) => {
+            if (!response.ok) throw new Error('成长档案读取失败')
+            return (await response.json()) as Note[]
+          }),
+        ])
+        if (controller.signal.aborted) return
+        setProfile(profileData)
+        if (homeworkResult.status === 'fulfilled' && !homeworkResult.value.error) {
+          setHomework(homeworkResult.value)
+        } else {
+          setHomework(null)
+          setHomeworkError(
+            homeworkResult.status === 'rejected'
+              ? homeworkResult.reason instanceof Error ? homeworkResult.reason.message : '作业记录读取失败'
+              : homeworkResult.value.error || '作业记录读取失败'
+          )
+        }
+        if (notesResult.status === 'fulfilled' && Array.isArray(notesResult.value)) {
+          setNotes(notesResult.value)
+        } else {
+          setNotes([])
+          setNotesError(
+            notesResult.status === 'rejected' && notesResult.reason instanceof Error
+              ? notesResult.reason.message
+              : '成长档案读取失败'
+          )
+        }
+      } catch (cause) {
+        if (cause instanceof DOMException && cause.name === 'AbortError') return
+        setError(cause instanceof Error ? cause.message : '无法读取学生报告')
+      } finally {
+        if (!controller.signal.aborted) setLoading(false)
+      }
+    }
+
+    void loadReport()
+    return () => controller.abort()
+  }, [activeScope, scopeError, scopeLoading, studentId])
+
+  if (scopeLoading || loading) {
+    return <div className="p-8 text-sm text-muted-foreground" role="status">正在生成学生报告…</div>
+  }
+
+  if (error || !profile) {
+    return <div className="m-6 rounded-lg border border-danger-500/30 bg-danger-50 p-6 text-sm text-danger-700" role="alert">{error || '未找到该学生'}</div>
   }
 
   const mainTrend = [...(profile.main_total_trend || [])].sort((a, b) =>
     (a.exam_date ?? '') < (b.exam_date ?? '') ? -1 : 1
   )
+  const reportMainTrend = mainTrend.slice(-6)
   const latestMain = mainTrend[mainTrend.length - 1]
   const firstMain = mainTrend[0]
 
@@ -84,19 +169,28 @@ export default function StudentReportPage() {
   const hwSpecials = Object.entries(homework?.special_counts || {})
 
   return (
-    <div className="mx-auto max-w-3xl space-y-5 bg-white p-6 text-slate-900 print:p-0">
+    <div className="mx-auto max-w-3xl space-y-5 bg-white p-6 text-slate-900 print:space-y-3 print:p-0 print:text-[11px] print:leading-tight">
+      <style jsx global>{`
+        @media print {
+          html,
+          body {
+            min-height: 0 !important;
+            height: auto !important;
+          }
+        }
+      `}</style>
       {/* 顶部操作（打印时隐藏） */}
       <div className="flex items-center justify-between print:hidden">
         <Link
           href={`/student/${studentId}`}
-          className="inline-flex items-center gap-1 text-sm text-slate-600 hover:text-slate-900"
+          className="inline-flex min-h-11 items-center gap-1 rounded-md px-2 text-sm text-slate-600 hover:bg-slate-100 hover:text-slate-900"
         >
           <ChevronLeft className="h-4 w-4" />
           返回学生页
         </Link>
         <button
           onClick={() => window.print()}
-          className="inline-flex items-center gap-1.5 rounded-md bg-brand-600 px-3 py-1.5 text-sm text-white hover:bg-brand-700"
+          className="inline-flex min-h-11 items-center gap-1.5 rounded-md bg-brand-600 px-3 text-sm font-bold text-white hover:bg-brand-700"
         >
           <Printer className="h-4 w-4" />
           打印 / 存为 PDF
@@ -104,7 +198,7 @@ export default function StudentReportPage() {
       </div>
 
       {/* 抬头 */}
-      <div className="border-b border-slate-300 pb-3">
+      <div className="border-b border-slate-300 pb-3 print:pb-2">
         <h1 className="text-xl font-bold">家长会学生情况表</h1>
         <p className="mt-1 text-sm text-slate-600">
           {profile.name} · 学号 {profile.student_id}
@@ -114,7 +208,7 @@ export default function StudentReportPage() {
       </div>
 
       {/* 成绩概况 */}
-      <section>
+      <section className="break-inside-avoid">
         <h2 className="mb-2 text-base font-semibold">一、成绩概况（主三门）</h2>
         <table className="w-full border-collapse text-sm">
           <thead>
@@ -125,7 +219,7 @@ export default function StudentReportPage() {
             </tr>
           </thead>
           <tbody>
-            {mainTrend.map((p, i) => (
+            {reportMainTrend.map((p, i) => (
               <tr key={i} className="border-b border-slate-100">
                 <td className="py-1.5">{p.exam_name}</td>
                 <td className="py-1.5 text-right tabular-nums">{num(p.total_score) ?? DASH}</td>
@@ -144,9 +238,9 @@ export default function StudentReportPage() {
       </section>
 
       {/* 各科最新 */}
-      <section>
+      <section className="break-inside-avoid">
         <h2 className="mb-2 text-base font-semibold">二、各科最新水平（年级百分位，越小越靠前）</h2>
-        <div className="grid grid-cols-3 gap-2 text-sm">
+        <div className="grid grid-cols-3 gap-2 text-sm print:gap-1 print:text-[10px]">
           {ALL_SUBJECTS.map((sub) => {
             const s = subjectLatest[sub]
             const pct = s ? num(s.grade_percentile) : null
@@ -164,9 +258,13 @@ export default function StudentReportPage() {
       </section>
 
       {/* 作业 */}
-      <section>
+      <section className="break-inside-avoid">
         <h2 className="mb-2 text-base font-semibold">三、作业完成情况（本学期缺交）</h2>
-        {homework && !homework.error ? (
+        {homeworkError ? (
+          <p className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800" role="alert">
+            作业数据暂不可用：{homeworkError}
+          </p>
+        ) : homework ? (
           <p className="text-sm text-slate-700">
             共缺交 <span className="font-semibold">{homework.total_misses ?? 0}</span> 次
             {hwSpecials.length > 0 && `；${hwSpecials.map(([t, c]) => `${t}${c}次`).join('、')}`}
@@ -183,9 +281,13 @@ export default function StudentReportPage() {
       </section>
 
       {/* 谈话摘要 */}
-      <section>
+      <section className="break-inside-avoid">
         <h2 className="mb-2 text-base font-semibold">四、近期沟通摘要</h2>
-        {notes.length > 0 ? (
+        {notesError ? (
+          <p className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800" role="alert">
+            成长档案暂不可用：{notesError}
+          </p>
+        ) : notes.length > 0 ? (
           <ul className="space-y-1.5 text-sm">
             {notes.slice(0, 4).map((n) => (
               <li key={n.id} className="text-slate-700">
@@ -199,8 +301,8 @@ export default function StudentReportPage() {
         )}
       </section>
 
-      <div className="border-t border-slate-300 pt-3 text-xs text-slate-400 print:fixed print:bottom-2">
-        本表由成绩追踪系统生成，仅供家校沟通参考。
+      <div className="break-inside-avoid border-t border-slate-300 pt-3 text-xs text-slate-400 print:pt-2 print:text-[9px]">
+        本表由成绩分析（班主任版）生成，仅供家校沟通参考。
       </div>
     </div>
   )

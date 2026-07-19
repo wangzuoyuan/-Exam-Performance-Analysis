@@ -6,6 +6,7 @@
 """
 
 import os
+import sqlite3
 import tempfile
 
 # 必须在 import app.main 之前把 EXAM_TRACKER_DIR 钉到临时目录，使
@@ -167,6 +168,20 @@ def test_preview_left_class_contains_g1_student_not_in_g2(client):
     assert "g1_102" in left_sids
 
 
+def test_preview_roster_is_scoped_to_requested_class(client, db):
+    db.merge(ClassRoster(student_id="other-class", name="外班生", grade=2, class_num=9))
+    db.merge(ClassRoster(student_id="this-class", name="本班生", grade=2, class_num=3))
+    db.commit()
+    body = client.get("/api/rollover/preview?grade=2&class_num=3").json()
+    visible = {
+        row["student_id"]
+        for bucket in ("inherited", "ambiguous", "new", "unmatched")
+        for row in body[bucket]
+    }
+    assert "this-class" in visible
+    assert "other-class" not in visible
+
+
 # ─────────────────────────── link ───────────────────────────
 
 
@@ -232,6 +247,45 @@ def test_crosswalk_bulk_link(client, db):
     assert body["linked"] >= 1
 
 
+def test_grade3_link_and_crosswalk_record_dynamic_alias_grades(client, db):
+    _seed_exam(301, "高三开学测", 3, "2026-09")
+    _seed_subject(301, "g3_dynamic", "高三生", 8)
+    response = client.post(
+        "/api/rollover/link",
+        json={
+            "g2_student_id": "g3_dynamic",
+            "g1_student_id": "g2_dynamic",
+            "name": "高三生",
+            "grade": 3,
+        },
+    )
+    assert response.status_code == 200, response.text
+    grades = {row["student_id"]: row["grade"] for row in response.json()["aliases"]}
+    assert grades == {"g2_dynamic": 2, "g3_dynamic": 3}
+
+    response2 = client.post(
+        "/api/rollover/crosswalk",
+        json={
+            "target_grade": 3,
+            "rows": [{"g1_sid": "g2_cross", "g2_sid": "g3_cross", "name": "对照生"}],
+        },
+    )
+    assert response2.status_code == 200, response2.text
+    from app.analysis.identity import aliases_of, identity_of
+    iid = identity_of(db, "g3_cross")
+    aliases = {row.student_id: row.grade for row in aliases_of(db, iid)}
+    assert aliases == {"g2_cross": 2, "g3_cross": 3}
+
+
+def test_unbind_class_accepts_explicit_null(client):
+    bound = client.post("/api/teacher/bind-class", json={"grade": 3, "class_num": 8})
+    assert bound.status_code == 200
+    unbound = client.post("/api/teacher/bind-class", json={"grade": 3, "class_num": None})
+    assert unbound.status_code == 200, unbound.text
+    assert unbound.json()["bound_class"] is None
+    assert client.get("/api/teacher").json()["target_class_high3"] is None
+
+
 # ─────────────────────────── import-history ───────────────────────────
 
 
@@ -277,6 +331,31 @@ def test_import_history_writes_rows(client, db):
     assert "subject" in kinds and "total" in kinds
 
 
+def test_grade3_history_import_links_current_alias_and_keeps_grade2_history(client, db):
+    response = client.post(
+        "/api/rollover/import-history",
+        json={
+            "student_id": "g3-history",
+            "name": "历史高三生",
+            "target_grade": 3,
+            "rows": [{
+                "exam_label": "高二期末",
+                "kind": "subject",
+                "subject": "数学",
+                "raw_score": 99,
+                "grade": 2,
+            }],
+        },
+    )
+    assert response.status_code == 200, response.text
+    from app.analysis.identity import aliases_of
+    iid = response.json()["identity_id"]
+    aliases = {row.student_id: row.grade for row in aliases_of(db, iid)}
+    assert aliases["g3-history"] == 3
+    history = db.query(ImportedHistory).filter_by(identity_id=iid).one()
+    assert history.grade == 2
+
+
 # ─────────────────────────── active-grade ───────────────────────────
 
 
@@ -288,6 +367,17 @@ def test_active_grade_sets_homework_setting(client, db):
     row = db.query(HomeworkSetting).filter_by(key="active_grade").first()
     assert row is not None
     assert int(row.value) == 2
+
+
+def test_active_grade_rejects_unbound_grade(client):
+    r = client.patch("/api/rollover/active-grade", json={"grade": 3})
+    assert r.status_code == 409
+    assert "尚未绑定行政班" in r.json()["detail"]
+
+
+def test_active_grade_rejects_invalid_grade(client):
+    r = client.patch("/api/rollover/active-grade", json={"grade": 4})
+    assert r.status_code == 422
 
 
 # ─────────────────────────── roster 结转 ───────────────────────────
@@ -309,3 +399,62 @@ def test_roster_from_scores_builds_grade2_roster(client, db):
     assert {"g2_201", "g2_203"} <= roster_sids
     # 全部行 grade 必须是 2
     assert all(r.grade == 2 for r in rows)
+
+
+def test_homework_migrate_uses_active_grade_for_identity_and_roster(tmp_path, monkeypatch):
+    """迁移必须按当前年级消歧同名学生，并保留全局 active_grade。"""
+    from app.homework import migrate as migrate_module
+
+    source = tmp_path / "homework.db"
+    connection = sqlite3.connect(source)
+    connection.executescript(
+        """
+        CREATE TABLE students (
+            id INTEGER PRIMARY KEY,
+            student_no TEXT,
+            name TEXT,
+            gender TEXT,
+            excluded INTEGER DEFAULT 0
+        );
+        CREATE TABLE records (
+            student_id INTEGER,
+            date TEXT,
+            subject TEXT,
+            content TEXT,
+            remark TEXT
+        );
+        CREATE TABLE special_records (
+            student_id INTEGER,
+            date TEXT,
+            type TEXT,
+            note TEXT
+        );
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO students VALUES (1, '1', '陈一', '女', 0);
+        INSERT INTO records VALUES (1, '2026-07-01', '数学', '练习册', '');
+        INSERT INTO settings VALUES ('semester_name', '高二上');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    def isolated_get_db():
+        session = SessionLocal()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    monkeypatch.setattr(migrate_module, "get_db", isolated_get_db)
+    migrate_module.migrate(str(source))
+
+    verify = SessionLocal()
+    try:
+        roster = verify.query(ClassRoster).one()
+        assert roster.student_id == "g2_201"
+        assert roster.class_num == 3
+        assert roster.grade == 2
+        assert verify.get(HomeworkSetting, "active_grade").value == "2"
+        assert verify.get(HomeworkSetting, "semester_name").value == "高二上"
+    finally:
+        verify.close()

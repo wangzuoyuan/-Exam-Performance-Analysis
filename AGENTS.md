@@ -2,6 +2,8 @@
 
 This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
+产品名称为 **成绩分析（班主任版）**。全站以教师已绑定的 `grade + class_num` 为唯一运行时作用域；禁止添加固定班号回退。
+
 > 本文件是 webapp 目录的补充说明。父目录 AGENTS.md（`../AGENTS.md`）含架构总览和业务口径，两者都会加载，本文件只记录 webapp 特有细节和对父文件的修正。
 
 ## 快速命令
@@ -26,6 +28,7 @@ cd backend && source .venv/bin/activate && uvicorn app.main:app --reload --port 
 cd frontend && npm run dev          # localhost:3000
 npx tsc --noEmit                    # 类型检查
 npm run build                       # 生产构建（CI 没配，靠这个兜底）
+npm run test:ui                     # UI 契约 + 班级作用域交互测试
 
 # 后端测试
 cd backend && source .venv/bin/activate && pip install pytest && pytest tests/

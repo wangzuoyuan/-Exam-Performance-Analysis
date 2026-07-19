@@ -43,98 +43,165 @@ def _filters(start_date, end_date, student, subject, db):
     )
 
 
+def _validated_scope(db, class_num: Optional[int] = None) -> tuple[int, int]:
+    """解析并校验当前班主任作用域，不允许显式请求其他班级。"""
+    grade = service.get_active_grade(db)
+    bound_class_num = service.get_active_class_num(db, grade=grade)
+    if bound_class_num is None:
+        raise HTTPException(status_code=409, detail="当前年级尚未绑定班级，请先完成班级配置")
+    if class_num is not None and int(class_num) != bound_class_num:
+        raise HTTPException(status_code=409, detail="请求班级与当前教师绑定班级不一致")
+    return grade, bound_class_num
+
+
+def _validated_scope_class_num(db, class_num: Optional[int]) -> int:
+    return _validated_scope(db, class_num)[1]
+
+
+def _scope_roster_query(db, class_num: Optional[int] = None):
+    grade, resolved_class_num = _validated_scope(db, class_num)
+    return (
+        db.query(ClassRoster).filter(
+            ClassRoster.grade == grade,
+            ClassRoster.class_num == resolved_class_num,
+        ),
+        grade,
+        resolved_class_num,
+    )
+
+
+def _scoped_roster_row(db, student_id: str, class_num: Optional[int] = None):
+    query, _, _ = _scope_roster_query(db, class_num)
+    row = query.filter(ClassRoster.student_id == student_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="当前班级中不存在该学生")
+    return row
+
+
 # ─────────────────────────── 看板统计 ───────────────────────────
 
 @router.get("/homework/kpi")
 async def hw_kpi(start_date: str = "", end_date: str = "",
-                 student: str = "", subject: str = ""):
+                 student: str = "", subject: str = "",
+                 class_num: Optional[int] = None):
     db = next(get_db())
     try:
+        class_num = _validated_scope_class_num(db, class_num)
         s, e, stu, sub = _filters(start_date, end_date, student, subject, db)
-        return service.kpi(db, s, e, stu, sub)
+        return service.kpi(db, s, e, stu, sub, class_num=class_num)
     finally:
         db.close()
 
 
 @router.get("/homework/trend")
 async def hw_trend(start_date: str = "", end_date: str = "",
-                   student: str = "", subject: str = ""):
+                   student: str = "", subject: str = "",
+                   class_num: Optional[int] = None):
     db = next(get_db())
     try:
+        class_num = _validated_scope_class_num(db, class_num)
         s, e, stu, sub = _filters(start_date, end_date, student, subject, db)
-        return service.trend(db, s, e, stu, sub)
+        return service.trend(db, s, e, stu, sub, class_num=class_num)
     finally:
         db.close()
 
 
 @router.get("/homework/subjects")
 async def hw_subjects(start_date: str = "", end_date: str = "",
-                      student: str = "", subject: str = ""):
+                      student: str = "", subject: str = "",
+                      class_num: Optional[int] = None):
     db = next(get_db())
     try:
+        class_num = _validated_scope_class_num(db, class_num)
         s, e, stu, sub = _filters(start_date, end_date, student, subject, db)
-        return service.subjects(db, s, e, stu, sub)
+        return service.subjects(db, s, e, stu, sub, class_num=class_num)
     finally:
         db.close()
 
 
 @router.get("/homework/rankings")
 async def hw_rankings(start_date: str = "", end_date: str = "",
-                      student: str = "", subject: str = "", limit: int = 10):
+                      student: str = "", subject: str = "", limit: int = 10,
+                      class_num: Optional[int] = None):
     db = next(get_db())
     try:
+        class_num = _validated_scope_class_num(db, class_num)
         s, e, stu, sub = _filters(start_date, end_date, student, subject, db)
-        return service.rankings(db, s, e, stu, sub, limit)
+        return service.rankings(db, s, e, stu, sub, limit, class_num=class_num)
     finally:
         db.close()
 
 
 @router.get("/homework/warnings")
-async def hw_warnings():
+async def hw_warnings(class_num: Optional[int] = None):
     db = next(get_db())
     try:
+        class_num = _validated_scope_class_num(db, class_num)
         sem = service.get_semester(db)
-        return service.warnings(db, sem["semester_start"], sem["semester_end"])
-    finally:
-        db.close()
-
-
-@router.get("/homework/correlation")
-async def hw_correlation(class_num: int = 6, exam_id: Optional[int] = None,
-                         total_type: str = "主三门", subject: str = ""):
-    db = next(get_db())
-    try:
-        return service.grade_correlation(
-            db, class_num, exam_id, total_type, subject=subject or None
+        return service.warnings(
+            db, sem["semester_start"], sem["semester_end"], class_num=class_num
         )
     finally:
         db.close()
 
 
-@router.get("/homework/correlation/subjects")
-async def hw_correlation_subjects(class_num: int = 6, exam_id: Optional[int] = None):
+@router.get("/homework/correlation")
+async def hw_correlation(class_num: Optional[int] = None, exam_id: Optional[int] = None,
+                         total_type: str = "主三门", subject: str = ""):
     db = next(get_db())
     try:
-        return service.subject_correlation_ranking(db, class_num, exam_id)
+        class_num = _validated_scope_class_num(db, class_num)
+        try:
+            return service.grade_correlation(
+                db, class_num, exam_id, total_type, subject=subject or None
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        db.close()
+
+
+@router.get("/homework/correlation/subjects")
+async def hw_correlation_subjects(class_num: Optional[int] = None, exam_id: Optional[int] = None):
+    db = next(get_db())
+    try:
+        class_num = _validated_scope_class_num(db, class_num)
+        try:
+            return service.subject_correlation_ranking(db, class_num, exam_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
         db.close()
 
 
 @router.get("/homework/student/{student_id}")
-async def hw_student_summary(student_id: str):
+async def hw_student_summary(student_id: str, class_num: Optional[int] = None):
     """单个学生作业概况（供学生画像页作业卡片）。"""
     db = next(get_db())
     try:
-        return service.student_summary(db, student_id=student_id)
+        _, grade, resolved_class_num = _scope_roster_query(db, class_num)
+        from app.analysis.identity import person_ids
+        ids = person_ids(db, student_id)
+        allowed = db.query(ClassRoster).filter(
+            ClassRoster.student_id.in_(ids),
+            ClassRoster.grade == grade,
+            ClassRoster.class_num == resolved_class_num,
+        ).first()
+        if allowed is None:
+            raise HTTPException(status_code=404, detail="当前班级中不存在该学生")
+        return service.student_summary(
+            db, student_id=student_id, class_num=resolved_class_num
+        )
     finally:
         db.close()
 
 
 @router.get("/weekly-focus")
-async def weekly_focus(class_num: int = 6):
+async def weekly_focus(class_num: Optional[int] = None):
     """本周关注名单（仪表盘主动提醒）。"""
     db = next(get_db())
     try:
+        class_num = _validated_scope_class_num(db, class_num)
         return service.weekly_focus(db, class_num)
     finally:
         db.close()
@@ -148,18 +215,18 @@ class RecordsPayload(BaseModel):
     mode: str = "by_student"  # by_student | by_subject
 
 
-def _find_student_id(db, name):
-    """按姓名解析学号；高一+高二名册并存时优先 active_grade 的当前学年学生。"""
-    active_grade = service.get_active_grade(db)
-    q = db.query(ClassRoster).filter(ClassRoster.name == name)
-    row = q.filter(ClassRoster.grade == active_grade).first()
-    if row is None:
-        row = q.first()
+def _find_student_id(db, name, grade: int, class_num: int):
+    """姓名只在当前行政班内解析，避免同名跨班写错学生。"""
+    row = db.query(ClassRoster).filter(
+        ClassRoster.name == name,
+        ClassRoster.grade == grade,
+        ClassRoster.class_num == class_num,
+    ).first()
     return row.student_id if row else None
 
 
 @router.post("/homework/records")
-async def hw_add_records(payload: RecordsPayload):
+async def hw_add_records(payload: RecordsPayload, class_num: Optional[int] = None):
     if not payload.raw_text.strip():
         raise HTTPException(400, "请输入记录内容")
     date = payload.date or _today()
@@ -167,6 +234,7 @@ async def hw_add_records(payload: RecordsPayload):
     added = 0
     errors = []
     try:
+        grade, class_num = _validated_scope(db, class_num)
         lines = [l.strip() for l in payload.raw_text.split("\n") if l.strip()]
         for line in lines:
             parts = split_colon(line)
@@ -180,7 +248,7 @@ async def hw_add_records(payload: RecordsPayload):
                 names = split_names(right)
                 if not is_subject_item(left):
                     for name in names:
-                        sid = _find_student_id(db, name)
+                        sid = _find_student_id(db, name, grade, class_num)
                         if not sid:
                             errors.append(f"找不到学生: {name}")
                             continue
@@ -193,7 +261,7 @@ async def hw_add_records(payload: RecordsPayload):
                         continue
                     subj, content, remark = parsed
                     for name in names:
-                        sid = _find_student_id(db, name)
+                        sid = _find_student_id(db, name, grade, class_num)
                         if not sid:
                             errors.append(f"找不到学生: {name}")
                             continue
@@ -203,7 +271,7 @@ async def hw_add_records(payload: RecordsPayload):
             else:
                 # 学生：科目1、科目2 / 情况
                 name = left
-                sid = _find_student_id(db, name)
+                sid = _find_student_id(db, name, grade, class_num)
                 if not sid:
                     errors.append(f"找不到学生: {name}")
                     continue
@@ -234,7 +302,7 @@ class SpecialPayload(BaseModel):
 
 
 @router.post("/homework/special-records")
-async def hw_add_special(payload: SpecialPayload):
+async def hw_add_special(payload: SpecialPayload, class_num: Optional[int] = None):
     if not payload.raw_text.strip():
         raise HTTPException(400, "请输入记录内容")
     date = payload.date or _today()
@@ -242,6 +310,7 @@ async def hw_add_special(payload: SpecialPayload):
     added = 0
     errors = []
     try:
+        grade, class_num = _validated_scope(db, class_num)
         for line in [l.strip() for l in payload.raw_text.split("\n") if l.strip()]:
             parts = split_colon(line)
             if not parts:
@@ -250,14 +319,14 @@ async def hw_add_special(payload: SpecialPayload):
             left, right = parts
             if payload.mode == "by_type":
                 for name in split_names(right):
-                    sid = _find_student_id(db, name)
+                    sid = _find_student_id(db, name, grade, class_num)
                     if not sid:
                         errors.append(f"找不到学生: {name}")
                         continue
                     db.add(SpecialRecord(student_id=sid, date=date, type=left, note=None))
                     added += 1
             else:
-                sid = _find_student_id(db, left)
+                sid = _find_student_id(db, left, grade, class_num)
                 if not sid:
                     errors.append(f"找不到学生: {left}")
                     continue
@@ -271,14 +340,19 @@ async def hw_add_special(payload: SpecialPayload):
 
 
 @router.get("/homework/special-records")
-async def hw_get_special(date: str = ""):
+async def hw_get_special(date: str = "", class_num: Optional[int] = None):
     target = date or _today()
     db = next(get_db())
     try:
+        grade, class_num = _validated_scope(db, class_num)
         rows = (
             db.query(SpecialRecord, ClassRoster)
             .join(ClassRoster, ClassRoster.student_id == SpecialRecord.student_id)
-            .filter(SpecialRecord.date == target)
+            .filter(
+                SpecialRecord.date == target,
+                ClassRoster.grade == grade,
+                ClassRoster.class_num == class_num,
+            )
             .order_by(SpecialRecord.type, ClassRoster.name)
             .all()
         )
@@ -291,10 +365,23 @@ async def hw_get_special(date: str = ""):
 
 
 @router.delete("/homework/special-records/{record_id}")
-async def hw_delete_special(record_id: int):
+async def hw_delete_special(record_id: int, class_num: Optional[int] = None):
     db = next(get_db())
     try:
-        db.query(SpecialRecord).filter(SpecialRecord.id == record_id).delete()
+        grade, class_num = _validated_scope(db, class_num)
+        record = (
+            db.query(SpecialRecord)
+            .join(ClassRoster, ClassRoster.student_id == SpecialRecord.student_id)
+            .filter(
+                SpecialRecord.id == record_id,
+                ClassRoster.grade == grade,
+                ClassRoster.class_num == class_num,
+            )
+            .first()
+        )
+        if record is None:
+            raise HTTPException(status_code=404, detail="当前班级中不存在该记录")
+        db.delete(record)
         db.commit()
         return {"success": True}
     finally:
@@ -305,19 +392,23 @@ async def hw_delete_special(record_id: int):
 
 @router.get("/homework/manage/records")
 async def hw_manage_list(date: str = "", student: str = "", subject: str = "",
-                         start_date: str = "", end_date: str = ""):
+                         start_date: str = "", end_date: str = "",
+                         class_num: Optional[int] = None):
     from sqlalchemy import or_
     from app.homework.service import _subject_keywords
 
     db = next(get_db())
     try:
+        grade, class_num = _validated_scope(db, class_num)
         rec_q = (
             db.query(HomeworkRecord, ClassRoster)
             .join(ClassRoster, ClassRoster.student_id == HomeworkRecord.student_id)
+            .filter(ClassRoster.grade == grade, ClassRoster.class_num == class_num)
         )
         sp_q = (
             db.query(SpecialRecord, ClassRoster)
             .join(ClassRoster, ClassRoster.student_id == SpecialRecord.student_id)
+            .filter(ClassRoster.grade == grade, ClassRoster.class_num == class_num)
         )
         if start_date and end_date:
             rec_q = rec_q.filter(HomeworkRecord.date >= start_date, HomeworkRecord.date <= end_date)
@@ -364,12 +455,23 @@ class UpdateRecordPayload(BaseModel):
 
 
 @router.put("/homework/manage/records/{record_id}")
-async def hw_manage_update(record_id: int, payload: UpdateRecordPayload):
+async def hw_manage_update(record_id: int, payload: UpdateRecordPayload,
+                           class_num: Optional[int] = None):
     db = next(get_db())
     try:
-        rec = db.query(HomeworkRecord).filter(HomeworkRecord.id == record_id).first()
+        grade, class_num = _validated_scope(db, class_num)
+        rec = (
+            db.query(HomeworkRecord)
+            .join(ClassRoster, ClassRoster.student_id == HomeworkRecord.student_id)
+            .filter(
+                HomeworkRecord.id == record_id,
+                ClassRoster.grade == grade,
+                ClassRoster.class_num == class_num,
+            )
+            .first()
+        )
         if not rec:
-            raise HTTPException(404, "记录不存在")
+            raise HTTPException(404, "当前班级中不存在该记录")
         rec.subject = payload.subject
         rec.content = payload.content
         rec.remark = payload.remark
@@ -381,10 +483,22 @@ async def hw_manage_update(record_id: int, payload: UpdateRecordPayload):
 
 
 @router.delete("/homework/manage/records/{record_id}")
-async def hw_manage_delete(record_id: int):
+async def hw_manage_delete(record_id: int, class_num: Optional[int] = None):
     db = next(get_db())
     try:
-        rec = db.query(HomeworkRecord).filter(HomeworkRecord.id == record_id).first()
+        grade, class_num = _validated_scope(db, class_num)
+        rec = (
+            db.query(HomeworkRecord)
+            .join(ClassRoster, ClassRoster.student_id == HomeworkRecord.student_id)
+            .filter(
+                HomeworkRecord.id == record_id,
+                ClassRoster.grade == grade,
+                ClassRoster.class_num == class_num,
+            )
+            .first()
+        )
+        if rec is None:
+            raise HTTPException(404, "当前班级中不存在该记录")
         rec_date = rec.date if rec else None
         if rec:
             db.delete(rec)
@@ -399,13 +513,12 @@ async def hw_manage_delete(record_id: int):
 # ─────────────────────────── 花名册 ───────────────────────────
 
 @router.get("/homework/roster")
-async def hw_roster():
+async def hw_roster(class_num: Optional[int] = None):
     db = next(get_db())
     try:
-        active_grade = service.get_active_grade(db)
+        query, _, _ = _scope_roster_query(db, class_num)
         rows = (
-            db.query(ClassRoster)
-            .filter(ClassRoster.grade == active_grade)
+            query
             .order_by(ClassRoster.excluded.asc(), ClassRoster.seat_no.asc())
             .all()
         )
@@ -430,7 +543,7 @@ class AddStudentPayload(BaseModel):
     student_id: Optional[str] = None
     seat_no: Optional[int] = None
     gender: Optional[str] = None
-    class_num: int = 6
+    class_num: Optional[int] = None
     grade: Optional[int] = None
 
 
@@ -441,11 +554,28 @@ async def hw_add_student(payload: AddStudentPayload):
         raise HTTPException(400, "姓名不能为空")
     db = next(get_db())
     try:
-        grade = payload.grade if payload.grade is not None else service.get_active_grade(db)
-        if db.query(ClassRoster).filter(ClassRoster.name == name).first():
+        grade, class_num = _validated_scope(db, payload.class_num)
+        if payload.grade is not None and int(payload.grade) != grade:
+            raise HTTPException(status_code=409, detail="请求年级与当前作用域不一致")
+        if db.query(ClassRoster).filter(
+            ClassRoster.name == name,
+            ClassRoster.grade == grade,
+            ClassRoster.class_num == class_num,
+        ).first():
             raise HTTPException(400, f"学生 {name} 已存在")
-        sid = payload.student_id or f"HW-{payload.seat_no or name}"
-        db.add(ClassRoster(student_id=sid, name=name, class_num=payload.class_num,
+        if payload.student_id:
+            sid = payload.student_id.strip()
+            if db.query(ClassRoster).filter(ClassRoster.student_id == sid).first():
+                raise HTTPException(400, f"学号 {sid} 已存在")
+        else:
+            token = str(payload.seat_no) if payload.seat_no is not None else name
+            base_sid = f"HW-{grade}-{class_num}-{token}"
+            sid = base_sid
+            suffix = 2
+            while db.query(ClassRoster).filter(ClassRoster.student_id == sid).first():
+                sid = f"{base_sid}-{suffix}"
+                suffix += 1
+        db.add(ClassRoster(student_id=sid, name=name, class_num=class_num,
                            seat_no=payload.seat_no, gender=payload.gender, excluded=0,
                            grade=grade))
         db.commit()
@@ -455,9 +585,10 @@ async def hw_add_student(payload: AddStudentPayload):
 
 
 @router.delete("/homework/roster/{student_id}")
-async def hw_delete_student(student_id: str):
+async def hw_delete_student(student_id: str, class_num: Optional[int] = None):
     db = next(get_db())
     try:
+        _scoped_roster_row(db, student_id, class_num)
         dates = [
             r[0] for r in db.query(HomeworkRecord.date)
             .filter(HomeworkRecord.student_id == student_id).distinct().all()
@@ -474,12 +605,10 @@ async def hw_delete_student(student_id: str):
 
 
 @router.put("/homework/roster/{student_id}/toggle-excluded")
-async def hw_toggle_excluded(student_id: str):
+async def hw_toggle_excluded(student_id: str, class_num: Optional[int] = None):
     db = next(get_db())
     try:
-        r = db.query(ClassRoster).filter(ClassRoster.student_id == student_id).first()
-        if not r:
-            raise HTTPException(404, "学生不存在")
+        r = _scoped_roster_row(db, student_id, class_num)
         r.excluded = 0 if r.excluded else 1
         db.commit()
         return {"success": True, "excluded": r.excluded}
@@ -496,18 +625,20 @@ class SemesterPayload(BaseModel):
 
 
 @router.get("/homework/semester")
-async def hw_get_semester():
+async def hw_get_semester(class_num: Optional[int] = None):
     db = next(get_db())
     try:
+        _validated_scope(db, class_num)
         return service.get_semester(db)
     finally:
         db.close()
 
 
 @router.put("/homework/semester")
-async def hw_set_semester(payload: SemesterPayload):
+async def hw_set_semester(payload: SemesterPayload, class_num: Optional[int] = None):
     db = next(get_db())
     try:
+        _validated_scope(db, class_num)
         return service.set_semester(db, payload.model_dump(exclude_none=True))
     finally:
         db.close()

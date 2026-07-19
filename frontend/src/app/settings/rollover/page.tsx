@@ -31,8 +31,6 @@ import {
 import {
   Tabs,
   TabsContent,
-  TabsList,
-  TabsTrigger,
 } from '@/components/ui/tabs'
 import {
   Select,
@@ -49,6 +47,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { useHomeroomScope } from '@/components/providers/HomeroomScopeProvider'
+import { PageHeader } from '@/components/patterns/PageHeader'
+import { StatePanel } from '@/components/patterns/StatePanel'
+import { StepWizard } from '@/components/patterns/StepWizard'
 
 // ─────────────────────────── 类型 ───────────────────────────
 
@@ -126,14 +128,20 @@ interface ImportResult {
 
 const DASH = '—'
 
-async function safeJson<T>(url: string): Promise<T | null> {
-  try {
-    const res = await fetch(url)
-    if (!res.ok) return null
-    return (await res.json()) as T
-  } catch {
-    return null
+async function requestJson<T>(url: string, init?: RequestInit, fallback = '操作失败'): Promise<T> {
+  const response = await fetch(url, init)
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { detail?: string; message?: string } | null
+    throw new Error(body?.detail || body?.message || `${fallback}（HTTP ${response.status}）`)
   }
+  return (await response.json()) as T
+}
+
+function displayError(cause: unknown, fallback: string): string {
+  if (cause instanceof Error && cause.message && cause.message !== 'Failed to fetch') {
+    return cause.message
+  }
+  return `${fallback}，请检查网络后重试`
 }
 
 const CLASS_NUMS = Array.from({ length: 30 }, (_, i) => i + 1)
@@ -141,9 +149,12 @@ const CLASS_NUMS = Array.from({ length: 30 }, (_, i) => i + 1)
 // ─────────────────────────── 页面 ───────────────────────────
 
 export default function RolloverWizardPage() {
+  const { refreshTeacher } = useHomeroomScope()
   const [tab, setTab] = useState<'step1' | 'step2' | 'step3'>('step1')
 
   const [teacher, setTeacher] = useState<TeacherInfo | null>(null)
+  const [teacherLoading, setTeacherLoading] = useState(true)
+  const [teacherError, setTeacherError] = useState<string | null>(null)
   const [activeGrade, setActiveGrade] = useState<number | null>(null)
 
   // Step 1
@@ -157,14 +168,21 @@ export default function RolloverWizardPage() {
   // Step 2
   const [preview, setPreview] = useState<Preview | null>(null)
   const [previewBusy, setPreviewBusy] = useState(false)
+  const [previewError, setPreviewError] = useState<string | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
   const [crosswalkOpen, setCrosswalkOpen] = useState(false)
 
   const loadTeacher = useCallback(async () => {
-    const t = await safeJson<TeacherInfo>('/api/teacher')
-    if (t) {
+    setTeacherLoading(true)
+    setTeacherError(null)
+    try {
+      const t = await requestJson<TeacherInfo>('/api/teacher', { cache: 'no-store' }, '班级配置加载失败')
       setTeacher(t)
       setActiveGrade(t.active_grade)
+    } catch (cause) {
+      setTeacherError(displayError(cause, '班级配置加载失败'))
+    } finally {
+      setTeacherLoading(false)
     }
   }, [])
 
@@ -191,15 +209,16 @@ export default function RolloverWizardPage() {
     if (effectiveClassNum == null) return
     setBindMsg(null)
     const g = Number(targetGrade)
-    const res = await fetch(
-      `/api/teacher/bind-class?class_num=${effectiveClassNum}&grade=${g}`,
-      { method: 'POST' },
-    )
-    if (res.ok) {
+    try {
+      await requestJson('/api/teacher/bind-class', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ class_num: effectiveClassNum, grade: g }),
+      }, '绑定失败')
       setBindMsg(`已绑定 高${g}（${effectiveClassNum} 班）`)
-      await loadTeacher()
-    } else {
-      setBindMsg('绑定失败')
+      await Promise.all([loadTeacher(), refreshTeacher()])
+    } catch (cause) {
+      setBindMsg(displayError(cause, '绑定失败'))
     }
   }
 
@@ -223,7 +242,7 @@ export default function RolloverWizardPage() {
     setRosterBusy(true)
     setRosterMsg(null)
     try {
-      const res = await fetch('/api/rollover/roster', {
+      const data = await requestJson<RosterResult>('/api/rollover/roster', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -231,13 +250,10 @@ export default function RolloverWizardPage() {
           grade: Number(targetGrade),
           class_num: effectiveClassNum,
         }),
-      })
-      if (res.ok) {
-        const data: RosterResult = await res.json()
-        setRosterMsg(`已从成绩派生名册：新增 ${data.created}、更新 ${data.updated}、共 ${data.total}`)
-      } else {
-        setRosterMsg('派生名册失败，请确认已上传该班成绩')
-      }
+      }, '派生名册失败')
+      setRosterMsg(`已从成绩派生名册：新增 ${data.created}、更新 ${data.updated}、共 ${data.total}`)
+    } catch (cause) {
+      setRosterMsg(displayError(cause, '派生名册失败'))
     } finally {
       setRosterBusy(false)
     }
@@ -253,7 +269,7 @@ export default function RolloverWizardPage() {
     setRosterBusy(true)
     setRosterMsg(null)
     try {
-      const res = await fetch('/api/rollover/roster', {
+      const data = await requestJson<RosterResult>('/api/rollover/roster', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -262,14 +278,11 @@ export default function RolloverWizardPage() {
           class_num: effectiveClassNum,
           rows: rows.map((r) => ({ student_id: r.student_id, name: r.name ?? null })),
         }),
-      })
-      if (res.ok) {
-        const data: RosterResult = await res.json()
-        setRosterMsg(`名册已写入：新增 ${data.created}、更新 ${data.updated}、共 ${data.total}`)
-        setRosterText('')
-      } else {
-        setRosterMsg('写入名册失败')
-      }
+      }, '写入名册失败')
+      setRosterMsg(`名册已写入：新增 ${data.created}、更新 ${data.updated}、共 ${data.total}`)
+      setRosterText('')
+    } catch (cause) {
+      setRosterMsg(displayError(cause, '写入名册失败'))
     } finally {
       setRosterBusy(false)
     }
@@ -279,14 +292,22 @@ export default function RolloverWizardPage() {
   const loadPreview = useCallback(async () => {
     if (effectiveClassNum == null) {
       setPreview(null)
+      setPreviewError(null)
       return
     }
     setPreviewBusy(true)
+    setPreviewError(null)
     try {
-      const data = await safeJson<Preview>(
-        `/api/rollover/preview?grade=${Number(targetGrade)}&class_num=${effectiveClassNum}`,
-      )
+      const response = await fetch(`/api/rollover/preview?grade=${Number(targetGrade)}&class_num=${effectiveClassNum}`, { cache: 'no-store' })
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as { detail?: string } | null
+        throw new Error(body?.detail || `换届预览加载失败 (${response.status})`)
+      }
+      const data = (await response.json()) as Preview
       setPreview(data)
+    } catch (cause) {
+      setPreview(null)
+      setPreviewError(displayError(cause, '换届预览加载失败'))
     } finally {
       setPreviewBusy(false)
     }
@@ -294,44 +315,44 @@ export default function RolloverWizardPage() {
 
   async function linkG1(g2_sid: string, g1_sid: string, name?: string | null) {
     setMsg(null)
-    const res = await fetch('/api/rollover/link', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ g2_student_id: g2_sid, g1_student_id: g1_sid, name: name ?? null }),
-    })
-    if (res.ok) {
-      setMsg(`已关联 ${name ?? g2_sid} → 高一 ${g1_sid}`)
+    try {
+      await requestJson('/api/rollover/link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ g2_student_id: g2_sid, g1_student_id: g1_sid, name: name ?? null, grade: Number(targetGrade) }),
+      }, '关联失败')
+      setMsg(`已关联 ${name ?? g2_sid} → 高${Number(targetGrade) - 1} ${g1_sid}`)
       await loadPreview()
-    } else {
-      setMsg('关联失败')
+    } catch (cause) {
+      setMsg(displayError(cause, '关联失败'))
     }
   }
 
   async function markNew(g2_sid: string, name?: string | null) {
-    // 不传 g1_student_id：作为独立新学生解析/建立 identity，不挂高一学号
+    // 不传上一年级学号：作为独立新学生解析/建立 identity。
     setMsg(null)
-    const res = await fetch('/api/rollover/link', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ g2_student_id: g2_sid, name: name ?? null, grade: Number(targetGrade) }),
-    })
-    if (res.ok) {
-      setMsg(`已确认 ${name ?? g2_sid} 为新学生（不关联高一）`)
+    try {
+      await requestJson('/api/rollover/link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ g2_student_id: g2_sid, name: name ?? null, grade: Number(targetGrade) }),
+      }, '操作失败')
+      setMsg(`已确认 ${name ?? g2_sid} 为新学生（不关联高${Number(targetGrade) - 1}）`)
       await loadPreview()
-    } else {
-      setMsg('操作失败')
+    } catch (cause) {
+      setMsg(displayError(cause, '操作失败'))
     }
   }
 
   async function unlink(student_id: string) {
     if (!confirm(`解除 ${student_id} 的跨学年关联？`)) return
     setMsg(null)
-    const res = await fetch(`/api/rollover/link/${student_id}`, { method: 'DELETE' })
-    if (res.ok) {
+    try {
+      await requestJson(`/api/rollover/link/${student_id}`, { method: 'DELETE' }, '解除失败')
       setMsg(`已解除关联 ${student_id}`)
       await loadPreview()
-    } else {
-      setMsg('解除失败')
+    } catch (cause) {
+      setMsg(displayError(cause, '解除失败'))
     }
   }
 
@@ -339,52 +360,54 @@ export default function RolloverWizardPage() {
   async function switchActiveGrade() {
     if (activeGrade == null) return
     setMsg(null)
-    const res = await fetch('/api/rollover/active-grade', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ grade: activeGrade }),
-    })
-    if (res.ok) {
+    try {
+      await requestJson('/api/rollover/active-grade', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ grade: activeGrade }),
+      }, '切换失败')
       setMsg(`作业看板已切换到 高${activeGrade}`)
-    } else {
-      setMsg('切换失败')
+      await Promise.all([loadTeacher(), refreshTeacher()])
+    } catch (cause) {
+      setMsg(displayError(cause, '切换失败'))
     }
   }
 
   return (
     <div className="space-y-6">
-      <Link
-        href="/"
-        className="inline-flex items-center gap-1 text-sm text-slate-600 hover:text-slate-900"
-      >
-        <ChevronLeft className="h-4 w-4" />
-        返回仪表盘
-      </Link>
+      <PageHeader
+        title="升级换届向导"
+        description="把上一学年的身份和作业名册平滑迁移到新年级；同名学生始终由你逐人确认。"
+        actions={<Button asChild variant="outline"><Link href="/"><ChevronLeft className="h-4 w-4" />返回仪表盘</Link></Button>}
+      />
 
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight text-slate-900">升级换届向导</h1>
-        <p className="mt-1 text-sm text-slate-500">
-          把高一身份、作业名册平滑迁移到高二 / 高三。系统绝不按姓名自动合并——每个同名都需你亲自辨认。
-        </p>
-      </div>
+      {teacherLoading && <StatePanel tone="loading" title="正在读取班级与换届状态" />}
+      {teacherError && <StatePanel tone="error" title="无法读取班级配置" description={teacherError} action={<Button variant="outline" onClick={loadTeacher}><RefreshCw className="h-4 w-4" />重试</Button>} />}
 
       {teacher?.has_pending_rollover && (
         <Card className="border-warning-500 bg-warning-50">
           <CardContent className="flex items-start gap-2 py-3">
             <AlertTriangle className="mt-0.5 h-4 w-4 text-warning-700" />
             <div className="text-sm text-warning-700">
-              检测到已上传高二成绩但尚未完成身份迁移。请按下面的三步把高一历史挂到高二学号上，学生画像里的跨学年趋势才能连续。
+              检测到已上传新年级成绩但尚未完成身份迁移。请按下面的三步把上一年级历史挂到新学号上，学生画像里的跨学年趋势才能连续。
             </div>
           </CardContent>
         </Card>
       )}
 
-      <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)}>
-        <TabsList className="w-full justify-start">
-          <TabsTrigger value="step1">1 · 设定高二班</TabsTrigger>
-          <TabsTrigger value="step2">2 · 逐人判定</TabsTrigger>
-          <TabsTrigger value="step3">3 · 切换看板年级</TabsTrigger>
-        </TabsList>
+      {!teacherLoading && !teacherError && <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)}>
+        <Card className="p-4">
+          <StepWizard
+            steps={[
+              { key: 'step1', title: '绑定与名册', description: '设定目标行政班' },
+              { key: 'step2', title: '逐人判定', description: '确认身份接续' },
+              { key: 'step3', title: '切换年级', description: '启用新学年看板' },
+            ]}
+            current={tab}
+            completed={tab === 'step3' ? ['step1', 'step2'] : tab === 'step2' ? ['step1'] : []}
+            onStepChange={(key) => setTab(key as typeof tab)}
+          />
+        </Card>
 
         {/* ───────────── Step 1 ───────────── */}
         <TabsContent value="step1" className="space-y-6">
@@ -392,7 +415,7 @@ export default function RolloverWizardPage() {
             <CardHeader>
               <CardTitle className="text-base">目标年级与行政班</CardTitle>
               <CardDescription>
-                选择你要结转到的年级与班号。确认后会写入「我的班级」绑定（高一历史按此班号匹配）。
+                选择你要结转到的年级与班号。确认后会写入「我的班级」绑定（上一年级历史按此班号匹配）。
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -494,6 +517,7 @@ export default function RolloverWizardPage() {
           <PreviewStep
             preview={preview}
             busy={previewBusy}
+            error={previewError}
             classNum={effectiveClassNum}
             grade={Number(targetGrade)}
             msg={msg}
@@ -514,7 +538,7 @@ export default function RolloverWizardPage() {
             <CardHeader>
               <CardTitle className="text-base">切换作业看板年级</CardTitle>
               <CardDescription>
-                作业看板、排行、预警只看「当前年级」。切换后，历史高一缺交仍在每个学生的画像里可见，但不再混入看板。
+                作业看板、排行、预警只看「当前年级」。切换后，上一年级缺交仍在每个学生的画像里可见，但不再混入看板。
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -529,13 +553,21 @@ export default function RolloverWizardPage() {
                       <SelectValue placeholder="选择年级" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="1">高一</SelectItem>
-                      <SelectItem value="2">高二</SelectItem>
-                      <SelectItem value="3">高三</SelectItem>
+                      {teacher?.target_class_high1 != null && <SelectItem value="1">高一</SelectItem>}
+                      {teacher?.target_class_high2 != null && <SelectItem value="2">高二</SelectItem>}
+                      {teacher?.target_class_high3 != null && <SelectItem value="3">高三</SelectItem>}
                     </SelectContent>
                   </Select>
                 </div>
-                <Button onClick={switchActiveGrade} disabled={activeGrade == null}>
+                <Button
+                  onClick={switchActiveGrade}
+                  disabled={
+                    activeGrade == null ||
+                    (activeGrade === 1 && teacher?.target_class_high1 == null) ||
+                    (activeGrade === 2 && teacher?.target_class_high2 == null) ||
+                    (activeGrade === 3 && teacher?.target_class_high3 == null)
+                  }
+                >
                   把作业看板切到高{activeGrade ?? DASH}
                 </Button>
                 {msg && <span className="text-sm text-success-600">{msg}</span>}
@@ -549,7 +581,7 @@ export default function RolloverWizardPage() {
             </CardContent>
           </Card>
         </TabsContent>
-      </Tabs>
+      </Tabs>}
     </div>
   )
 }
@@ -559,6 +591,7 @@ export default function RolloverWizardPage() {
 interface PreviewStepProps {
   preview: Preview | null
   busy: boolean
+  error: string | null
   classNum: number | null
   grade: number
   msg: string | null
@@ -575,6 +608,7 @@ interface PreviewStepProps {
 function PreviewStep({
   preview,
   busy,
+  error,
   classNum,
   grade,
   msg,
@@ -616,6 +650,7 @@ function PreviewStep({
           </div>
         </CardHeader>
         <CardContent className="space-y-2">
+          {error && <StatePanel tone="error" title="换届预览加载失败" description={error} action={<Button variant="outline" onClick={onLoad}><RefreshCw className="h-4 w-4" />重试</Button>} className="mb-3" />}
           {msg && <div className="text-sm text-success-600">{msg}</div>}
           {preview ? (
             <div className="flex flex-wrap gap-2 text-xs text-slate-500">
@@ -639,7 +674,7 @@ function PreviewStep({
           <BucketCard
             title="继承"
             tone="success"
-            hint="已自动关联到高一学号（同名且学号匹配）。可解除关联。"
+            hint={`已关联到高${grade - 1}学号。可解除关联。`}
             count={preview.summary.inherited}
             empty="暂无继承学生"
             rows={preview.inherited.map((r) => ({
@@ -664,18 +699,19 @@ function PreviewStep({
           {/* 同名待确认 */}
           <AmbiguousBucket
             rows={preview.ambiguous}
+            grade={grade}
             onLink={onLink}
             onMarkNew={onMarkNew}
           />
 
           {/* 新学生 */}
-          <NewBucket rows={preview.new} onLink={onLink} setMsg={setMsg} />
+          <NewBucket rows={preview.new} grade={grade} onLink={onLink} setMsg={setMsg} />
 
           {/* 无成绩 */}
           <BucketCard
             title="无成绩数据"
             tone="slate"
-            hint="花名册里有、但高二级暂无成绩。等高二成绩上传 / 核对学号后再次刷新即可。"
+            hint={`花名册里有、但高${grade}暂无成绩。等成绩上传 / 核对学号后再次刷新即可。`}
             count={preview.summary.unmatched}
             empty="暂无"
             rows={preview.unmatched.map((r) => ({
@@ -716,6 +752,7 @@ function PreviewStep({
 
       <CrosswalkDialog
         open={crosswalkOpen}
+        grade={grade}
         onOpenChange={setCrosswalkOpen}
         onDone={onCrosswalkDone}
       />
@@ -815,10 +852,12 @@ function BucketCard({
 // ─── 同名待确认（带候选 Dialog） ───
 function AmbiguousBucket({
   rows,
+  grade,
   onLink,
   onMarkNew,
 }: {
   rows: AmbiguousRow[]
+  grade: number
   onLink: (g2_sid: string, g1_sid: string, name?: string | null) => void
   onMarkNew: (g2_sid: string, name?: string | null) => void
 }) {
@@ -833,7 +872,7 @@ function AmbiguousBucket({
           <span className="text-sm font-normal text-slate-400">{rows.length}</span>
         </CardTitle>
         <CardDescription>
-          这些高二学生与高一某生同名，但学号不同。点「辨认」逐个确认——切勿批量自动合并，避免把两个同名误并为一人。
+          这些高{grade}学生与高{grade - 1}某生同名，但学号不同。点「辨认」逐个确认——切勿批量自动合并，避免把两个同名误并为一人。
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -845,7 +884,7 @@ function AmbiguousBucket({
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="w-40">高二学号</TableHead>
+                    <TableHead className="w-40">高{grade}学号</TableHead>
                     <TableHead>姓名</TableHead>
                     <TableHead>候选数</TableHead>
                     <TableHead className="text-right">操作</TableHead>
@@ -857,7 +896,7 @@ function AmbiguousBucket({
                       <TableCell className="font-mono text-slate-500">{r.student_id}</TableCell>
                       <TableCell className="font-medium">{r.name ?? DASH}</TableCell>
                       <TableCell>
-                        <Badge variant="warning">{r.candidates.length} 个高一同名</Badge>
+                        <Badge variant="warning">{r.candidates.length} 个高{grade - 1}同名</Badge>
                       </TableCell>
                       <TableCell className="text-right">
                         <Button variant="outline" size="sm" onClick={() => setOpenFor(r)}>
@@ -880,7 +919,7 @@ function AmbiguousBucket({
                   </div>
                   <div className="mt-1 font-mono text-xs text-slate-500">{r.student_id}</div>
                   <div className="mt-1">
-                    <Badge variant="warning">{r.candidates.length} 个高一同名</Badge>
+                    <Badge variant="warning">{r.candidates.length} 个高{grade - 1}同名</Badge>
                   </div>
                 </div>
               ))}
@@ -891,6 +930,7 @@ function AmbiguousBucket({
 
       <CandidateDialog
         row={openFor}
+        grade={grade}
         onOpenChange={(v) => !v && setOpenFor(null)}
         onLink={(g1_sid) => {
           if (openFor) onLink(openFor.student_id, g1_sid, openFor.name)
@@ -907,11 +947,13 @@ function AmbiguousBucket({
 
 function CandidateDialog({
   row,
+  grade,
   onOpenChange,
   onLink,
   onMarkNew,
 }: {
   row: AmbiguousRow | null
+  grade: number
   onOpenChange: (v: boolean) => void
   onLink: (g1_sid: string) => void
   onMarkNew: () => void
@@ -922,7 +964,7 @@ function CandidateDialog({
         <DialogHeader>
           <DialogTitle>辨认同名 · {row?.name ?? ''}</DialogTitle>
           <DialogDescription>
-            高二学号 <span className="font-mono">{row?.student_id}</span>。请逐一对比下面的高一候选人，确认是否为同一人。
+            高{grade}学号 <span className="font-mono">{row?.student_id}</span>。请逐一对比下面的高{grade - 1}候选人，确认是否为同一人。
           </DialogDescription>
         </DialogHeader>
 
@@ -945,10 +987,10 @@ function CandidateDialog({
                       </Badge>
                     )}
                   </div>
-                  <div className="font-mono text-xs text-slate-500">高一学号 {c.student_id}</div>
+                  <div className="font-mono text-xs text-slate-500">高{grade - 1}学号 {c.student_id}</div>
                   <div className="text-xs text-slate-500">
-                    高一行政班：
-                    {formatClassLabel(1, c.class_num) ?? DASH}
+                    高{grade - 1}行政班：
+                    {formatClassLabel(grade - 1, c.class_num) ?? DASH}
                     {' · '}
                     {c.latest_exam_name ?? '无考试'}：
                     主三门 {c.latest_main_score ?? DASH} 分 / 名次 {c.latest_main_rank ?? DASH}
@@ -958,7 +1000,7 @@ function CandidateDialog({
                   size="sm"
                   onClick={() => onLink(c.student_id)}
                   disabled={c.already_linked}
-                  title={c.already_linked ? '该高一学号已被关联到别人' : undefined}
+                  title={c.already_linked ? `该高${grade - 1}学号已被关联到别人` : undefined}
                 >
                   是某某（关联）
                 </Button>
@@ -980,13 +1022,15 @@ function CandidateDialog({
   )
 }
 
-// ─── 新学生（导入高一成绩 / 手动关联） ───
+// ─── 新学生（导入上一年级成绩 / 手动关联） ───
 function NewBucket({
   rows,
+  grade,
   onLink,
   setMsg,
 }: {
   rows: SimpleRow[]
+  grade: number
   onLink: (g2_sid: string, g1_sid: string, name?: string | null) => void
   setMsg: (m: string | null) => void
 }) {
@@ -1003,7 +1047,7 @@ function NewBucket({
           <span className="text-sm font-normal text-slate-400">{rows.length}</span>
         </CardTitle>
         <CardDescription>
-          没有匹配到高一同名的学生。如确有高一历史，可手动关联学号或直接导入高一成绩。
+          没有匹配到高{grade - 1}同名的学生。如确有历史，可手动关联学号或直接导入高{grade - 1}成绩。
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -1029,7 +1073,7 @@ function NewBucket({
                         <div className="flex justify-end gap-2">
                           <Button variant="outline" size="sm" onClick={() => setImportFor(r)}>
                             <Upload className="mr-1 h-3.5 w-3.5" />
-                            导入高一成绩
+                            导入高{grade - 1}成绩
                           </Button>
                           <Button variant="ghost" size="sm" onClick={() => setLinkFor(r)}>
                             <Link2 className="mr-1 h-3.5 w-3.5" />
@@ -1052,7 +1096,7 @@ function NewBucket({
                   <div className="flex flex-wrap gap-2">
                     <Button variant="outline" size="sm" onClick={() => setImportFor(r)}>
                       <Upload className="mr-1 h-3.5 w-3.5" />
-                      导入高一成绩
+                      导入高{grade - 1}成绩
                     </Button>
                     <Button variant="ghost" size="sm" onClick={() => setLinkFor(r)}>
                       <Link2 className="mr-1 h-3.5 w-3.5" />
@@ -1066,22 +1110,22 @@ function NewBucket({
         )}
       </CardContent>
 
-      <ImportHistoryDialog row={importFor} onOpenChange={(v) => !v && setImportFor(null)} setMsg={setMsg} />
+      <ImportHistoryDialog row={importFor} grade={grade} onOpenChange={(v) => !v && setImportFor(null)} setMsg={setMsg} />
 
       <Dialog open={linkFor != null} onOpenChange={(v) => !v && setLinkFor(null)}>
         <DialogContent className="max-sm:h-screen max-sm:w-screen max-sm:max-w-none max-sm:rounded-none max-sm:p-4">
           <DialogHeader>
-            <DialogTitle>手动关联高一学号 · {linkFor?.name ?? ''}</DialogTitle>
+            <DialogTitle>手动关联高{grade - 1}学号 · {linkFor?.name ?? ''}</DialogTitle>
             <DialogDescription>
-              输入该生的高一学号，建立跨学年关联（用于连续跨学年趋势）。
+              输入该生的高{grade - 1}学号，建立跨学年关联（用于连续跨学年趋势）。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <label className="text-sm text-slate-600">高一学号</label>
+            <label className="text-sm text-slate-600">高{grade - 1}学号</label>
             <input
               value={manualSid}
               onChange={(e) => setManualSid(e.target.value)}
-              placeholder="高一学号"
+              placeholder={`高${grade - 1}学号`}
               className="w-full rounded-md border border-slate-200 p-2 text-base font-mono"
             />
           </div>
@@ -1114,10 +1158,12 @@ function NewBucket({
 
 function ImportHistoryDialog({
   row,
+  grade,
   onOpenChange,
   setMsg,
 }: {
   row: SimpleRow | null
+  grade: number
   onOpenChange: (v: boolean) => void
   setMsg: (m: string | null) => void
 }) {
@@ -1150,7 +1196,7 @@ function ImportHistoryDialog({
         grade_percentile:
           grade_percentile != null && grade_percentile !== '' ? Number(grade_percentile) : null,
         xueji_rank: xueji_rank != null && xueji_rank !== '' ? Number(xueji_rank) : null,
-        grade: 1,
+        grade: grade - 1,
       })
     }
     return out
@@ -1166,18 +1212,15 @@ function ImportHistoryDialog({
     }
     setBusy(true)
     try {
-      const res = await fetch('/api/rollover/import-history', {
+      const data = await requestJson<ImportResult>('/api/rollover/import-history', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ student_id: row.student_id, name: row.name, rows }),
-      })
-      if (res.ok) {
-        const data: ImportResult = await res.json()
-        setResult(data)
-        setMsg(`已导入 ${data.imported} 条高一成绩`)
-      } else {
-        setMsg('导入失败')
-      }
+        body: JSON.stringify({ student_id: row.student_id, name: row.name, target_grade: grade, rows }),
+      }, '导入失败')
+      setResult(data)
+      setMsg(`已导入 ${data.imported} 条高${grade - 1}成绩`)
+    } catch (cause) {
+      setMsg(displayError(cause, '导入失败'))
     } finally {
       setBusy(false)
     }
@@ -1187,9 +1230,9 @@ function ImportHistoryDialog({
     <Dialog open={row != null} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl max-sm:h-screen max-sm:w-screen max-sm:max-w-none max-sm:rounded-none max-sm:p-4">
         <DialogHeader>
-          <DialogTitle>导入高一成绩 · {row?.name ?? ''}</DialogTitle>
+          <DialogTitle>导入高{grade - 1}成绩 · {row?.name ?? ''}</DialogTitle>
           <DialogDescription>
-            把该生的高一历史成绩粘贴进来，建立身份并写入。导入后该生自动从「新学生」移到「继承」。
+            把该生的高{grade - 1}历史成绩粘贴进来，建立身份并写入。导入后该生自动从「新学生」移到「继承」。
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
@@ -1227,25 +1270,29 @@ function ImportHistoryDialog({
 // ─── 导入对照表（批量 link） ───
 function CrosswalkDialog({
   open,
+  grade,
   onOpenChange,
   onDone,
 }: {
   open: boolean
+  grade: number
   onOpenChange: (v: boolean) => void
   onDone: () => void
 }) {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<CrosswalkResult | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (open) {
       setText('')
       setResult(null)
+      setError(null)
     }
   }, [open])
 
-  // 每行：高一学号,高二学号[,姓名]
+  // 每行：上一年级学号,目标年级学号[,姓名]
   function parseRows(text: string) {
     const out: { g1_sid: string; g2_sid: string; name?: string }[] = []
     for (const raw of text.split(/\r?\n/)) {
@@ -1265,17 +1312,18 @@ function CrosswalkDialog({
       return
     }
     setBusy(true)
+    setError(null)
     try {
-      const res = await fetch('/api/rollover/crosswalk', {
+      const data = await requestJson<CrosswalkResult>('/api/rollover/crosswalk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows }),
-      })
-      if (res.ok) {
-        const data: CrosswalkResult = await res.json()
-        setResult(data)
-        onDone()
-      }
+        body: JSON.stringify({ rows, target_grade: grade }),
+      }, '导入对照表失败')
+      setResult(data)
+      onDone()
+    } catch (cause) {
+      setResult(null)
+      setError(displayError(cause, '导入对照表失败'))
     } finally {
       setBusy(false)
     }
@@ -1290,12 +1338,12 @@ function CrosswalkDialog({
             导入对照表（批量关联）
           </DialogTitle>
           <DialogDescription>
-            把高一学号与高二学号成对粘贴，一次批量建立关联。冲突 / 跳过会在下方提示。
+            把高{grade - 1}学号与高{grade}学号成对粘贴，一次批量建立关联。冲突 / 跳过会在下方提示。
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
           <label className="text-sm text-slate-600">
-            每行一对：<code className="rounded bg-slate-100 px-1">高一学号,高二学号[,姓名]</code>
+            每行一对：<code className="rounded bg-slate-100 px-1">高{grade - 1}学号,高{grade}学号[,姓名]</code>
           </label>
           <textarea
             value={text}
@@ -1322,6 +1370,7 @@ function CrosswalkDialog({
             )}
           </div>
         )}
+        {error && <StatePanel tone="error" title="导入对照表失败" description={error} />}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             关闭

@@ -63,7 +63,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
         <Card className="w-full max-w-sm p-6">
-          <h1 className="mb-1 text-lg font-semibold text-slate-800">成绩追踪 · 登录</h1>
+          <h1 className="mb-1 text-lg font-semibold text-slate-800">成绩分析（班主任版）</h1>
           <p className="mb-4 text-sm text-slate-500">外网访问需要输入密码</p>
           <form onSubmit={onSubmit} className="space-y-3">
             <Input

@@ -107,7 +107,10 @@ def classify(db, target_grade, class_num) -> dict:
     # 并入 roster（grade==target_grade）的 student_id
     roster_sids = (
         db.query(ClassRoster.student_id)
-        .filter(ClassRoster.grade == target_grade)
+        .filter(
+            ClassRoster.grade == target_grade,
+            ClassRoster.class_num == class_num,
+        )
         .all()
     )
     sid_set |= {r[0] for r in roster_sids}
@@ -126,6 +129,7 @@ def classify(db, target_grade, class_num) -> dict:
                 .filter(
                     ClassRoster.student_id == sid,
                     ClassRoster.grade == target_grade,
+                    ClassRoster.class_num == class_num,
                 )
                 .first()
             )
@@ -192,6 +196,7 @@ def classify(db, target_grade, class_num) -> dict:
                         .filter(
                             ClassRoster.student_id == tsid,
                             ClassRoster.grade == target_grade,
+                            ClassRoster.class_num == class_num,
                         )
                         .first()
                     )
@@ -314,7 +319,10 @@ def build_roster(
 
     total = (
         db.query(ClassRoster)
-        .filter(ClassRoster.grade == target_grade)
+        .filter(
+            ClassRoster.grade == target_grade,
+            ClassRoster.class_num == class_num,
+        )
         .count()
     )
     return {"created": created, "updated": updated, "total": total}
@@ -323,6 +331,12 @@ def build_roster(
 def set_active_grade(db, grade) -> dict:
     """写入 active_grade 配置行。"""
     from app.db.models import HomeworkSetting
+
+    grade = int(grade)
+    if grade not in (1, 2, 3):
+        raise ValueError("年级必须是 1、2 或 3")
+    if _teacher_target_class(db, grade) is None:
+        raise ValueError(f"高{grade}尚未绑定行政班")
 
     db.merge(HomeworkSetting(key="active_grade", value=str(grade)))
     db.commit()
@@ -336,6 +350,7 @@ def import_history(
     student_id=None,
     link_g1_student_id=None,
     name=None,
+    target_grade=None,
     rows,
 ) -> dict:
     """写 ImportedHistory（按 identity 挂，与全年级统计隔离）。
@@ -359,15 +374,15 @@ def import_history(
         if identity_id is None and (student_id is not None or name is not None):
             identity_id = ensure_identity(db, display_name=name)
             if student_id is not None:
-                # 新建并 link 该 student_id（grade 行内未指明，留空）
-                link_aliases(db, identity_id, [(str(student_id), None)], "manual")
+                link_aliases(db, identity_id, [(str(student_id), target_grade)], "manual")
 
     if identity_id is None:
         return {"identity_id": None, "imported": 0}
 
     # 2) link_g1_student_id 挂到同一 identity
     if link_g1_student_id is not None:
-        link_aliases(db, identity_id, [(str(link_g1_student_id), None)], "manual")
+        previous_grade = target_grade - 1 if target_grade in (2, 3) else None
+        link_aliases(db, identity_id, [(str(link_g1_student_id), previous_grade)], "manual")
 
     # 3) 写历史行
     count = 0

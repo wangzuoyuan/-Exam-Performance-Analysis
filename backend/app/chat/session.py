@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.chat.config import get_chat_config
@@ -81,7 +81,7 @@ def build_system_prompt(context: dict | None = None) -> str:
 
     safe_context = {
         key: context.get(key)
-        for key in ("page", "student_id", "exam_id")
+        for key in ("page", "student_id", "exam_id", "grade", "class_num")
         if context.get(key) is not None
     }
     if not safe_context:
@@ -89,9 +89,42 @@ def build_system_prompt(context: dict | None = None) -> str:
 
     return (
         prompt
-        + "\n\n当前页面上下文（仅用于理解“这个学生/本次考试”等指代，不能替代工具查询数字）："
+        + "\n\n当前班级作用域：只能分析该 grade + class_num 对应的班级；其他班级只能作为对比参照，不得作为报告对象。\n"
+        + "当前页面上下文（仅用于理解“这个学生/本次考试”等指代，不能替代工具查询数字）："
         + json.dumps(safe_context, ensure_ascii=False)
     )
+
+
+def resolve_chat_scope(context: dict | None) -> dict:
+    """在建立 SSE 之前校验前端声明的年级和班级确属当前教师。"""
+    from app.db.models import SessionLocal, Teacher
+
+    if not isinstance(context, dict):
+        raise HTTPException(status_code=409, detail="尚未配置班级作用域，请先绑定班级")
+    try:
+        grade = int(context.get("grade"))
+        class_num = int(context.get("class_num"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=409, detail="尚未配置班级作用域，请先绑定班级")
+    if grade not in (1, 2, 3) or class_num <= 0:
+        raise HTTPException(status_code=409, detail="班级作用域无效，请重新选择")
+
+    db = SessionLocal()
+    try:
+        from app.rollover.service import get_active_grade
+
+        teacher = db.query(Teacher).first()
+        bound_class = getattr(teacher, f"target_class_high{grade}", None) if teacher else None
+        if bound_class is None:
+            raise HTTPException(status_code=409, detail=f"高{grade}尚未绑定班级，请先完成班级配置")
+        if int(bound_class) != class_num:
+            raise HTTPException(status_code=409, detail="请求班级与教师已绑定班级不一致")
+        if int(get_active_grade(db)) != grade:
+            raise HTTPException(status_code=409, detail="请求年级与教师当前选择的年级不一致")
+    finally:
+        db.close()
+
+    return {**context, "grade": grade, "class_num": class_num}
 
 
 def _anthropic_messages_to_openai(messages: list, system_prompt: str) -> list[dict]:
@@ -211,11 +244,26 @@ async def _stream_openai(config, messages: list, context: dict | None):
                     args = json.loads(tc.function.arguments or "{}")
                 except Exception:
                     args = {}
-                yield sse({"type": "tool_call", "name": tc.function.name, "input": args})
+                call_id = str(tc.id)
+                yield sse({"type": "tool_call", "call_id": call_id, "name": tc.function.name, "input": args})
                 try:
-                    result = execute_tool(tc.function.name, args)
+                    result = execute_tool(tc.function.name, args, context)
                 except Exception as exc:
                     result = {"error": str(exc)}
+                if isinstance(result, dict) and result.get("error"):
+                    yield sse({
+                        "type": "tool_error",
+                        "call_id": call_id,
+                        "name": tc.function.name,
+                        "error": str(result["error"]),
+                    })
+                else:
+                    yield sse({
+                        "type": "tool_result",
+                        "call_id": call_id,
+                        "name": tc.function.name,
+                        "output": result,
+                    })
                 chat_messages.append(
                     {
                         "role": "tool",
@@ -313,11 +361,26 @@ async def stream_chat(messages: list, context: dict | None = None):
             elif block.type == "tool_use":
                 assistant_content.append(block_to_message_content(block))
                 args = block.input or {}
-                yield sse({"type": "tool_call", "name": block.name, "input": args})
+                call_id = str(block.id)
+                yield sse({"type": "tool_call", "call_id": call_id, "name": block.name, "input": args})
                 try:
-                    result = execute_tool(block.name, args)
+                    result = execute_tool(block.name, args, context)
                 except Exception as exc:
                     result = {"error": str(exc)}
+                if isinstance(result, dict) and result.get("error"):
+                    yield sse({
+                        "type": "tool_error",
+                        "call_id": call_id,
+                        "name": block.name,
+                        "error": str(result["error"]),
+                    })
+                else:
+                    yield sse({
+                        "type": "tool_result",
+                        "call_id": call_id,
+                        "name": block.name,
+                        "output": result,
+                    })
                 tool_results.append(
                     {
                         "type": "tool_result",
@@ -382,7 +445,7 @@ async def stream_chat(messages: list, context: dict | None = None):
 async def chat(request: Request):
     body = await request.json()
     messages = body.get("messages", [])
-    context = body.get("context", {})
+    context = resolve_chat_scope(body.get("context", {}))
 
     return StreamingResponse(
         stream_chat(messages, context),

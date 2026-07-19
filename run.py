@@ -141,7 +141,7 @@ def cmd_start() -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "raw").mkdir(parents=True, exist_ok=True)
 
-    print("=== 成绩追踪 Web App 启动 ===")
+    print("=== 成绩分析（班主任版）启动 ===")
 
     # 后端
     if port_in_use(BACKEND_PORT):
@@ -201,7 +201,7 @@ def cmd_start() -> int:
 
 
 def cmd_stop() -> int:
-    print("=== 成绩追踪 Web App 停止 ===")
+    print("=== 成绩分析（班主任版）停止 ===")
     any_stopped = False
     for port in (BACKEND_PORT, FRONTEND_PORT):
         pids = pids_on_port(port)
@@ -277,7 +277,7 @@ def cmd_restore(filename: str | None) -> int:
 
 
 def cmd_init() -> int:
-    print("=== 成绩追踪 Web App 全新初始化 ===")
+    print("=== 成绩分析（班主任版）全新初始化 ===")
     print("这会清空本应用的本地数据库、已上传表格、日志和旧备份。")
     print("保留项目代码和 backend/.env 配置文件。")
     print()

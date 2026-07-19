@@ -2,14 +2,14 @@
 
 把旧库的 students / records / special_records / settings 搬入新表
 ClassRoster / HomeworkRecord / SpecialRecord / HomeworkSetting。学生标识
-从「班内序号」改为按姓名匹配成绩库（默认 6 班）的真实学号 student_id；
+从「班内序号」改为按姓名匹配成绩库当前绑定行政班的真实学号 student_id；
 匹配不到的学生用占位学号 HW-<座号或姓名> 并在结尾报告。
 
 幂等：每次运行先清空作业相关表再重新导入，可反复执行。
 
 用法：
     HOMEWORK_DB_PATH=/path/to/homework.db \
-    python -m app.homework.migrate [--class-num 6]
+    python -m app.homework.migrate [--class-num 班号]
 默认源路径指向旧仓库 06_工具项目/作业跟踪/homework.db。
 """
 
@@ -23,6 +23,7 @@ from app.db.models import (
     HomeworkSetting,
     SpecialRecord,
     SubjectScore,
+    Exam,
     get_db,
 )
 
@@ -31,12 +32,13 @@ DEFAULT_SOURCE = os.path.expanduser(
 )
 
 
-def _grade_name_to_student_id(db, class_num):
+def _grade_name_to_student_id(db, class_num, grade):
     """成绩库该班「姓名 → 真实学号」映射。重名时取首个并不致命，
     因为单班作业花名册姓名唯一。"""
     rows = (
         db.query(SubjectScore.name, SubjectScore.student_id)
-        .filter(SubjectScore.class_num == class_num)
+        .join(Exam, Exam.id == SubjectScore.exam_id)
+        .filter(SubjectScore.class_num == class_num, Exam.grade == grade)
         .distinct()
         .all()
     )
@@ -47,7 +49,7 @@ def _grade_name_to_student_id(db, class_num):
     return mapping
 
 
-def migrate(source_path=DEFAULT_SOURCE, class_num=6):
+def migrate(source_path=DEFAULT_SOURCE, class_num=None):
     if not os.path.exists(source_path):
         raise SystemExit(f"找不到源数据库：{source_path}")
 
@@ -56,13 +58,24 @@ def migrate(source_path=DEFAULT_SOURCE, class_num=6):
 
     db = next(get_db())
     try:
-        name_to_sid = _grade_name_to_student_id(db, class_num)
+        from app.homework.service import get_active_class_num, get_active_grade
+
+        active_grade = get_active_grade(db)
+        if class_num is None:
+            class_num = get_active_class_num(db, active_grade)
+        if class_num is None:
+            raise SystemExit("当前年级尚未绑定班级，请通过 --class-num 明确指定")
+        name_to_sid = _grade_name_to_student_id(db, class_num, active_grade)
 
         # 幂等：先清空作业相关表
         db.query(HomeworkRecord).delete()
         db.query(SpecialRecord).delete()
         db.query(ClassRoster).delete()
-        db.query(HomeworkSetting).delete()
+        # active_grade 是全局班级作用域，不属于旧作业库的学期配置。
+        # 迁移时必须保留，否则刚按当前年级导入的数据会立即失去同一作用域来源。
+        db.query(HomeworkSetting).filter(HomeworkSetting.key != "active_grade").delete(
+            synchronize_session=False
+        )
         db.commit()
 
         # 1) 花名册：旧 students → ClassRoster
@@ -92,6 +105,7 @@ def migrate(source_path=DEFAULT_SOURCE, class_num=6):
                     student_id=sid,
                     name=name,
                     class_num=class_num,
+                    grade=active_grade,
                     seat_no=seat_no,
                     gender=row["gender"],
                     excluded=int(row["excluded"] or 0),
@@ -167,6 +181,6 @@ if __name__ == "__main__":
         default=os.environ.get("HOMEWORK_DB_PATH", DEFAULT_SOURCE),
         help="旧 homework.db 路径",
     )
-    parser.add_argument("--class-num", type=int, default=6, help="作业花名册所属班号")
+    parser.add_argument("--class-num", type=int, help="作业花名册所属班号；不填时使用当前绑定班级")
     args = parser.parse_args()
     migrate(args.source, args.class_num)

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useRef, KeyboardEvent, PointerEvent } from 'react'
-import { Bot, Send } from 'lucide-react'
+import { AlertCircle, Bot, Loader2, Send } from 'lucide-react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
@@ -16,11 +16,21 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { cn } from '@/lib/utils'
+import ToolCallCard from '@/components/ToolCallCard'
+import { useHomeroomScope, type HomeroomScope } from '@/components/providers/HomeroomScopeProvider'
+
+interface ToolCall {
+  id: string
+  name: string
+  input: Record<string, unknown>
+  output?: unknown
+  error?: string
+}
 
 interface Message {
   role: 'user' | 'assistant'
   content: string
-  tool_calls?: any[]
+  tool_calls?: ToolCall[]
 }
 
 const DEFAULT_DRAWER_WIDTH = 520
@@ -117,7 +127,7 @@ const markdownComponents: Components = {
   td: ({ children }) => <td className="border-b border-slate-100 px-2 py-1.5">{children}</td>,
 }
 
-function buildPageContext() {
+function buildPageContext(scope: HomeroomScope | null) {
   if (typeof window === 'undefined') return {}
 
   const { pathname, href } = window.location
@@ -128,15 +138,20 @@ function buildPageContext() {
     page: { pathname, href },
     student_id: studentMatch ? decodeURIComponent(studentMatch[1]) : undefined,
     exam_id: examMatch ? Number(examMatch[1]) : undefined,
+    grade: scope?.grade,
+    class_num: scope?.classNum,
   }
 }
 
 export default function ChatDrawer() {
+  const { activeScope, loading: scopeLoading } = useHomeroomScope()
   const [open, setOpen] = useState(false)
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [currentText, setCurrentText] = useState('')
+  const [currentToolCalls, setCurrentToolCalls] = useState<ToolCall[]>([])
+  const [error, setError] = useState<string | null>(null)
   const [drawerWidth, setDrawerWidth] = useState(DEFAULT_DRAWER_WIDTH)
   const [isResizing, setIsResizing] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -198,12 +213,18 @@ export default function ChatDrawer() {
 
   const sendMessage = async () => {
     if (!input.trim() || streaming) return
+    if (!activeScope) {
+      setError('尚未配置当前班级，请先在顶部选择已绑定的班级')
+      return
+    }
 
     const userMsg = { role: 'user' as const, content: input }
     setMessages(prev => [...prev, userMsg])
     setInput('')
     setStreaming(true)
     setCurrentText('')
+    setCurrentToolCalls([])
+    setError(null)
 
     try {
       // 聊天是 SSE 流式、单条可达 60~120s。
@@ -218,8 +239,19 @@ export default function ChatDrawer() {
       const res = await fetch(`${chatBase}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: [...messages, userMsg], context: buildPageContext() }),
+        body: JSON.stringify({ messages: [...messages, userMsg], context: buildPageContext(activeScope) }),
       })
+
+      if (!res.ok) {
+        let detail = `对话请求失败 (${res.status})`
+        try {
+          const body = (await res.json()) as { detail?: string }
+          if (body.detail) detail = body.detail
+        } catch {
+          // 非 JSON 错误保留状态码。
+        }
+        throw new Error(detail)
+      }
 
       const reader = res.body?.getReader()
       if (!reader) return
@@ -228,6 +260,22 @@ export default function ChatDrawer() {
       let done = false
       let buffer = ''
       let assistantText = ''
+      const toolCalls: ToolCall[] = []
+
+      const updateToolCall = (id: string, update: Partial<ToolCall>) => {
+        const index = toolCalls.findIndex((toolCall) => toolCall.id === id)
+        if (index >= 0) toolCalls[index] = { ...toolCalls[index], ...update }
+        else {
+          toolCalls.push({
+            id,
+            name: update.name || '未知工具',
+            input: update.input || {},
+            output: update.output,
+            error: update.error,
+          })
+        }
+        setCurrentToolCalls([...toolCalls])
+      }
 
       const processEvent = (eventText: string) => {
         const dataLine = eventText
@@ -239,6 +287,25 @@ export default function ChatDrawer() {
           if (event.type === 'text') {
             assistantText += event.delta || ''
             setCurrentText(assistantText)
+          } else if (event.type === 'tool_call' && typeof event.name === 'string') {
+            const id = String(event.call_id || `${event.name}-${toolCalls.length}`)
+            updateToolCall(id, {
+              id,
+              name: event.name,
+              input:
+                event.input && typeof event.input === 'object'
+                  ? (event.input as Record<string, unknown>)
+                  : {},
+            })
+          } else if (event.type === 'tool_result') {
+            const id = String(event.call_id || '')
+            if (id) updateToolCall(id, { output: event.output, error: undefined })
+          } else if (event.type === 'tool_error') {
+            const id = String(event.call_id || '')
+            if (id) updateToolCall(id, {
+              error: typeof event.error === 'string' ? event.error : '工具执行失败',
+              output: undefined,
+            })
           }
         } catch {
           // Ignore malformed SSE frames.
@@ -257,12 +324,20 @@ export default function ChatDrawer() {
       }
       if (buffer.trim()) processEvent(buffer)
 
-      if (assistantText) {
-        setMessages(prev => [...prev, { role: 'assistant', content: assistantText }])
+      const settledToolCalls = toolCalls.map((toolCall) =>
+        toolCall.output === undefined && !toolCall.error
+          ? { ...toolCall, error: '未收到工具执行结果' }
+          : toolCall
+      )
+      if (assistantText || settledToolCalls.length > 0) {
+        setMessages(prev => [...prev, { role: 'assistant', content: assistantText, tool_calls: settledToolCalls }])
         setCurrentText('')
+        setCurrentToolCalls([])
       }
     } catch (err) {
-      console.error(err)
+      const message = err instanceof Error ? err.message : '对话请求失败，请稍后重试'
+      setError(message)
+      setCurrentToolCalls((current) => current.map((toolCall) => ({ ...toolCall, error: message })))
     } finally {
       setStreaming(false)
     }
@@ -275,10 +350,10 @@ export default function ChatDrawer() {
     }
   }
 
-  const renderBubble = (role: 'user' | 'assistant', content: string, key?: string | number) => {
+  const renderBubble = (role: 'user' | 'assistant', content: string, toolCalls: ToolCall[] = [], key?: string | number) => {
     const isUser = role === 'user'
     const visibleContent = isUser ? content : visibleAssistantContent(content)
-    if (!visibleContent) return null
+    if (!visibleContent && toolCalls.length === 0) return null
     return (
       <div
         key={key}
@@ -299,6 +374,13 @@ export default function ChatDrawer() {
               : 'max-w-[calc(100%-2.5rem)] flex-1 rounded-2xl rounded-tl-sm bg-slate-100 text-slate-900'
           )}
         >
+          {toolCalls.length > 0 && (
+            <div className="mb-2 space-y-2">
+              {toolCalls.map((toolCall, index) => (
+                <ToolCallCard key={toolCall.id || `${toolCall.name}-${index}`} toolCall={toolCall} />
+              ))}
+            </div>
+          )}
           {isUser ? (
             visibleContent
           ) : (
@@ -322,7 +404,7 @@ export default function ChatDrawer() {
     <Sheet open={open} onOpenChange={setOpen}>
       <SheetContent
         side="right"
-        className="flex w-full max-w-none flex-col gap-0 p-0 sm:max-w-none"
+        className="flex h-[100dvh] w-full max-w-none flex-col gap-0 p-0 sm:max-w-none"
         style={{ width: `min(100vw, ${drawerWidth}px)`, maxWidth: '100vw' }}
       >
         <button
@@ -342,43 +424,47 @@ export default function ChatDrawer() {
             )}
           />
         </button>
-        <SheetHeader className="border-b border-slate-200 px-5 py-4 text-left">
+        <SheetHeader className="border-b border-border px-5 py-4 pr-14 text-left">
           <SheetTitle className="text-base font-semibold text-slate-900">
             AI 对话助手
           </SheetTitle>
           <SheetDescription className="text-xs text-slate-500">
-            基于成绩数据回答你的问题
+            {activeScope ? `当前作用域：${activeScope.label}` : '需要先配置并选择班级'}
           </SheetDescription>
         </SheetHeader>
 
-        <ScrollArea className="flex-1">
+        <ScrollArea className="min-h-0 flex-1">
           <div className="space-y-4 px-5 py-4">
             {messages.length === 0 && !currentText && (
               <div className="flex h-full items-center justify-center py-10 text-center text-xs text-slate-400">
                 还没有对话，输入问题开始吧。
               </div>
             )}
-            {messages.map((m, i) => renderBubble(m.role, m.content, i))}
-            {currentText && renderBubble('assistant', currentText, 'streaming')}
+            {messages.map((message, index) => renderBubble(message.role, message.content, message.tool_calls, index))}
+            {(currentText || currentToolCalls.length > 0) && renderBubble('assistant', currentText, currentToolCalls, 'streaming')}
+            {streaming && !currentText && currentToolCalls.length === 0 && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground" role="status"><Loader2 className="h-4 w-4 animate-spin" />正在思考…</div>
+            )}
             <div ref={scrollRef} />
           </div>
         </ScrollArea>
 
-        <div className="border-t border-slate-200 bg-white px-5 py-3">
+        <div className="border-t border-border bg-white px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 sm:px-5">
+          {error && <div className="mb-2 flex items-center gap-2 text-xs text-danger-600" role="alert"><AlertCircle className="h-4 w-4" />{error}</div>}
           <div className="flex items-center gap-2">
             <Input
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="问我任何关于成绩的问题..."
-              disabled={streaming}
+              disabled={streaming || scopeLoading || !activeScope}
               className="flex-1 text-base"
             />
             <Button
               type="button"
               size="icon"
               onClick={sendMessage}
-              disabled={streaming || !input.trim()}
+              disabled={streaming || scopeLoading || !activeScope || !input.trim()}
               aria-label="发送"
             >
               <Send className="h-4 w-4" />

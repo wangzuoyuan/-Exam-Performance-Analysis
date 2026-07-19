@@ -1,14 +1,14 @@
 'use client'
 
-import { usePathname } from 'next/navigation'
 import Link from 'next/link'
-import { Menu, MessageSquare, ChevronRight } from 'lucide-react'
+import { usePathname } from 'next/navigation'
+import { ChevronRight, Menu, MessageSquare } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { Badge } from '@/components/ui/badge'
+
+import { ScopeSelect } from '@/components/patterns/ScopeSelect'
 import { Button } from '@/components/ui/button'
-import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet'
-import { SidebarContent, type TeacherSummary } from './Sidebar'
-import { formatClassLabel } from '@/lib/labels'
+import { Sheet, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
+import { SidebarContent } from './Sidebar'
 
 const SEGMENT_LABELS: Record<string, string> = {
   '': '仪表盘',
@@ -16,7 +16,13 @@ const SEGMENT_LABELS: Record<string, string> = {
   compare: '班级对比',
   exam: '考试列表',
   student: '学生检索',
+  homework: '作业跟踪',
+  manage: '记录管理',
+  warnings: '缺交预警',
+  correlation: '缺交与成绩',
   settings: '系统设置',
+  rollover: '升级换届',
+  report: '家长会一页纸',
 }
 
 interface Crumb {
@@ -26,42 +32,36 @@ interface Crumb {
 
 function buildCrumbs(pathname: string, dynamicLabels: Record<string, string> = {}): Crumb[] {
   const segments = pathname.split('/').filter(Boolean)
-  if (segments.length === 0) {
-    return [{ label: '仪表盘' }]
-  }
+  if (segments.length === 0) return [{ label: '仪表盘' }]
+
   const crumbs: Crumb[] = []
-  let acc = ''
-  segments.forEach((seg, i) => {
-    acc += '/' + seg
-    const isDynamicId = i > 0 && /^[\w-]+$/.test(seg) && SEGMENT_LABELS[seg] === undefined
-    if (isDynamicId) {
-      const parentLabel = SEGMENT_LABELS[segments[i - 1]]
-      const dynamicLabel = dynamicLabels[acc]
-      // /exam/[id] -> 考试 #id, /student/[id] -> 学生 #id
-      let label = dynamicLabel || `#${seg}`
-      if (segments[i - 1] === 'exam') label = `考试 #${seg}`
-      else if (segments[i - 1] === 'student') label = `学生 #${seg}`
-      else if (parentLabel) label = `${parentLabel} #${seg}`
-      if (dynamicLabel) label = dynamicLabel
-      crumbs.push({ label })
-    } else {
-      const label = SEGMENT_LABELS[seg] ?? seg
-      crumbs.push({ label, href: i === segments.length - 1 ? undefined : acc })
+  let accumulated = ''
+  segments.forEach((segment, index) => {
+    accumulated += `/${segment}`
+    const dynamicId = index > 0 && /^[\w-]+$/.test(segment) && SEGMENT_LABELS[segment] === undefined
+    let label = SEGMENT_LABELS[segment] ?? segment
+    if (dynamicId) {
+      label = dynamicLabels[accumulated] || `#${segment}`
+      if (!dynamicLabels[accumulated] && segments[index - 1] === 'exam') label = `考试 #${segment}`
+      if (!dynamicLabels[accumulated] && segments[index - 1] === 'student') label = `学生 #${segment}`
     }
+    const hasRealParentRoute = accumulated !== '/settings'
+    crumbs.push({
+      label,
+      href: index === segments.length - 1 || !hasRealParentRoute ? undefined : accumulated,
+    })
   })
   return crumbs
 }
 
-export function Topbar({ teacher }: { teacher: TeacherSummary | null }) {
+export function Topbar() {
   const pathname = usePathname() || '/'
   const [mobileOpen, setMobileOpen] = useState(false)
   const [dynamicLabels, setDynamicLabels] = useState<Record<string, string>>({})
   const crumbs = buildCrumbs(pathname, dynamicLabels)
 
-  const classLabel =
-    formatClassLabel(teacher?.current_grade, teacher?.current_class)
-
   useEffect(() => {
+    setMobileOpen(false)
     const match = pathname.match(/^\/exam\/(\d+)/)
     if (!match) {
       setDynamicLabels({})
@@ -70,12 +70,9 @@ export function Topbar({ teacher }: { teacher: TeacherSummary | null }) {
     let cancelled = false
     const href = `/exam/${match[1]}`
     fetch(`/api/exams/${match[1]}`)
-      .then((r) => (r.ok ? r.json() : null))
+      .then((response) => (response.ok ? response.json() : null))
       .then((data) => {
-        if (!cancelled) {
-          const name = data?.exam?.name
-          setDynamicLabels(name ? { [href]: name } : {})
-        }
+        if (!cancelled) setDynamicLabels(data?.exam?.name ? { [href]: data.exam.name } : {})
       })
       .catch(() => {
         if (!cancelled) setDynamicLabels({})
@@ -85,66 +82,55 @@ export function Topbar({ teacher }: { teacher: TeacherSummary | null }) {
     }
   }, [pathname])
 
-  const openChat = () => {
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('open-chat'))
-    }
+  function openChat() {
+    window.dispatchEvent(new CustomEvent('open-chat'))
   }
 
   return (
-    <header className="sticky top-0 z-20 flex h-14 items-center justify-between border-b border-slate-200 bg-white px-4 md:px-6 print:hidden">
-      <div className="flex items-center gap-3">
-        {/* Mobile hamburger */}
-        <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-          <SheetTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="md:hidden"
-              aria-label="打开菜单"
-            >
-              <Menu className="h-5 w-5" />
-            </Button>
-          </SheetTrigger>
-          <SheetContent side="left" className="w-60 p-0 border-0">
-            <SidebarContent teacher={teacher} />
-          </SheetContent>
-        </Sheet>
+    <header className="sticky top-0 z-20 border-b border-border bg-white/95 backdrop-blur print:hidden">
+      <div className="flex h-14 items-center justify-between gap-3 px-3 sm:px-5 lg:px-7">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
+            <SheetTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-11 w-11 shrink-0 lg:hidden" aria-label="打开主导航">
+                <Menu className="h-5 w-5" />
+              </Button>
+            </SheetTrigger>
+            <SheetContent side="left" className="w-[272px] border-0 p-0 [&>button]:right-3 [&>button]:top-3">
+              <SheetTitle className="sr-only">主导航</SheetTitle>
+              <SidebarContent onNavigate={() => setMobileOpen(false)} />
+            </SheetContent>
+          </Sheet>
 
-        {/* Breadcrumbs */}
-        <nav className="flex items-center gap-1 text-sm">
-          {crumbs.map((c, i) => (
-            <span key={i} className="flex items-center gap-1">
-              {i > 0 && <ChevronRight className="h-3.5 w-3.5 text-slate-400" />}
-              {c.href ? (
-                <Link href={c.href} className="text-slate-500 hover:text-slate-900">
-                  {c.label}
-                </Link>
-              ) : (
-                <span className={i === crumbs.length - 1 ? 'text-slate-900 font-medium' : 'text-slate-500'}>
-                  {c.label}
-                </span>
-              )}
-            </span>
-          ))}
-        </nav>
+          <nav className="flex min-w-0 items-center gap-1 text-xs sm:text-sm" aria-label="面包屑">
+            {crumbs.map((crumb, index) => (
+              <span key={`${crumb.label}-${index}`} className="flex min-w-0 items-center gap-1">
+                {index > 0 && <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+                {crumb.href ? (
+                  <Link href={crumb.href} className="hidden min-h-11 min-w-11 items-center justify-center truncate px-2 font-medium text-muted-foreground hover:text-foreground sm:inline-flex">
+                    {crumb.label}
+                  </Link>
+                ) : (
+                  <span className="max-w-[48vw] truncate font-extrabold text-foreground sm:max-w-[36vw]">{crumb.label}</span>
+                )}
+              </span>
+            ))}
+          </nav>
+        </div>
+
+        <div className="flex shrink-0 items-center gap-2">
+          <div className="hidden sm:block">
+            <ScopeSelect compact />
+          </div>
+          <Button variant="ghost" size="icon" onClick={openChat} className="h-11 w-11 text-brand-700" aria-label="打开 AI 对话助手" title="AI 对话助手">
+            <MessageSquare className="h-5 w-5" />
+          </Button>
+        </div>
       </div>
 
-      <div className="flex items-center gap-2">
-        {classLabel && (
-          <Badge variant="secondary" className="hidden sm:inline-flex">
-            {classLabel}
-          </Badge>
-        )}
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={openChat}
-          aria-label="打开对话助手"
-          title="对话助手"
-        >
-          <MessageSquare className="h-5 w-5" />
-        </Button>
+      <div className="flex min-h-12 items-center gap-2 border-t border-warning-500/15 bg-[#fbf4ea] px-3 sm:hidden">
+        <span className="shrink-0 text-[11px] font-extrabold text-accent-foreground">当前班级</span>
+        <ScopeSelect className="flex-1" />
       </div>
     </header>
   )

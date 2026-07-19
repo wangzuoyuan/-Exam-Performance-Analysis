@@ -9,14 +9,18 @@ module.exports = {
       screens: { '2xl': '1400px' },
     },
     extend: {
+      fontFamily: {
+        sans: ['Mulish', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'sans-serif'],
+      },
       colors: {
-        // 保留旧 primary 避免破坏老代码
-        primary: { 50: '#eff6ff', 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8' },
-        // 设计系统语义 token
-        brand: { 50: '#eff6ff', 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8' },
-        success: { 50: '#ecfdf5', 500: '#10b981', 600: '#059669' },
-        warning: { 50: '#fffbeb', 500: '#f59e0b', 600: '#d97706', 700: '#b45309' },
-        danger: { 50: '#fef2f6', 400: '#f87171', 500: '#ef4444', 600: '#dc2626' },
+        // 保留既有名称，只更新为方向 B 的取值。
+        primary: { DEFAULT: '#3b6ea5', 50: '#eef3f9', 500: '#4f7fb2', 600: '#3b6ea5', 700: '#315c8a' },
+        brand: { 50: '#eef3f9', 100: '#dce8f3', 500: '#4f7fb2', 600: '#3b6ea5', 700: '#2f5680' },
+        success: { 50: '#eaf6f1', 500: '#4f9d7d', 600: '#3f8f6e', 700: '#327359' },
+        warning: { 50: '#fdf7ef', 500: '#c98a4b', 600: '#b5741f', 700: '#965f18' },
+        danger: { 50: '#fdf5f5', 400: '#cf6d6c', 500: '#c0504f', 600: '#a94342', 700: '#8d3938' },
+        info: { 50: '#eef3f9', 600: '#3b6ea5', 700: '#2f5680' },
+        'border-strong': '#d9d2c7',
         // shadcn CSS 变量映射
         border: 'hsl(var(--border))',
         input: 'hsl(var(--input))',
@@ -46,6 +50,14 @@ module.exports = {
         secondary: {
           DEFAULT: 'hsl(var(--secondary))',
           foreground: 'hsl(var(--secondary-foreground))',
+        },
+        chart: {
+          1: '#3b6ea5',
+          2: '#c98a4b',
+          3: '#3f8f6e',
+          4: '#b5741f',
+          5: '#7b6ca8',
+          6: '#5a8fa8',
         },
       },
       borderRadius: {

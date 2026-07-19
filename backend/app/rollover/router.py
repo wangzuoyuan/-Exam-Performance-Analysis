@@ -10,7 +10,7 @@
 教师确认（name_confirmed）、名册导入（crosswalk）或手工（manual）触发。
 """
 
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -116,6 +116,8 @@ def _link_one(db, item: LinkPayload) -> dict:
     g2_grade = item.grade
     if g2_grade is None:
         g2_grade = _grade_of_student(db, g2)
+    if g2_grade not in (2, 3):
+        raise HTTPException(422, "目标年级必须为高二或高三")
 
     iid = identity.identity_of(db, g2)
     if iid is None:
@@ -126,7 +128,7 @@ def _link_one(db, item: LinkPayload) -> dict:
 
     items = [(g2, g2_grade)]
     if item.g1_student_id is not None:
-        items.append((str(item.g1_student_id), 1))
+        items.append((str(item.g1_student_id), g2_grade - 1))
 
     identity.link_aliases(db, iid, items, "name_confirmed")
 
@@ -197,6 +199,7 @@ class CrosswalkRow(BaseModel):
 
 class CrosswalkPayload(BaseModel):
     rows: list[CrosswalkRow]
+    target_grade: Literal[2, 3] = 2
 
 
 @router.post("/rollover/crosswalk")
@@ -204,7 +207,7 @@ async def rollover_crosswalk(payload: CrosswalkPayload):
     db = next(get_db())
     try:
         return identity.import_crosswalk(
-            db, [r.model_dump() for r in payload.rows]
+            db, [r.model_dump() for r in payload.rows], payload.target_grade
         )
     finally:
         db.close()
@@ -231,6 +234,7 @@ class ImportHistoryPayload(BaseModel):
     student_id: Optional[str] = None
     link_g1_student_id: Optional[str] = None
     name: Optional[str] = None
+    target_grade: Optional[Literal[2, 3]] = None
     rows: list[HistoryRow]
 
 
@@ -244,6 +248,7 @@ async def rollover_import_history(payload: ImportHistoryPayload):
             student_id=payload.student_id,
             link_g1_student_id=payload.link_g1_student_id,
             name=payload.name,
+            target_grade=payload.target_grade,
             rows=[r.model_dump() for r in payload.rows],
         )
     finally:
@@ -254,13 +259,16 @@ async def rollover_import_history(payload: ImportHistoryPayload):
 
 
 class ActiveGradePayload(BaseModel):
-    grade: int
+    grade: Literal[1, 2, 3]
 
 
 @router.patch("/rollover/active-grade")
 async def rollover_set_active_grade(payload: ActiveGradePayload):
     db = next(get_db())
     try:
-        return service.set_active_grade(db, payload.grade)
+        try:
+            return service.set_active_grade(db, payload.grade)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
         db.close()

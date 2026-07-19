@@ -45,6 +45,20 @@ def get_active_grade(db) -> int:
     return _gag(db)
 
 
+def get_active_class_num(db, grade=None):
+    """返回当前教师在指定年级绑定的行政班；未绑定返回 None。"""
+    from app.db.models import Teacher
+
+    grade = int(grade if grade is not None else get_active_grade(db))
+    if grade not in (1, 2, 3):
+        return None
+    teacher = db.query(Teacher).first()
+    if teacher is None:
+        return None
+    value = getattr(teacher, f"target_class_high{grade}", None)
+    return int(value) if value is not None else None
+
+
 def set_semester(db, data):
     for key in ("semester_start", "semester_end", "semester_name"):
         if key in data and data[key] is not None:
@@ -66,7 +80,7 @@ def _subject_keywords(subject):
 
 
 def _base_miss_query(db, start, end, student=None, subject=None,
-                     respect_excluded=True, grade=None):
+                     respect_excluded=True, grade=None, class_num=None):
     """缺交有效记录基础查询（join 花名册），返回 (HomeworkRecord, ClassRoster)。
 
     年级收口：当 respect_excluded=True（即看板/排行/预警路径）时按 active_grade
@@ -87,6 +101,8 @@ def _base_miss_query(db, start, end, student=None, subject=None,
     )
     if active_grade:
         q = q.filter(ClassRoster.grade == active_grade)
+    if class_num is not None:
+        q = q.filter(ClassRoster.class_num == int(class_num))
     if start and end:
         q = q.filter(HomeworkRecord.date >= start, HomeworkRecord.date <= end)
     if student:
@@ -103,8 +119,10 @@ def _base_miss_query(db, start, end, student=None, subject=None,
     return q
 
 
-def kpi(db, start, end, student=None, subject=None):
-    rows = _base_miss_query(db, start, end, student, subject).all()
+def kpi(db, start, end, student=None, subject=None, class_num=None):
+    rows = _base_miss_query(
+        db, start, end, student, subject, class_num=class_num
+    ).all()
     total = len(rows)
 
     subj_counts = defaultdict(int)
@@ -130,8 +148,10 @@ def kpi(db, start, end, student=None, subject=None):
     }
 
 
-def trend(db, start, end, student=None, subject=None):
-    rows = _base_miss_query(db, start, end, student, subject).all()
+def trend(db, start, end, student=None, subject=None, class_num=None):
+    rows = _base_miss_query(
+        db, start, end, student, subject, class_num=class_num
+    ).all()
     by_date = defaultdict(int)
     for rec, _ in rows:
         by_date[rec.date] += 1
@@ -139,8 +159,10 @@ def trend(db, start, end, student=None, subject=None):
     return {"dates": dates, "counts": [by_date[d] for d in dates]}
 
 
-def subjects(db, start, end, student=None, subject=None):
-    rows = _base_miss_query(db, start, end, student, subject).all()
+def subjects(db, start, end, student=None, subject=None, class_num=None):
+    rows = _base_miss_query(
+        db, start, end, student, subject, class_num=class_num
+    ).all()
     totals = defaultdict(int)
     detail = defaultdict(lambda: defaultdict(int))
     for rec, roster in rows:
@@ -158,8 +180,10 @@ def subjects(db, start, end, student=None, subject=None):
     return out
 
 
-def rankings(db, start, end, student=None, subject=None, limit=10):
-    rows = _base_miss_query(db, start, end, student, subject).all()
+def rankings(db, start, end, student=None, subject=None, limit=10, class_num=None):
+    rows = _base_miss_query(
+        db, start, end, student, subject, class_num=class_num
+    ).all()
     counts = defaultdict(int)
     for _, roster in rows:
         counts[roster.name] += 1
@@ -170,26 +194,28 @@ def rankings(db, start, end, student=None, subject=None, limit=10):
     }
 
 
-def warnings(db, start, end):
+def warnings(db, start, end, class_num=None):
     """同一学科「当前正在进行」的连续缺交预警。
 
     时间轴 = 该学科全班有人缺交的去重日期；从最近一次收交向前回溯，统计
     某学生连续缺交了最近几次（必须含最后一次收交，否则视为已结束）。
     连续 2 次 → warning（黄），≥3 次 → serious（红）。排除 excluded 学生。
     """
-    rows = _base_miss_query(db, start, end, respect_excluded=True).all()
+    rows = _base_miss_query(
+        db, start, end, respect_excluded=True, class_num=class_num
+    ).all()
 
     timeline = defaultdict(set)            # subject -> {date}
-    missed = defaultdict(set)             # (subject, name) -> {date}
-    name_to_sid = {}                      # name -> student_id（供预警页链到学生画像）
+    missed = defaultdict(set)             # (subject, student_id) -> {date}
+    student_names = {}                    # student_id -> name
     for rec, roster in rows:
         subj = normalize_subject(rec.subject)
         timeline[subj].add(rec.date)
-        missed[(subj, roster.name)].add(rec.date)
-        name_to_sid[roster.name] = roster.student_id
+        missed[(subj, roster.student_id)].add(rec.date)
+        student_names[roster.student_id] = roster.name
 
     serious, warning = [], []
-    for (subj, name), miss_dates in missed.items():
+    for (subj, student_id), miss_dates in missed.items():
         axis = sorted(timeline[subj])
         streak = []
         for d in reversed(axis):
@@ -201,8 +227,8 @@ def warnings(db, start, end):
             continue
         streak.reverse()
         item = {
-            "name": name,
-            "student_id": name_to_sid.get(name),
+            "name": student_names[student_id],
+            "student_id": student_id,
             "subject": subj,
             "streak": len(streak),
             "dates": streak,
@@ -212,7 +238,7 @@ def warnings(db, start, end):
     sort_key = lambda x: (-x["streak"], x["name"])
     serious.sort(key=sort_key)
     warning.sort(key=sort_key)
-    students = {i["name"] for i in serious + warning}
+    students = {i["student_id"] for i in serious + warning}
     return {
         "serious": serious,
         "warning": warning,
@@ -224,7 +250,7 @@ def warnings(db, start, end):
     }
 
 
-def student_summary(db, student_id=None, name=None):
+def student_summary(db, student_id=None, name=None, class_num=None):
     """单个学生作业概况（跨学年可视）：缺交总数、按科目分布、迟到/请假次数、
     当前连续缺交预警。姓名多义时返回候选。
 
@@ -296,7 +322,7 @@ def student_summary(db, student_id=None, name=None):
         special_counts[s.type] += 1
 
     # 该生当前连续缺交预警（warnings 已按 active_grade 收口，仅当前学年 streak）
-    all_warn = warnings(db, start, end)
+    all_warn = warnings(db, start, end, class_num=class_num)
     student_warnings = [
         w for w in (all_warn["serious"] + all_warn["warning"])
         if w.get("student_id") in ids or w["name"] == roster.name
@@ -343,15 +369,29 @@ def _pearson(xs, ys):
     return round(sxy / (sxx ** 0.5 * syy ** 0.5), 4)
 
 
-def _latest_exam_id(db):
+def _latest_exam_id(db, grade=None):
     from app.db.models import Exam, TotalScore
-    exam = (
+    query = (
         db.query(Exam)
         .join(TotalScore, TotalScore.exam_id == Exam.id)
-        .order_by(Exam.exam_date.desc(), Exam.id.desc())
-        .first()
     )
+    if grade is not None:
+        query = query.filter(Exam.grade == int(grade))
+    exam = query.order_by(Exam.exam_date.desc(), Exam.id.desc()).first()
     return exam.id if exam else None
+
+
+def _exam_id_for_active_grade(db, exam_id, active_grade):
+    from app.db.models import Exam
+
+    if exam_id is None:
+        return _latest_exam_id(db, grade=active_grade)
+    exam = db.query(Exam).filter(Exam.id == exam_id).first()
+    if exam is None:
+        raise ValueError("考试不存在")
+    if exam.grade != active_grade:
+        raise ValueError("所选考试不属于当前年级")
+    return exam.id
 
 
 def grade_correlation(db, class_num, exam_id=None, total_type="主三门",
@@ -366,10 +406,8 @@ def grade_correlation(db, class_num, exam_id=None, total_type="主三门",
     if not start or not end:
         sem = get_semester(db)
         start, end = sem["semester_start"], sem["semester_end"]
-    if exam_id is None:
-        exam_id = _latest_exam_id(db)
-
     active_grade = get_active_grade(db)
+    exam_id = _exam_id_for_active_grade(db, exam_id, active_grade)
     roster = {
         r.student_id: r
         for r in db.query(ClassRoster).filter(
@@ -378,7 +416,10 @@ def grade_correlation(db, class_num, exam_id=None, total_type="主三门",
     }
 
     # 学期内缺交次数（subject 非空时只算该科）；_base_miss_query 已按 active_grade 收口
-    miss_rows = _base_miss_query(db, start, end, subject=subject, respect_excluded=True).all()
+    miss_rows = _base_miss_query(
+        db, start, end, subject=subject, respect_excluded=True,
+        class_num=class_num,
+    ).all()
     miss_by_sid = defaultdict(int)
     for rec, _ in miss_rows:
         miss_by_sid[rec.student_id] += 1
@@ -461,20 +502,19 @@ def subject_correlation_ranking(db, class_num, exam_id=None, start=None, end=Non
     if not start or not end:
         sem = get_semester(db)
         start, end = sem["semester_start"], sem["semester_end"]
-    if exam_id is None:
-        exam_id = _latest_exam_id(db)
-
     active_grade = get_active_grade(db)
-    excluded = {
-        r.student_id
-        for r in db.query(ClassRoster).filter(
-            ClassRoster.class_num == class_num, ClassRoster.excluded == 1,
-            ClassRoster.grade == active_grade,
-        ).all()
-    }
+    exam_id = _exam_id_for_active_grade(db, exam_id, active_grade)
+    roster_rows = db.query(ClassRoster).filter(
+        ClassRoster.class_num == class_num,
+        ClassRoster.grade == active_grade,
+    ).all()
+    roster_ids = {r.student_id for r in roster_rows}
+    excluded = {r.student_id for r in roster_rows if r.excluded == 1}
 
     # 一次取全学期缺交，按 (科目, 学生) 计数；_base_miss_query 已按 active_grade 收口
-    miss_rows = _base_miss_query(db, start, end, respect_excluded=True).all()
+    miss_rows = _base_miss_query(
+        db, start, end, respect_excluded=True, class_num=class_num
+    ).all()
     miss_by_subj_sid = defaultdict(lambda: defaultdict(int))
     for rec, _ in miss_rows:
         miss_by_subj_sid[normalize_subject(rec.subject)][rec.student_id] += 1
@@ -486,11 +526,12 @@ def subject_correlation_ranking(db, class_num, exam_id=None, start=None, end=Non
             score_rows = db.query(SubjectScore).filter(
                 SubjectScore.exam_id == exam_id,
                 SubjectScore.subject == subject,
+                SubjectScore.student_id.in_(roster_ids),
             ).all()
         miss_map = miss_by_subj_sid.get(subject, {})
         xs, ys = [], []
         for s in score_rows:
-            if s.student_id in excluded or s.grade_percentile is None:
+            if s.student_id not in roster_ids or s.student_id in excluded or s.grade_percentile is None:
                 continue
             xs.append(miss_map.get(s.student_id, 0))
             ys.append(s.grade_percentile)
@@ -508,12 +549,17 @@ def subject_correlation_ranking(db, class_num, exam_id=None, start=None, end=Non
     }
 
 
-def weekly_focus(db, class_num=6, today=None):
+def weekly_focus(db, class_num=None, today=None):
     """本周关注名单：合并连续缺交预警、本周缺交激增、最近一次考试临界/薄弱/
     偏科、谈话跟进待办。主要由缺交信号驱动，不依赖新考试。"""
     from datetime import date, timedelta
 
     from app.db.models import StudentNote
+
+    if class_num is None:
+        class_num = get_active_class_num(db)
+    if class_num is None:
+        raise ValueError("当前年级尚未绑定班级")
 
     sem = get_semester(db)
     start, end = sem["semester_start"], sem["semester_end"]
@@ -535,7 +581,7 @@ def weekly_focus(db, class_num=6, today=None):
             reasons[sid].append({"tag": tag, "weight": weight})
 
     # ① 连续缺交预警（取每生最高连续次数）
-    w = warnings(db, start, end)
+    w = warnings(db, start, end, class_num=class_num)
     best = {}
     for item in w["serious"] + w["warning"]:
         sid = item.get("student_id")
@@ -546,7 +592,9 @@ def weekly_focus(db, class_num=6, today=None):
         add(sid, f"连续缺交{item['streak']}次（{item['subject']}）", sev)
 
     # ② 本周缺交激增
-    miss_rows = _base_miss_query(db, start, end, respect_excluded=True).all()
+    miss_rows = _base_miss_query(
+        db, start, end, respect_excluded=True, class_num=class_num
+    ).all()
     total_by_sid = defaultdict(int)
     week_by_sid = defaultdict(int)
     for rec, _ in miss_rows:
@@ -565,6 +613,7 @@ def weekly_focus(db, class_num=6, today=None):
         from app.db.models import Exam, TotalScore
         latest = (
             db.query(Exam).join(TotalScore, TotalScore.exam_id == Exam.id)
+            .filter(Exam.grade == active_grade)
             .order_by(Exam.exam_date.desc(), Exam.id.desc()).first()
         )
         if latest:

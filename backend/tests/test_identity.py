@@ -268,3 +268,15 @@ def test_import_crosswalk_two_different_identities_conflict(db):
     # 两个 identity 都未被合并/覆盖
     assert identity.identity_of(db, "7250601") == iid_a
     assert identity.identity_of(db, "7251601") == iid_b
+
+
+def test_import_crosswalk_grade3_uses_previous_and_target_grades(db):
+    result = identity.import_crosswalk(
+        db,
+        [{"g1_sid": "g2-old", "g2_sid": "g3-new", "name": "高三生"}],
+        target_grade=3,
+    )
+    assert result["linked"] == 1
+    iid = identity.identity_of(db, "g3-new")
+    grades = {alias.student_id: alias.grade for alias in identity.aliases_of(db, iid)}
+    assert grades == {"g2-old": 2, "g3-new": 3}

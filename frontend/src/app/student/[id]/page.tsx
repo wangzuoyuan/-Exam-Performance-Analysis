@@ -54,6 +54,10 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { PageHeader } from '@/components/patterns/PageHeader'
+import { StatePanel } from '@/components/patterns/StatePanel'
+import { StatCard } from '@/components/patterns/StatCard'
+import { useHomeroomScope } from '@/components/providers/HomeroomScopeProvider'
 
 interface MainTrendPoint {
   exam_id: number
@@ -100,6 +104,12 @@ interface StudentProfile {
   identity?: StageIdentity
   /** 注意：键是字符串（如 "1"），使用时需 parse 为 number */
   class_by_grade?: Record<string, number>
+}
+
+interface StudentScopeSummary {
+  student_id: string
+  current_grade?: number | null
+  class_num?: number | null
 }
 
 type TotalTypeKey = '主三门' | '五门' | '+3' | '3+3'
@@ -279,7 +289,11 @@ function SubjectSparkCard({
           {trendNode}
         </div>
 
-        <div className="h-12 w-full">
+        <div
+          className="h-12 w-full"
+          role={hasSparkData ? 'img' : undefined}
+          aria-label={hasSparkData ? `${subject}${hasAnyPct ? '年级百分位' : '原始分'}趋势图，共${sparkData.length}场考试` : undefined}
+        >
           {hasSparkData ? (
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={sparkData} margin={{ top: 4, right: 4, bottom: 4, left: 4 }}>
@@ -297,7 +311,7 @@ function SubjectSparkCard({
                   type="monotone"
                   dataKey="pct"
                   name={hasAnyPct ? '年级百分位' : '原始分'}
-                  stroke="#2563eb"
+                  stroke="#3b6ea5"
                   strokeWidth={1.75}
                   dot={false}
                 />
@@ -368,6 +382,7 @@ function StudentDetailSkeleton() {
 export default function StudentPage() {
   const params = useParams<{ id: string }>()
   const studentId = Array.isArray(params?.id) ? params?.id[0] : params?.id
+  const { activeScope, loading: scopeLoading, error: scopeError } = useHomeroomScope()
 
   const [profile, setProfile] = useState<StudentProfile | null>(null)
   const [loading, setLoading] = useState(true)
@@ -382,28 +397,48 @@ export default function StudentPage() {
   const [linkMsg, setLinkMsg] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!studentId) return
-    let cancelled = false
+    if (scopeLoading) return
+    if (!studentId || !activeScope) {
+      setProfile(null)
+      setLoading(false)
+      setError(scopeError || '请先绑定并选择行政班')
+      return
+    }
+    const controller = new AbortController()
     setLoading(true)
     setError(null)
-    fetch(`/api/students/${studentId}`)
-      .then(async (r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json()
-      })
-      .then((data: StudentProfile) => {
-        if (!cancelled) setProfile(data)
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e?.message || '加载失败')
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
+
+    async function loadAuthorizedProfile() {
+      try {
+        const listResponse = await fetch('/api/students', { cache: 'no-store', signal: controller.signal })
+        if (!listResponse.ok) throw new Error('无法验证学生所属班级')
+        const students = (await listResponse.json()) as StudentScopeSummary[]
+        const authorized = students.some(
+          (student) =>
+            student.student_id === studentId &&
+            student.current_grade === activeScope!.grade &&
+            student.class_num === activeScope!.classNum
+        )
+        if (!authorized) throw new Error('该学生不属于当前班级，无法查看学生画像')
+
+        const profileResponse = await fetch(`/api/students/${studentId}`, {
+          cache: 'no-store',
+          signal: controller.signal,
+        })
+        if (!profileResponse.ok) throw new Error('无法读取学生画像')
+        setProfile((await profileResponse.json()) as StudentProfile)
+      } catch (cause) {
+        if (cause instanceof DOMException && cause.name === 'AbortError') return
+        setProfile(null)
+        setError(cause instanceof Error ? cause.message : '学生画像加载失败')
+      } finally {
+        if (!controller.signal.aborted) setLoading(false)
+      }
     }
-  }, [studentId])
+
+    void loadAuthorizedProfile()
+    return () => controller.abort()
+  }, [activeScope, scopeError, scopeLoading, studentId])
 
   // 趋势按考试时间（exam_date，格式 YYYY-MM）升序；exam_id 仅作并列兜底。
   // 注意：不能按 exam_id 排序——上传顺序≠考试时间顺序。
@@ -716,29 +751,18 @@ export default function StudentPage() {
     }
   }
 
-  if (loading) {
+  if (scopeLoading || loading) {
     return <StudentDetailSkeleton />
   }
 
   if (error || !profile) {
     return (
-      <div className="space-y-6">
-        <Link
-          href="/"
-          className="inline-flex items-center gap-1 text-sm text-slate-600 hover:text-slate-900"
-        >
-          <ChevronLeft className="h-4 w-4" />
-          返回
-        </Link>
-        <Card>
-          <CardContent className="py-10">
-            <EmptyState
-              title="加载学生数据失败"
-              hint={error || '请稍后重试，或确认该学号是否存在。'}
-            />
-          </CardContent>
-        </Card>
-      </div>
+      <StatePanel
+        tone="error"
+        title="学生画像加载失败"
+        description={error || '请稍后重试，或确认该学号是否存在。'}
+        action={<Button asChild variant="outline" className="min-h-11"><Link href="/student"><ChevronLeft className="h-4 w-4" />返回学生名单</Link></Button>}
+      />
     )
   }
 
@@ -750,24 +774,18 @@ export default function StudentPage() {
 
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="space-y-6">
-        {/* 返回 + 导出 */}
-        <div className="flex items-center justify-between">
-          <Link
-            href="/"
-            className="inline-flex items-center gap-1 text-sm text-slate-600 hover:text-slate-900"
-          >
-            <ChevronLeft className="h-4 w-4" />
-            返回
-          </Link>
-          {studentId && (
-            <Link href={`/student/${studentId}/report`}>
-              <span className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50">
-                导出家长会一页纸
-              </span>
-            </Link>
-          )}
-        </div>
+      <div className="space-y-5">
+        <PageHeader
+          eyebrow="Student profile"
+          title={profile.name || DASH}
+          description={`学号 ${profile.student_id || DASH} · ${classNum !== null ? `${classNum}班` : DASH} · ${latestGrade ? `高${latestGrade}` : DASH}`}
+          actions={
+            <div className="flex flex-wrap gap-2">
+              <Button asChild variant="outline" className="min-h-11"><Link href="/student"><ChevronLeft className="h-4 w-4" />学生名单</Link></Button>
+              {studentId && <Button asChild className="min-h-11"><Link href={`/student/${studentId}/report`}>导出家长会一页纸</Link></Button>}
+            </div>
+          }
+        />
 
         {/* 学生卡 */}
         <Card>
@@ -778,16 +796,7 @@ export default function StudentPage() {
               </AvatarFallback>
             </Avatar>
             <div className="flex-1 min-w-0">
-              <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
-                {profile.name || DASH}
-              </h1>
-              <p className="mt-1 text-sm text-slate-500">
-                学号 {profile.student_id || DASH}
-                {' · '}
-                {classNum !== null ? `${classNum}班` : DASH}
-                {' · '}
-                {latestGrade ? `高${latestGrade}` : DASH}
-              </p>
+              <div className="text-base font-extrabold text-foreground">身份与学段履历</div>
               {profile.identity && (
                 <p className="mt-0.5 text-xs text-slate-400">
                   学段履历：{formatStageHistory(profile.identity.aliases as StageAlias[])}
@@ -799,14 +808,14 @@ export default function StudentPage() {
                 <button
                   type="button"
                   onClick={() => setImportOpen(true)}
-                  className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50"
+                  className="inline-flex min-h-11 items-center gap-1 rounded-md border border-border px-3 text-sm text-muted-foreground hover:bg-muted"
                 >
                   导入高一成绩
                 </button>
                 <button
                   type="button"
                   onClick={() => setLinkOpen(true)}
-                  className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50"
+                  className="inline-flex min-h-11 items-center gap-1 rounded-md border border-border px-3 text-sm text-muted-foreground hover:bg-muted"
                 >
                   关联高一学号
                 </button>
@@ -837,68 +846,21 @@ export default function StudentPage() {
         </Card>
 
         {/* KPI 行 */}
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <Card>
-            <CardContent className="py-5">
-              <div className="flex items-center gap-2 text-sm text-slate-500">
-                <TrendingUp className="h-4 w-4" />
-                最新主三门班排
-              </div>
-              <div className="mt-2 flex items-baseline gap-3">
-                <span className="text-3xl font-semibold text-slate-900">
-                  {kpi.classRankNow !== null ? kpi.classRankNow : DASH}
-                </span>
-                <DeltaArrow
-                  current={kpi.classRankNow}
-                  previous={kpi.classRankPrev}
-                  invert
-                />
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardContent className="py-5">
-              <div className="flex items-center gap-2 text-sm text-slate-500">
-                <Hash className="h-4 w-4" />
-                最新学籍年级排名
-              </div>
-              <div className="mt-2 flex items-baseline gap-3">
-                <span className="text-3xl font-semibold text-slate-900">
-                  {kpi.xuejiRankNow !== null ? kpi.xuejiRankNow : DASH}
-                </span>
-                <DeltaArrow
-                  current={kpi.xuejiRankNow}
-                  previous={kpi.xuejiRankPrev}
-                  invert
-                />
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardContent className="py-5">
-              <div className="flex items-center gap-2 text-sm text-slate-500">
-                <Award className="h-4 w-4" />
-                最新总分
-              </div>
-              <div className="mt-2 flex items-baseline gap-3">
-                <span className="text-3xl font-semibold text-slate-900">
-                  {kpi.totalNow !== null ? kpi.totalNow : DASH}
-                </span>
-                {kpi.totalFull !== null && (
-                  <span className="text-xs text-slate-400">满分 {kpi.totalFull}</span>
-                )}
-              </div>
-            </CardContent>
-          </Card>
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+          <StatCard label="最新主三门班排" value={<span className="flex items-baseline gap-2">{kpi.classRankNow ?? DASH}<span className="text-xs"><DeltaArrow current={kpi.classRankNow} previous={kpi.classRankPrev} invert /></span></span>} icon={<TrendingUp className="h-4 w-4" />} />
+          <StatCard label="最新学籍年级排名" value={<span className="flex items-baseline gap-2">{kpi.xuejiRankNow ?? DASH}<span className="text-xs"><DeltaArrow current={kpi.xuejiRankNow} previous={kpi.xuejiRankPrev} invert /></span></span>} icon={<Hash className="h-4 w-4" />} />
+          <StatCard label="最新总分" value={kpi.totalNow ?? DASH} helper={kpi.totalFull !== null ? `满分 ${kpi.totalFull}` : undefined} icon={<Award className="h-4 w-4" />} className="col-span-2 md:col-span-1" />
         </div>
 
         {/* 作业缺交（仅作业花名册内学生显示） */}
         {studentId && <HomeworkCard studentId={studentId} />}
 
         {/* 成长 / 谈话档案 */}
-        {studentId && <StudentNotes studentId={studentId} />}
+        {studentId && (
+          <div className="[&_button]:min-h-11">
+            <StudentNotes studentId={studentId} />
+          </div>
+        )}
 
         {/* 主三门趋势图 */}
         <Card>
@@ -916,7 +878,7 @@ export default function StudentPage() {
                     imported: p.imported === true,
                   }))}
                   yDataKey="rank"
-                  color="#2563eb"
+                  color="#3b6ea5"
                   invertY
                   referenceAreas={mainReferenceAreas}
                   importedKey="imported"
@@ -951,7 +913,7 @@ export default function StudentPage() {
                   score: safeNum(p.total_score) ?? undefined,
                 }))}
                 yDataKey="rank"
-                color="#0f766e"
+                color="#3f8f6e"
                 invertY
               />
               <p className="mt-2 text-xs text-slate-400">
@@ -974,7 +936,7 @@ export default function StudentPage() {
                   score: safeNum(p.total_score) ?? undefined,
                 }))}
                 yDataKey="score"
-                color="#7c3aed"
+                color="#7b6ca8"
               />
               <p className="mt-2 text-xs text-slate-400">
                 +3 = 语数英 + 三门选考科目总分，分数越高线越高
@@ -996,7 +958,7 @@ export default function StudentPage() {
                   rank: safeNum(p.xueji_rank) ?? undefined,
                 }))}
                 yDataKey="rank"
-                color="#0891b2"
+                color="#5a8fa8"
                 invertY
               />
               <p className="mt-2 text-xs text-slate-400">

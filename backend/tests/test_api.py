@@ -1,11 +1,8 @@
 """成绩分析WebApp测试套件
 
 测试策略：
-- API测试：验证端点可访问且返回正确JSON结构（使用真实~/.exam-tracker/db.sqlite）
-- DB测试：验证ORM模型可写入和查询（使用真实数据库）
-
-注意：测试不尝试数据库隔离，因为SQLAlchemy engine在模块导入时就已缓存。
-真实数据在 ~/.exam-tracker/db.sqlite，每次运行测试会累积数据。
+- API 测试验证端点可访问且返回正确 JSON 结构。
+- conftest 在导入应用前设置临时数据目录，所有写入仅发生在隔离数据库。
 """
 
 import pytest
@@ -27,7 +24,7 @@ def test_health(client):
 def test_root(client):
     response = client.get("/")
     assert response.status_code == 200
-    assert "成绩追踪" in response.json()["message"]
+    assert "成绩分析（班主任版）" in response.json()["message"]
 
 def test_teacher_get(client):
     """Step 6: 获取班主任信息"""
@@ -38,7 +35,7 @@ def test_teacher_get(client):
 
 def test_bind_class(client):
     """Step 6: 绑定班级"""
-    response = client.post("/api/teacher/bind-class", json={"class_num": 6, "grade": 1})
+    response = client.post("/api/teacher/bind-class", json={"class_num": 4, "grade": 1})
     assert response.status_code == 200
     assert response.json()["ok"] is True
 

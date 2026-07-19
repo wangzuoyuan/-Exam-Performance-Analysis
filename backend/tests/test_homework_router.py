@@ -1,19 +1,41 @@
-"""作业模块路由冒烟测试。
-
-使用真实 ~/.exam-tracker/db.sqlite（迁移后应已有作业数据）。仅验证端点
-可访问、返回结构正确，并跑通「录入 → 查询 → 删除」闭环，不污染统计口径
-（用一个不存在的占位学生触发"找不到学生"，再用真实路径校验结构）。
-"""
+"""作业模块路由冒烟测试（使用 conftest 提供的隔离数据库）。"""
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.db.models import (
+    ClassRoster,
+    Exam,
+    HomeworkRecord,
+    HomeworkSetting,
+    SessionLocal,
+    SpecialRecord,
+    SubjectScore,
+    Teacher,
+    TotalScore,
+)
+
+TEST_CLASS_NUM = 4
 
 
 @pytest.fixture
 def client():
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def bound_homeroom():
+    db = SessionLocal()
+    try:
+        teacher = db.query(Teacher).first() or Teacher(name="测试班主任")
+        teacher.target_class_high1 = TEST_CLASS_NUM
+        db.add(teacher)
+        db.merge(HomeworkSetting(key="active_grade", value="1"))
+        db.merge(ClassRoster(student_id="TEST-001", name="测试学生", class_num=TEST_CLASS_NUM, grade=1, excluded=0))
+        db.commit()
+    finally:
+        db.close()
 
 
 def test_kpi_shape(client):
@@ -39,7 +61,7 @@ def test_warnings_shape(client):
 
 
 def test_correlation_shape(client):
-    r = client.get("/api/homework/correlation?class_num=6")
+    r = client.get(f"/api/homework/correlation?class_num={TEST_CLASS_NUM}")
     assert r.status_code == 200
     body = r.json()
     assert "rows" in body and isinstance(body["rows"], list)
@@ -47,7 +69,7 @@ def test_correlation_shape(client):
 
 
 def test_correlation_subject_mode(client):
-    r = client.get("/api/homework/correlation?class_num=6&subject=数学")
+    r = client.get(f"/api/homework/correlation?class_num={TEST_CLASS_NUM}&subject=数学")
     assert r.status_code == 200
     body = r.json()
     assert body["subject"] == "数学"
@@ -55,7 +77,7 @@ def test_correlation_subject_mode(client):
 
 
 def test_correlation_subjects_ranking(client):
-    r = client.get("/api/homework/correlation/subjects?class_num=6")
+    r = client.get(f"/api/homework/correlation/subjects?class_num={TEST_CLASS_NUM}")
     assert r.status_code == 200
     body = r.json()
     assert "rankings" in body
@@ -116,3 +138,150 @@ def test_add_record_unknown_student_reports_error(client):
     assert body["success"] is True
     assert body["added_count"] == 0
     assert body["errors"]
+
+
+def test_all_class_scoped_reads_reject_other_class(client):
+    paths = (
+        "/api/homework/kpi",
+        "/api/homework/trend",
+        "/api/homework/subjects",
+        "/api/homework/rankings",
+        "/api/homework/warnings",
+        "/api/homework/manage/records",
+        "/api/homework/roster",
+        "/api/homework/semester",
+        "/api/homework/correlation",
+        "/api/homework/correlation/subjects",
+        "/api/weekly-focus",
+    )
+    for path in paths:
+        response = client.get(f"{path}?class_num=5")
+        assert response.status_code == 409, path
+
+
+def test_same_name_input_and_writes_are_isolated_to_bound_class(client):
+    db = SessionLocal()
+    try:
+        for model in (HomeworkRecord, SpecialRecord):
+            db.query(model).filter(model.student_id.in_(["SCOPE-C4", "SCOPE-C5"])).delete()
+        db.query(ClassRoster).filter(ClassRoster.student_id.in_(["SCOPE-C4", "SCOPE-C5"])).delete()
+        db.add_all([
+            ClassRoster(student_id="SCOPE-C4", name="同名学生", class_num=TEST_CLASS_NUM, grade=1, excluded=0),
+            ClassRoster(student_id="SCOPE-C5", name="同名学生", class_num=5, grade=1, excluded=0),
+        ])
+        db.add(HomeworkRecord(student_id="SCOPE-C5", date="2026-03-08", subject="语文"))
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.post(
+        f"/api/homework/records?class_num={TEST_CLASS_NUM}",
+        json={"raw_text": "同名学生：数学", "date": "2026-03-09", "mode": "by_student"},
+    )
+    assert response.status_code == 200
+    assert response.json()["added_count"] == 1
+
+    db = SessionLocal()
+    try:
+        own = db.query(HomeworkRecord).filter(
+            HomeworkRecord.student_id == "SCOPE-C4",
+            HomeworkRecord.date == "2026-03-09",
+        ).one()
+        other = db.query(HomeworkRecord).filter(
+            HomeworkRecord.student_id == "SCOPE-C5",
+            HomeworkRecord.date == "2026-03-08",
+        ).one()
+        other_id = other.id
+        assert own.subject == "数学"
+    finally:
+        db.close()
+
+    listed = client.get(
+        f"/api/homework/manage/records?class_num={TEST_CLASS_NUM}&student=同名学生"
+    ).json()
+    assert {row["date"] for row in listed} == {"2026-03-09"}
+    assert client.delete(
+        f"/api/homework/manage/records/{other_id}?class_num={TEST_CLASS_NUM}"
+    ).status_code == 404
+
+
+def test_placeholder_names_are_unique_per_grade_and_class(client):
+    db = SessionLocal()
+    try:
+        db.query(ClassRoster).filter(ClassRoster.student_id.in_([
+            "HW-1-4-跨班占位", "HW-1-5-跨班占位"
+        ])).delete()
+        db.add(ClassRoster(
+            student_id="HW-1-5-跨班占位",
+            name="跨班占位",
+            class_num=5,
+            grade=1,
+            excluded=0,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.post(
+        "/api/homework/roster",
+        json={"name": "跨班占位", "class_num": TEST_CLASS_NUM, "grade": 1},
+    )
+    assert response.status_code == 200
+    assert response.json()["student_id"] == f"HW-1-{TEST_CLASS_NUM}-跨班占位"
+
+
+def test_correlation_uses_active_grade_exam_and_current_class_samples(client):
+    db = SessionLocal()
+    try:
+        for model in (SubjectScore, TotalScore):
+            db.query(model).filter(model.exam_id.in_([9101, 9201])).delete()
+        db.query(Exam).filter(Exam.id.in_([9101, 9201])).delete()
+        for sid in ("CORR-C4-1", "CORR-C4-2", "CORR-C5"):
+            db.query(HomeworkRecord).filter(HomeworkRecord.student_id == sid).delete()
+            db.query(ClassRoster).filter(ClassRoster.student_id == sid).delete()
+        db.add_all([
+            Exam(id=9101, name="高一当前考试", grade=1, semester="下", exam_date="2026-04-01", exam_type="月考"),
+            Exam(id=9201, name="高二更新考试", grade=2, semester="下", exam_date="2026-05-01", exam_type="月考"),
+            ClassRoster(student_id="CORR-C4-1", name="相关甲", class_num=TEST_CLASS_NUM, grade=1, excluded=0),
+            ClassRoster(student_id="CORR-C4-2", name="相关乙", class_num=TEST_CLASS_NUM, grade=1, excluded=0),
+            ClassRoster(student_id="CORR-C5", name="他班样本", class_num=5, grade=1, excluded=0),
+        ])
+        class_four_ids = ["TEST-001", "CORR-C4-1", "CORR-C4-2"]
+        for index, sid in enumerate(class_four_ids, start=1):
+            db.add(SubjectScore(
+                exam_id=9101, student_id=sid, class_num=TEST_CLASS_NUM,
+                name=f"样本{index}", subject="数学", raw_score=100 - index,
+                grade_percentile=0.1 * index,
+            ))
+            db.add(TotalScore(
+                exam_id=9101, student_id=sid, total_type="主三门",
+                total_score=300 - index, xueji_rank=index,
+            ))
+        db.add(SubjectScore(
+            exam_id=9101, student_id="CORR-C5", class_num=5, name="他班样本",
+            subject="数学", raw_score=60, grade_percentile=0.9,
+        ))
+        db.add(TotalScore(
+            exam_id=9201, student_id="CORR-G2", total_type="主三门",
+            total_score=200, xueji_rank=99,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    result = client.get(
+        f"/api/homework/correlation?class_num={TEST_CLASS_NUM}&subject=数学"
+    ).json()
+    assert result["exam_id"] == 9101
+    result_ids = {row["student_id"] for row in result["rows"]}
+    assert {"TEST-001", "CORR-C4-1", "CORR-C4-2"} <= result_ids
+    assert "CORR-C5" not in result_ids
+
+    ranking = client.get(
+        f"/api/homework/correlation/subjects?class_num={TEST_CLASS_NUM}&exam_id=9101"
+    ).json()
+    math = next(row for row in ranking["rankings"] if row["subject"] == "数学")
+    assert math["n"] == 3
+    assert client.get(
+        f"/api/homework/correlation?class_num={TEST_CLASS_NUM}&exam_id=9201"
+    ).status_code == 409

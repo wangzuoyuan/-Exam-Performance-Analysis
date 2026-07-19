@@ -1,33 +1,40 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import {
   AlertCircle,
+  Bot,
   CalendarDays,
-  CalendarOff,
-  CheckCircle2,
-  ClipboardList,
+  ClipboardCheck,
+  FileSpreadsheet,
   RefreshCw,
+  Search,
   School,
   Upload,
+  Users,
 } from 'lucide-react'
-import { LineChart, Line, ResponsiveContainer } from 'recharts'
-
-import { cn } from '@/lib/utils'
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip as RechartsTooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
+
+import BackupCard from '@/components/BackupCard'
+import WeeklyFocusCard from '@/components/WeeklyFocusCard'
+import { ChartPanel } from '@/components/charts/ChartPanel'
+import { PageHeader } from '@/components/patterns/PageHeader'
+import { SectionCard } from '@/components/patterns/SectionCard'
+import { StatePanel } from '@/components/patterns/StatePanel'
+import { StatCard } from '@/components/patterns/StatCard'
+import { useHomeroomScope } from '@/components/providers/HomeroomScopeProvider'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Avatar, AvatarFallback } from '@/components/ui/avatar'
-import WeeklyFocusCard from '@/components/WeeklyFocusCard'
-import BackupCard from '@/components/BackupCard'
 
 interface Exam {
   id: number
@@ -38,6 +45,10 @@ interface Exam {
   semester?: string | null
 }
 
+interface TotalTypeStats {
+  avg?: number | null
+}
+
 interface ExamStats {
   avg_main_total?: number | null
   rank_min?: number | null
@@ -45,560 +56,440 @@ interface ExamStats {
   by_total_type?: Record<string, TotalTypeStats | undefined> | null
 }
 
-interface TotalTypeStats {
-  count?: number | null
-  avg?: number | null
-  max?: number | null
-  min?: number | null
-  rank_min?: number | null
-  rank_max?: number | null
-}
-
-interface ExamDetailResponse {
-  stats?: ExamStats
-}
-
-interface TeacherInfo {
-  name?: string | null
-  target_class_high1: number | null
-  target_class_high2: number | null
-  target_class_high3: number | null
-  has_pending_rollover?: boolean
-  active_grade?: number | null
-}
-
 interface FocusStudent {
   student_id: string
   name: string
-  xueji_rank: number
-  total_score?: number | null
   issues: string[]
 }
 
-interface FocusListResponse {
-  focus_list: FocusStudent[]
+interface HomeworkKpi {
+  total_misses: number
+  worst_subject: { name: string; count: number }
+  top_students: { name: string; count: number }[]
 }
 
-type IssueTone = 'danger' | 'warning' | 'purple' | 'slate'
-
-function classifyIssue(issues: string[]): { label: string; tone: IssueTone } {
-  const text = issues.join(' ')
-  if (/退步|下滑/.test(text)) return { label: issues[0] ?? '退步', tone: 'danger' }
-  if (/波动/.test(text)) return { label: issues[0] ?? '波动', tone: 'warning' }
-  if (/偏科/.test(text)) {
-    const hit = issues.find((i) => /偏科/.test(i))
-    return { label: hit ?? '偏科', tone: 'purple' }
-  }
-  return { label: issues[0] ?? '关注', tone: 'slate' }
+interface HomeworkWarnings {
+  counts: { serious: number; warning: number; students: number }
 }
 
-function issueToneClass(tone: IssueTone): string {
-  switch (tone) {
-    case 'danger':
-      return 'bg-danger-50 text-danger-500 border-transparent'
-    case 'warning':
-      return 'bg-warning-50 text-warning-500 border-transparent'
-    case 'purple':
-      return 'bg-purple-500 text-white border-transparent'
-    case 'slate':
-    default:
-      return 'bg-slate-200 text-slate-700 border-transparent'
-  }
+interface DashboardSnapshot {
+  exams: Exam[]
+  statsById: Record<number, ExamStats>
+  focusList: FocusStudent[]
+  focusError: boolean
+  homeworkKpi: HomeworkKpi | null
+  homeworkWarnings: HomeworkWarnings | null
+  homeworkError: boolean
 }
 
-function truncate(text: string, max: number): string {
-  if (!text) return ''
-  return text.length > max ? `${text.slice(0, max)}…` : text
+type LoadState = 'idle' | 'loading' | 'ready' | 'error'
+
+async function fetchJson<T>(url: string, signal: AbortSignal): Promise<T> {
+  const response = await fetch(url, { cache: 'no-store', signal })
+  if (!response.ok) throw new Error(`请求失败 (${response.status})`)
+  return (await response.json()) as T
 }
 
-function formatNumber(n: number | null | undefined, digits = 1): string {
-  if (n === null || n === undefined || Number.isNaN(Number(n))) return '—'
-  return Number(n).toFixed(digits)
+function formatNumber(value: number | null | undefined, digits = 1): string {
+  if (value == null || Number.isNaN(Number(value))) return '—'
+  return Number(value).toFixed(digits)
 }
 
 function formatRankRange(stats: ExamStats | undefined): string {
-  if (!stats || (stats.rank_min == null && stats.rank_max == null)) return '—'
-  const min = stats.rank_min == null ? '—' : String(Math.round(Number(stats.rank_min)))
-  const max = stats.rank_max == null ? '—' : String(Math.round(Number(stats.rank_max)))
-  return `${min}-${max}`
+  if (stats?.rank_min == null && stats?.rank_max == null) return '—'
+  const min = stats?.rank_min == null ? '—' : Math.round(Number(stats.rank_min))
+  const max = stats?.rank_max == null ? '—' : Math.round(Number(stats.rank_max))
+  return `${min}–${max}`
 }
 
-function totalAvg(stats: ExamStats | undefined, key: string): string {
-  return formatNumber(stats?.by_total_type?.[key]?.avg)
+function totalAverage(stats: ExamStats | undefined, type: string): string {
+  return formatNumber(stats?.by_total_type?.[type]?.avg)
 }
 
-function pickCurrentClass(teacher: TeacherInfo | null): string {
-  if (!teacher) return '—'
-  if (teacher.target_class_high3) return `高三${teacher.target_class_high3}班`
-  if (teacher.target_class_high2) return `高二${teacher.target_class_high2}班`
-  if (teacher.target_class_high1) return `高一${teacher.target_class_high1}班`
-  return '—'
-}
-
-function pickClassForGrade(teacher: TeacherInfo | null, grade: number | null): string {
-  if (!teacher || !grade) return pickCurrentClass(teacher)
-  const classNum =
-    grade === 1
-      ? teacher.target_class_high1
-      : grade === 2
-      ? teacher.target_class_high2
-      : teacher.target_class_high3
-  return classNum ? `高${grade}${classNum}班` : '—'
-}
-
-function todayString(): string {
-  try {
-    return new Intl.DateTimeFormat('zh-CN', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-      weekday: 'long',
-    }).format(new Date())
-  } catch {
-    return new Date().toISOString().slice(0, 10)
-  }
-}
-
-async function safeJson<T>(url: string): Promise<T | null> {
-  try {
-    const res = await fetch(url)
-    if (!res.ok) return null
-    return (await res.json()) as T
-  } catch {
-    return null
-  }
+function formatDate(value?: string | null): string {
+  if (!value) return '日期未填写'
+  return value.replaceAll('-', '.')
 }
 
 export default function Dashboard() {
-  const [exams, setExams] = useState<Exam[]>([])
-  const [teacher, setTeacher] = useState<TeacherInfo | null>(null)
-  const [focusList, setFocusList] = useState<FocusStudent[]>([])
-  const [latestExam, setLatestExam] = useState<Exam | null>(null)
-  const [focusHistory, setFocusHistory] = useState<number[]>([])
-  const [examStatsById, setExamStatsById] = useState<Record<number, ExamStats>>({})
-  const [loading, setLoading] = useState(true)
-  const [focusLoading, setFocusLoading] = useState(true)
-  const [showUploadPrompt, setShowUploadPrompt] = useState(false)
+  const { activeScope, loading: scopeLoading, teacher } = useHomeroomScope()
+  const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null)
+  const [state, setState] = useState<LoadState>('idle')
+  const [reloadKey, setReloadKey] = useState(0)
+  const requestIdRef = useRef(0)
+
+  const load = useCallback(() => setReloadKey((value) => value + 1), [])
 
   useEffect(() => {
-    let cancelled = false
+    if (scopeLoading) return
+    if (!activeScope) {
+      requestIdRef.current += 1
+      setSnapshot(null)
+      setState('ready')
+      return
+    }
 
-    async function load() {
-      // 并发拉基础数据
-      const [, examsRes, teacherRes] = await Promise.all([
-        safeJson<unknown>('/api/health'),
-        safeJson<{ exams?: Exam[] }>('/api/exams'),
-        safeJson<TeacherInfo>('/api/teacher'),
-      ])
-      if (cancelled) return
+    const controller = new AbortController()
+    const requestId = ++requestIdRef.current
+    const { grade, classNum } = activeScope
+    setSnapshot(null)
+    setState('loading')
 
-      const examsList = examsRes?.exams ?? []
-      setExams(examsList)
+    async function loadDashboard() {
+      try {
+        const examsResponse = await fetchJson<{ exams?: Exam[] }>(`/api/exams?grade=${grade}`, controller.signal)
+        const exams = examsResponse.exams ?? []
+        const displayedExams = exams.slice(0, 8)
 
-      if (teacherRes) {
-        setTeacher(teacherRes)
-        if (
-          !teacherRes.target_class_high1 &&
-          !teacherRes.target_class_high2 &&
-          !teacherRes.target_class_high3
-        ) {
-          setShowUploadPrompt(true)
+        const detailEntries = await Promise.all(
+          displayedExams.map(async (exam) => {
+            try {
+              const detail = await fetchJson<{ stats?: ExamStats }>(`/api/exams/${exam.id}`, controller.signal)
+              return [exam.id, detail.stats ?? {}] as const
+            } catch (cause) {
+              if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
+              return [exam.id, {}] as const
+            }
+          })
+        )
+
+        let focusList: FocusStudent[] = []
+        let focusError = false
+        if (displayedExams[0]) {
+          try {
+            const focus = await fetchJson<{ focus_list?: FocusStudent[] }>(
+              `/api/focus-list/${displayedExams[0].id}?class_num=${classNum}`,
+              controller.signal
+            )
+            focusList = focus.focus_list ?? []
+          } catch (cause) {
+            if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
+            focusError = true
+          }
         }
-      } else {
-        setShowUploadPrompt(true)
+
+        const [kpiResult, warningsResult] = await Promise.allSettled([
+          fetchJson<HomeworkKpi>(`/api/homework/kpi?class_num=${classNum}`, controller.signal),
+          fetchJson<HomeworkWarnings>(`/api/homework/warnings?class_num=${classNum}`, controller.signal),
+        ])
+
+        if (controller.signal.aborted || requestId !== requestIdRef.current) return
+
+        setSnapshot({
+          exams,
+          statsById: Object.fromEntries(detailEntries),
+          focusList,
+          focusError,
+          homeworkKpi: kpiResult.status === 'fulfilled' ? kpiResult.value : null,
+          homeworkWarnings: warningsResult.status === 'fulfilled' ? warningsResult.value : null,
+          homeworkError: kpiResult.status === 'rejected' || warningsResult.status === 'rejected',
+        })
+        setState('ready')
+      } catch (cause) {
+        if (cause instanceof DOMException && cause.name === 'AbortError') return
+        if (controller.signal.aborted || requestId !== requestIdRef.current) return
+        setState('error')
       }
-      setLoading(false)
-
-      // 拉最近一次 focus_list 与近若干场历史，用于 KPI sparkline
-      const latest = examsList[0]
-      if (!latest) {
-        setFocusLoading(false)
-        return
-      }
-      setLatestExam(latest)
-
-      const focusPromise = safeJson<FocusListResponse>(`/api/focus-list/${latest.id}`)
-      const historyTargets = examsList.slice(0, 6)
-      const historyPromise = Promise.all(
-        historyTargets.map((e) =>
-          safeJson<FocusListResponse>(`/api/focus-list/${e.id}`).then(
-            (r) => r?.focus_list?.length ?? 0
-          )
-        )
-      )
-      const statsPromise = Promise.all(
-        examsList.map((e) =>
-          safeJson<ExamDetailResponse>(`/api/exams/${e.id}`).then((r) => [
-            e.id,
-            r?.stats ?? {},
-          ] as const)
-        )
-      )
-
-      const [focusRes, historyCounts, statsEntries] = await Promise.all([
-        focusPromise,
-        historyPromise,
-        statsPromise,
-      ])
-      if (cancelled) return
-
-      setFocusList(focusRes?.focus_list ?? [])
-      // 时间从旧到新更直观
-      setFocusHistory([...historyCounts].reverse())
-      setExamStatsById(Object.fromEntries(statsEntries))
-      setFocusLoading(false)
     }
 
-    load()
-    return () => {
-      cancelled = true
-    }
-  }, [])
+    void loadDashboard()
+    return () => controller.abort()
+  }, [activeScope, reloadKey, scopeLoading])
 
-  const examCountSeries = useMemo(() => {
-    if (exams.length === 0) return []
-    // 累计考试场次随时间增长
-    const ordered = [...exams].reverse()
-    return ordered.map((_, i) => ({ v: i + 1 }))
-  }, [exams])
-
-  const focusSeries = useMemo(
-    () => focusHistory.map((v) => ({ v })),
-    [focusHistory]
+  const exams = snapshot?.exams ?? []
+  const latestExam = exams[0] ?? null
+  const latestStats = latestExam ? snapshot?.statsById[latestExam.id] : undefined
+  const secondaryType = activeScope?.grade === 1 ? '五门' : '3+3'
+  const trendData = useMemo(
+    () =>
+      exams
+        .slice(0, 8)
+        .reverse()
+        .map((exam) => ({
+          name: exam.name.length > 8 ? `${exam.name.slice(0, 8)}…` : exam.name,
+          average: snapshot?.statsById[exam.id]?.avg_main_total ?? null,
+        }))
+        .filter((item) => item.average != null),
+    [exams, snapshot?.statsById]
   )
 
-  const latestStats = latestExam ? examStatsById[latestExam.id] : undefined
-  const latestGrade = latestExam?.grade ?? null
-  const currentClass = pickClassForGrade(teacher, latestGrade)
-  const teacherName = teacher?.name?.trim() || '班主任'
+  const headerDescription = activeScope
+    ? `${teacher?.name?.trim() || '班主任'} · ${activeScope.label}${latestExam ? ` · 最近考试 ${latestExam.name}` : ''}`
+    : '集中查看成绩、作业和学生跟进状态'
 
   return (
-    <div className="space-y-6">
-      {/* 顶部欢迎区 */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
-            仪表盘
-          </h1>
-          <p className="mt-1 text-sm text-slate-500">
-            {teacherName} 的班级数据概览
-          </p>
-        </div>
-        <div className="flex items-center gap-4">
-          <span className="hidden text-sm text-slate-500 sm:inline">
-            {todayString()}
-          </span>
+    <div className="space-y-5">
+      <PageHeader
+        eyebrow="Homeroom overview"
+        title="仪表盘"
+        description={headerDescription}
+        actions={
           <Button asChild>
-            <Link href="/upload">
+            <Link href="/upload" className="min-h-11">
               <Upload className="h-4 w-4" />
               上传新成绩
             </Link>
           </Button>
-        </div>
-      </div>
+        }
+      />
 
-      {/* 本周关注（主动提醒） */}
-      <WeeklyFocusCard />
-
-      {/* 升级换届提醒 */}
       {teacher?.has_pending_rollover && (
-        <Card className="border-brand-500/20 bg-brand-50/50">
-          <CardContent className="flex flex-col gap-3 p-6 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-3 rounded-[10px] border border-warning-500/30 bg-warning-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start gap-3">
+            <RefreshCw className="mt-0.5 h-4 w-4 shrink-0 text-warning-700" />
             <div>
-              <CardTitle className="text-base text-slate-900">
-                检测到高二成绩，部分学生学号已变更
-              </CardTitle>
-              <CardDescription className="mt-1">
-                去做升级换届以接续学情。
-              </CardDescription>
+              <p className="text-sm font-extrabold text-foreground">检测到待处理的升级换届</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">确认学生跨学年身份后，历史趋势才能连续展示。</p>
             </div>
-            <Button asChild variant="default">
-              <Link href="/settings/rollover">
-                <RefreshCw className="h-4 w-4" />
-                前往升级换届
-              </Link>
-            </Button>
-          </CardContent>
-        </Card>
+          </div>
+          <Button asChild variant="outline" size="sm" className="min-h-11">
+            <Link href="/settings/rollover">前往处理</Link>
+          </Button>
+        </div>
       )}
 
-      {/* 初始化提示 */}
-      {showUploadPrompt && (
-        <Card className="border-brand-500/20 bg-brand-50/50">
-          <CardContent className="flex flex-col gap-3 p-6 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <CardTitle className="text-base text-slate-900">
-                请先上传一份学生分数表完成初始化
-              </CardTitle>
-              <CardDescription className="mt-1">
-                未识别到当前班级，上传后会自动绑定。
-              </CardDescription>
-            </div>
-            <Button asChild variant="default">
+      {scopeLoading || state === 'idle' ? (
+        <DashboardSkeleton />
+      ) : !activeScope ? (
+        <StatePanel
+          tone="first-use"
+          title="请先绑定行政班"
+          description="班主任版不会猜测默认班级。上传成绩并完成班级绑定后，仪表盘会显示对应年级和行政班的数据。"
+          action={
+            <Button asChild className="min-h-11">
               <Link href="/upload">
                 <Upload className="h-4 w-4" />
-                前往上传
+                上传并绑定班级
               </Link>
             </Button>
-          </CardContent>
-        </Card>
-      )}
+          }
+        />
+      ) : state === 'error' ? (
+        <StatePanel
+          tone="error"
+          title="仪表盘数据加载失败"
+          description="当前班级范围已保留，可以重试；系统不会以零值替代失败的数据。"
+          action={
+            <Button variant="outline" className="min-h-11" onClick={load}>
+              <RefreshCw className="h-4 w-4" />
+              重新加载
+            </Button>
+          }
+        />
+      ) : state === 'loading' || !snapshot ? (
+        <DashboardSkeleton />
+      ) : (
+        <>
+          {snapshot.focusError && (
+            <div
+              className="mb-4 flex items-start gap-3 rounded-[10px] border border-warning-500/30 bg-warning-50 px-4 py-3 text-sm text-warning-800"
+              role="status"
+            >
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div>
+                <p className="font-extrabold">部分数据未能加载</p>
+                <p className="mt-0.5 text-xs leading-relaxed">最近考试关注名单读取失败，相关人数暂以“—”显示；成绩与作业数据不受影响。</p>
+              </div>
+            </div>
+          )}
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+          <section className="order-1 lg:order-3 lg:col-span-8">
+            <WeeklyFocusCard />
+          </section>
 
-      {/* KPI 行 */}
-      {loading ? (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <Skeleton key={i} className="h-32 w-full" />
-          ))}
+          <section className="order-2 space-y-4 lg:order-4 lg:col-span-4">
+            <QuickActions />
+            <RecentExam exam={latestExam} stats={latestStats} focusCount={snapshot.focusList.length} focusError={snapshot.focusError} />
+          </section>
+
+          <section className="order-3 lg:order-2 lg:col-span-12">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+              <StatCard label="本学年考试" value={exams.length} unit="场" icon={<CalendarDays className="h-4 w-4" />} href="/exam" />
+              <StatCard label="主三门班均" value={formatNumber(latestStats?.avg_main_total)} icon={<ClipboardCheck className="h-4 w-4" />} helper={latestExam?.name || '暂无考试'} />
+              <StatCard label={`${secondaryType}班均`} value={totalAverage(latestStats, secondaryType)} icon={<School className="h-4 w-4" />} helper={activeScope.label} />
+              <StatCard label="年级名次范围" value={formatRankRange(latestStats)} icon={<FileSpreadsheet className="h-4 w-4" />} helper="最近一次考试" />
+              <StatCard
+                label="考试重点关注"
+                value={snapshot.focusError ? '—' : snapshot.focusList.length}
+                unit={snapshot.focusError ? undefined : '人'}
+                icon={<Users className="h-4 w-4" />}
+                tone={snapshot.focusError ? 'default' : snapshot.focusList.length ? 'warning' : 'success'}
+                helper={snapshot.focusError ? '关注名单加载失败' : undefined}
+                href={latestExam ? `/exam/${latestExam.id}` : '/exam'}
+              />
+              <StatCard label="作业预警学生" value={snapshot.homeworkWarnings?.counts.students ?? '—'} unit={snapshot.homeworkWarnings ? '人' : undefined} icon={<AlertCircle className="h-4 w-4" />} tone={(snapshot.homeworkWarnings?.counts.students ?? 0) ? 'danger' : 'default'} href="/homework/warnings" />
+            </div>
+          </section>
+
+          <section className="order-4 lg:order-5 lg:col-span-8">
+            <ChartPanel
+              title="主三门班均趋势"
+              description="仅展示当前年级中存在真实班均数据的考试"
+              action={<Button asChild variant="ghost" size="sm" className="min-h-11"><Link href="/exam">全部考试</Link></Button>}
+            >
+              {trendData.length === 0 ? (
+                <StatePanel
+                  tone="empty"
+                  title="暂无可绘制的考试趋势"
+                  description="上传成绩后，这里会按考试时间展示主三门班均变化。"
+                  className="min-h-64 border-0 bg-transparent py-6"
+                  action={<Button asChild variant="outline" size="sm" className="min-h-11"><Link href="/upload">上传成绩</Link></Button>}
+                />
+              ) : (
+                <>
+                  <div
+                    className="h-[280px] w-full"
+                    role="img"
+                    aria-label={`主三门班均趋势图，共 ${trendData.length} 个数据点；${trendData.map((item) => `${item.name} ${formatNumber(item.average)} 分`).join('，')}`}
+                  >
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={trendData} margin={{ top: 12, right: 10, bottom: 8, left: -12 }}>
+                        <CartesianGrid stroke="#ece7e0" strokeDasharray="3 3" vertical={false} />
+                        <XAxis dataKey="name" tick={{ fill: '#6b7580', fontSize: 11 }} axisLine={{ stroke: '#d9d2c7' }} tickLine={false} />
+                        <YAxis tick={{ fill: '#6b7580', fontSize: 11 }} axisLine={false} tickLine={false} domain={['dataMin - 10', 'dataMax + 10']} />
+                        <RechartsTooltip contentStyle={{ border: '1px solid #d9d2c7', borderRadius: 8, boxShadow: '0 8px 24px rgba(47,59,71,.12)', fontSize: 12 }} formatter={(value) => [formatNumber(Number(value)), '主三门班均']} />
+                        <Line type="monotone" dataKey="average" stroke="#3b6ea5" strokeWidth={2.5} dot={{ r: 3, fill: '#ffffff', stroke: '#3b6ea5', strokeWidth: 2 }} activeDot={{ r: 5 }} isAnimationActive={false} connectNulls={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <ul className="sr-only">
+                    {trendData.map((item, index) => (
+                      <li key={`${item.name}-${index}`}>{item.name}：主三门班均 {formatNumber(item.average)} 分</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </ChartPanel>
+          </section>
+
+          <section className="order-5 lg:order-6 lg:col-span-4">
+            <HomeworkSummary
+              kpi={snapshot.homeworkKpi}
+              warnings={snapshot.homeworkWarnings}
+              error={snapshot.homeworkError}
+            />
+          </section>
+
+          <section className="order-6 lg:order-7 lg:col-span-12">
+            <BackupCard />
+          </section>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function DashboardSkeleton() {
+  return (
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-12" aria-label="正在加载仪表盘">
+      <Skeleton className="h-64 lg:col-span-8" />
+      <Skeleton className="h-64 lg:col-span-4" />
+      {Array.from({ length: 6 }).map((_, index) => (
+        <Skeleton key={index} className="h-28 lg:col-span-2" />
+      ))}
+      <Skeleton className="h-80 lg:col-span-8" />
+      <Skeleton className="h-80 lg:col-span-4" />
+    </div>
+  )
+}
+
+function QuickActions() {
+  const actions = [
+    { href: '/upload', label: '上传成绩', icon: Upload },
+    { href: '/homework', label: '快速录入', icon: ClipboardCheck },
+    { href: '/student', label: '查找学生', icon: Search },
+  ]
+
+  return (
+    <SectionCard title="快捷操作" description="从当前班级范围继续工作">
+      <div className="grid grid-cols-3 gap-2">
+        {actions.map(({ href, label, icon: Icon }) => (
+          <Link key={href} href={href} className="flex min-h-20 flex-col items-center justify-center gap-2 rounded-lg border border-border bg-secondary/35 px-2 text-center text-xs font-bold text-foreground transition-colors hover:border-strong-border hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            <Icon className="h-5 w-5 text-primary" />
+            {label}
+          </Link>
+        ))}
+      </div>
+      <Button
+        variant="outline"
+        className="mt-2 min-h-11 w-full"
+        onClick={() => window.dispatchEvent(new Event('open-chat'))}
+      >
+        <Bot className="h-4 w-4" />
+        打开 AI 助手
+      </Button>
+    </SectionCard>
+  )
+}
+
+function RecentExam({ exam, stats, focusCount, focusError }: { exam: Exam | null; stats?: ExamStats; focusCount: number; focusError: boolean }) {
+  return (
+    <SectionCard title="最近考试" description="当前年级最新建档记录">
+      {!exam ? (
+        <div className="flex min-h-24 flex-col items-start justify-center gap-2">
+          <p className="text-sm font-bold text-foreground">暂无考试数据</p>
+          <Button asChild variant="outline" size="sm" className="min-h-11"><Link href="/upload">上传第一场考试</Link></Button>
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-          {latestGrade === 1 ? (
-            <>
-              <KpiCard
-                title="主三门班均"
-                icon={<ClipboardList className="h-4 w-4" />}
-                value={totalAvg(latestStats, '主三门')}
-                spark={examCountSeries}
-              />
-              <KpiCard
-                title="五门班均"
-                icon={<School className="h-4 w-4" />}
-                value={totalAvg(latestStats, '五门')}
-              />
-              <KpiCard
-                title="主三门名次"
-                icon={<CalendarDays className="h-4 w-4" />}
-                value={formatRankRange(latestStats)}
-              />
-            </>
-          ) : (
-            <>
-              <KpiCard
-                title="主三门班均"
-                icon={<ClipboardList className="h-4 w-4" />}
-                value={totalAvg(latestStats, '主三门')}
-                spark={examCountSeries}
-              />
-              <KpiCard
-                title="+3班均"
-                icon={<School className="h-4 w-4" />}
-                value={totalAvg(latestStats, '+3')}
-              />
-              <KpiCard
-                title="3+3班均"
-                icon={<CalendarDays className="h-4 w-4" />}
-                value={totalAvg(latestStats, '3+3')}
-              />
-            </>
-          )}
-          <KpiCard
-            title="重点关注"
-            icon={<AlertCircle className="h-4 w-4" />}
-            value={focusLoading ? '…' : focusList.length}
-            spark={focusSeries}
-            valueTone={focusList.length > 0 ? 'warning' : 'default'}
-          />
+        <div>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <Link href={`/exam/${exam.id}`} className="flex min-h-11 items-center text-sm font-extrabold text-foreground hover:text-primary hover:underline"><span className="line-clamp-2">{exam.name}</span></Link>
+              <p className="mt-1 text-xs text-muted-foreground">{formatDate(exam.exam_date)}{exam.exam_type ? ` · ${exam.exam_type}` : ''}</p>
+            </div>
+            {focusError ? (
+              <Badge variant="secondary">关注读取失败</Badge>
+            ) : (
+              <Badge variant={focusCount ? 'warning' : 'success'}>{focusCount} 人关注</Badge>
+            )}
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-2 border-t border-border pt-3">
+            <div><p className="text-[11px] text-muted-foreground">主三门班均</p><p className="mt-1 text-lg font-extrabold tabular-nums">{formatNumber(stats?.avg_main_total)}</p></div>
+            <div><p className="text-[11px] text-muted-foreground">年级名次范围</p><p className="mt-1 text-lg font-extrabold tabular-nums">{formatRankRange(stats)}</p></div>
+          </div>
         </div>
       )}
-
-      {/* 主体两列 */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        {/* 左：考试时间轴 */}
-        <Card className="lg:col-span-2">
-          <CardHeader>
-            <CardTitle>考试时间线</CardTitle>
-            <CardDescription>按时间倒序展示已建档考试</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {loading ? (
-              <div className="space-y-4">
-                {Array.from({ length: 5 }).map((_, i) => (
-                  <Skeleton key={i} className="h-14 w-full" />
-                ))}
-              </div>
-            ) : exams.length === 0 ? (
-              <EmptyExams />
-            ) : (
-              <ol className="relative ml-3 border-l border-slate-200">
-                {exams.map((exam) => (
-                  <li key={exam.id} className="relative pl-6 pb-5 last:pb-0">
-                    <span className="absolute -left-[7px] top-2 h-3 w-3 rounded-full bg-brand-500 ring-4 ring-white" />
-                    <Link
-                      href={`/exam/${exam.id}`}
-                      className="group flex flex-col gap-2 rounded-lg px-2 py-1 -mx-2 transition-colors hover:bg-slate-50 sm:flex-row sm:items-center sm:justify-between"
-                    >
-                      <div>
-                        <div className="font-medium text-slate-900 group-hover:text-brand-600">
-                          {exam.name}
-                        </div>
-                        <div className="mt-0.5 text-xs text-slate-500">
-                          {`高${exam.grade}`}
-                          {exam.exam_date ? ` · ${exam.exam_date}` : ''}
-                          {exam.exam_type ? ` · ${exam.exam_type}` : ''}
-                        </div>
-                      </div>
-                      <div className="flex gap-2">
-                        <Badge variant="outline" className="font-normal">
-                          主三门班均 {formatNumber(examStatsById[exam.id]?.avg_main_total)}
-                        </Badge>
-                        <Badge variant="outline" className="font-normal">
-                          年级名次 {formatRankRange(examStatsById[exam.id])}
-                        </Badge>
-                      </div>
-                    </Link>
-                  </li>
-                ))}
-              </ol>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* 右：重点关注速览 */}
-        <Card className="lg:col-span-1">
-          <CardHeader className="flex-row items-start justify-between space-y-0">
-            <div className="space-y-1.5">
-              <CardTitle>重点关注（最近一次）</CardTitle>
-              <CardDescription>来自最近一次考试的预警名单</CardDescription>
-            </div>
-            {latestExam && (
-              <span className="text-xs text-slate-400">
-                {truncate(latestExam.name, 10)}
-              </span>
-            )}
-          </CardHeader>
-          <CardContent>
-            {loading || focusLoading ? (
-              <div className="space-y-3">
-                {Array.from({ length: 5 }).map((_, i) => (
-                  <Skeleton key={i} className="h-12 w-full" />
-                ))}
-              </div>
-            ) : focusList.length === 0 ? (
-              <EmptyFocus />
-            ) : (
-              <ul className="space-y-1">
-                {focusList.slice(0, 5).map((s) => {
-                  const { label, tone } = classifyIssue(s.issues)
-                  return (
-                    <li key={s.student_id}>
-                      <Link
-                        href={`/student/${s.student_id}`}
-                        className="flex items-center gap-3 rounded-lg p-2 -mx-2 transition-colors hover:bg-slate-50"
-                      >
-                        <Avatar className="h-9 w-9">
-                          <AvatarFallback>
-                            {(s.name?.[0] ?? s.student_id.slice(-1) ?? '?').toUpperCase()}
-                          </AvatarFallback>
-                        </Avatar>
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate font-medium text-slate-900">
-                            {s.name || s.student_id}
-                          </div>
-                          <div className="truncate text-xs text-slate-500">
-                            {currentClass !== '—' ? `${currentClass} · ` : ''}
-                            {s.student_id}
-                          </div>
-                        </div>
-                        <Badge
-                          variant="outline"
-                          className={cn('shrink-0', issueToneClass(tone))}
-                        >
-                          {label}
-                        </Badge>
-                      </Link>
-                    </li>
-                  )
-                })}
-              </ul>
-            )}
-          </CardContent>
-          {!loading && !focusLoading && focusList.length > 0 && latestExam && (
-            <div className="border-t border-slate-100 p-3">
-              <Button asChild variant="ghost" size="sm" className="w-full justify-center">
-                <Link href={`/exam/${latestExam.id}`}>查看全部 →</Link>
-              </Button>
-            </div>
-          )}
-        </Card>
-      </div>
-
-      {/* 数据备份 */}
-      <BackupCard />
-    </div>
+    </SectionCard>
   )
 }
 
-interface KpiCardProps {
-  title: string
-  icon: React.ReactNode
-  value: string | number
-  spark?: Array<{ v: number }>
-  valueTone?: 'default' | 'warning'
-}
+function HomeworkSummary({ kpi, warnings, error }: { kpi: HomeworkKpi | null; warnings: HomeworkWarnings | null; error: boolean }) {
+  const hasHomeworkData = Boolean(
+    kpi && warnings && (
+      kpi.total_misses > 0 ||
+      warnings.counts.students > 0 ||
+      warnings.counts.serious > 0 ||
+      warnings.counts.warning > 0
+    )
+  )
 
-function KpiCard({ title, icon, value, spark, valueTone = 'default' }: KpiCardProps) {
-  const showSpark = spark && spark.length >= 2
   return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardDescription className="flex items-center gap-2 text-slate-500">
-          {icon}
-          <span>{title}</span>
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="pb-4">
-        <div className="flex items-end justify-between gap-3">
-          <CardTitle
-            className={cn(
-              'text-3xl font-semibold tracking-tight',
-              valueTone === 'warning' ? 'text-warning-500' : 'text-slate-900'
-            )}
-          >
-            {value}
-          </CardTitle>
-          {showSpark && (
-            <div className="h-8 w-24">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={spark} margin={{ top: 4, bottom: 4, left: 0, right: 0 }}>
-                  <Line
-                    type="monotone"
-                    dataKey="v"
-                    stroke="#3b82f6"
-                    strokeWidth={2}
-                    dot={false}
-                    isAnimationActive={false}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          )}
+    <SectionCard title="作业摘要" description="当前学期缺交与连续缺交预警" action={<Button asChild variant="ghost" size="sm" className="min-h-11"><Link href="/homework">进入看板</Link></Button>}>
+      {error ? (
+        <StatePanel tone="error" title="作业数据加载失败" description="成绩数据不受影响。" className="min-h-64 border-0 bg-transparent px-2 py-6" />
+      ) : !hasHomeworkData ? (
+        <StatePanel
+          tone="empty"
+          title="暂无作业缺交记录"
+          description="当前班级在本学期范围内还没有有效缺交数据。录入后会在这里汇总连续缺交预警。"
+          className="min-h-64 border-0 bg-transparent px-2 py-6"
+          action={<Button asChild variant="outline" className="min-h-11"><Link href="/homework">录入作业情况</Link></Button>}
+        />
+      ) : (
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-lg border border-border bg-secondary/35 p-3"><p className="text-xs text-muted-foreground">累计缺交</p><p className="mt-2 text-2xl font-extrabold text-danger-600 tabular-nums">{kpi?.total_misses ?? 0}<span className="ml-1 text-xs text-muted-foreground">次</span></p></div>
+            <div className="rounded-lg border border-border bg-secondary/35 p-3"><p className="text-xs text-muted-foreground">预警学生</p><p className="mt-2 text-2xl font-extrabold text-warning-600 tabular-nums">{warnings?.counts.students ?? 0}<span className="ml-1 text-xs text-muted-foreground">人</span></p></div>
+          </div>
+          <div className="space-y-2 border-t border-border pt-3 text-sm">
+            <div className="flex justify-between gap-3"><span className="text-muted-foreground">连续缺交严重</span><span className="font-extrabold text-danger-600 tabular-nums">{warnings?.counts.serious ?? 0}</span></div>
+            <div className="flex justify-between gap-3"><span className="text-muted-foreground">连续缺交提醒</span><span className="font-extrabold text-warning-600 tabular-nums">{warnings?.counts.warning ?? 0}</span></div>
+            <div className="flex justify-between gap-3"><span className="text-muted-foreground">缺交最多种类</span><span className="truncate font-extrabold">{kpi?.worst_subject?.name || '暂无'}</span></div>
+          </div>
+          <Button asChild variant="outline" className="min-h-11 w-full"><Link href="/homework/warnings">查看连续缺交预警</Link></Button>
         </div>
-      </CardContent>
-    </Card>
-  )
-}
-
-function EmptyExams() {
-  return (
-    <div className="flex flex-col items-center justify-center gap-3 py-10 text-center">
-      <CalendarOff className="h-10 w-10 text-slate-300" />
-      <p className="text-sm text-slate-500">暂无考试数据</p>
-      <Button asChild variant="outline" size="sm">
-        <Link href="/upload">
-          <Upload className="h-4 w-4" />
-          前往上传
-        </Link>
-      </Button>
-    </div>
-  )
-}
-
-function EmptyFocus() {
-  return (
-    <div className="flex flex-col items-center justify-center gap-2 py-10 text-center">
-      <CheckCircle2 className="h-10 w-10 text-success-500" />
-      <p className="text-sm text-slate-500">暂无重点关注</p>
-    </div>
+      )}
+    </SectionCard>
   )
 }

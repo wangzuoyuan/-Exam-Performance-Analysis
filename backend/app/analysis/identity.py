@@ -233,7 +233,7 @@ def name_candidates(db, name, target_grade=1) -> list:
     return results
 
 
-def import_crosswalk(db, rows) -> dict:
+def import_crosswalk(db, rows, target_grade: int = 2) -> dict:
     """按名册（crosswalk）把每行的 g1_sid 与 g2_sid 链为同一人。
 
     rows=[{g1_sid, g2_sid, name?}]。source=crosswalk。
@@ -242,6 +242,9 @@ def import_crosswalk(db, rows) -> dict:
       - 两个指向同一 identity -> skipped
       - 两个指向不同 identity -> conflict（不合并）
     """
+    if target_grade not in (2, 3):
+        raise ValueError("目标年级必须为高二或高三")
+    previous_grade = target_grade - 1
     linked = 0
     conflict = 0
     skipped = 0
@@ -263,7 +266,7 @@ def import_crosswalk(db, rows) -> dict:
             link_aliases(
                 db,
                 iid,
-                [(g1, 1), (g2, 2)],
+                [(g1, previous_grade), (g2, target_grade)],
                 "crosswalk",
             )
             linked += 1
@@ -273,10 +276,10 @@ def import_crosswalk(db, rows) -> dict:
             else:
                 conflict += 1
         elif iid1 is not None:
-            link_aliases(db, iid1, [(g2, 2)], "crosswalk")
+            link_aliases(db, iid1, [(g2, target_grade)], "crosswalk")
             linked += 1
         else:  # iid2 is not None
-            link_aliases(db, iid2, [(g1, 1)], "crosswalk")
+            link_aliases(db, iid2, [(g1, previous_grade)], "crosswalk")
             linked += 1
 
     return {"linked": linked, "conflict": conflict, "skipped": skipped}

@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { Fragment, isValidElement, useEffect, useMemo, useState } from 'react'
 import type { ReactNode, TdHTMLAttributes, ThHTMLAttributes } from 'react'
 import Link from 'next/link'
 import { useParams } from 'next/navigation'
@@ -60,6 +60,13 @@ import {
 } from '@/components/ui/select'
 import { RankBandStackedBar, BandTrendChart } from '@/components'
 import { formatGradeLabel } from '@/lib/labels'
+import { PageHeader } from '@/components/patterns/PageHeader'
+import { StatePanel } from '@/components/patterns/StatePanel'
+import { StatCard } from '@/components/patterns/StatCard'
+import { useHomeroomScope } from '@/components/providers/HomeroomScopeProvider'
+import { DataTableShell } from '@/components/patterns/DataTableShell'
+import { FilterBar } from '@/components/patterns/FilterBar'
+import { ScoreMatrixMobile } from '@/components/patterns/ScoreMatrixMobile'
 
 interface ExamDetail {
   id: number
@@ -172,12 +179,6 @@ interface BandTrendPoint {
   weak: number
 }
 
-interface TeacherClasses {
-  target_class_high1: number | null
-  target_class_high2: number | null
-  target_class_high3: number | null
-}
-
 interface RankDistributionEntry {
   band: string
   [key: string]: string | number
@@ -252,7 +253,7 @@ type AverageMetric =
   | { source: 'total'; key: string }
   | { source: 'rank'; key: string }
 
-const RANK_DISTRIBUTION_COLORS = ['#4098ff', '#55d6c2', '#ff6b6b']
+const RANK_DISTRIBUTION_COLORS = ['#3b6ea5', '#c98a4b', '#c0504f']
 
 function classifyIssue(label: string): IssueTone {
   if (/退步|下滑/.test(label)) return 'danger'
@@ -497,7 +498,7 @@ function getRankBandsByType(
 function getExamKpis(
   grade: number,
   stats: ExamStats,
-  focusCount: number,
+  focusCount: number | null,
 ): Array<{
   icon: ReactNode
   title: string
@@ -539,8 +540,8 @@ function getExamKpis(
       {
         icon: <AlertCircle className="h-4 w-4" />,
         title: '重点关注',
-        value: String(focusCount),
-        hint: '主三门 + 学籍排名口径',
+        value: focusCount == null ? '—' : String(focusCount),
+        hint: focusCount == null ? '重点关注数据暂不可用' : '主三门 + 学籍排名口径',
       },
     ]
   }
@@ -567,8 +568,8 @@ function getExamKpis(
     {
       icon: <AlertCircle className="h-4 w-4" />,
       title: '重点关注',
-      value: String(focusCount),
-      hint: '主三门 + 学籍排名口径',
+      value: focusCount == null ? '—' : String(focusCount),
+      hint: focusCount == null ? '重点关注数据暂不可用' : '主三门 + 学籍排名口径',
     },
   ]
 }
@@ -706,6 +707,7 @@ type SortDirection = 'asc' | 'desc' | null
 export default function ExamDetailPage() {
   const params = useParams<{ id: string }>()
   const examId = params?.id
+  const { activeScope, loading: scopeLoading, error: scopeError } = useHomeroomScope()
 
   const [exam, setExam] = useState<ExamDetail | null>(null)
   const [classAverages, setClassAverages] = useState<ClassAverage[]>([])
@@ -714,11 +716,13 @@ export default function ExamDetailPage() {
   const [rankBands, setRankBands] = useState<RankBandEntry[]>([])
   const [rankDistribution, setRankDistribution] = useState<RankDistributionEntry[]>([])
   const [focusList, setFocusList] = useState<FocusStudent[]>([])
+  const [focusError, setFocusError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const [focusQuery, setFocusQuery] = useState('')
   const [studentQuery, setStudentQuery] = useState('')
+  const [onlyCurrentClass, setOnlyCurrentClass] = useState(true)
   const [studentSortKey, setStudentSortKey] = useState<string | null>(null)
   const [studentSortDir, setStudentSortDir] = useState<SortDirection>(null)
 
@@ -747,29 +751,57 @@ export default function ExamDetailPage() {
   const [rangeLoading, setRangeLoading] = useState(false)
 
   // 历次段位趋势
-  const [teacherInfo, setTeacherInfo] = useState<TeacherClasses | null>(null)
-  const [teacherLoaded, setTeacherLoaded] = useState(false)
   const [trendClass, setTrendClass] = useState<number | null | undefined>(undefined)
   const [bandTrend, setBandTrend] = useState<BandTrendPoint[]>([])
   const [trendClasses, setTrendClasses] = useState<number[]>([])
 
   useEffect(() => {
-    if (!examId) return
-    let cancelled = false
+    if (!examId || scopeLoading) return
+    if (!activeScope) {
+      setExam(null)
+      setFocusList([])
+      setFocusError(null)
+      setError(scopeError || '当前没有已绑定的行政班，请先完成班级绑定。')
+      setLoading(false)
+      return
+    }
+    const currentScope = activeScope
+    const controller = new AbortController()
     setLoading(true)
     setError(null)
+    setExam(null)
+    setFocusList([])
+    setFocusError(null)
 
-    const examReq = fetch(`/api/exams/${examId}`).then(async (r) => {
-      if (!r.ok) throw new Error(`HTTP ${r.status}`)
-      return (await r.json()) as ExamApiResponse
-    })
-    const focusReq = fetch(`/api/focus-list/${examId}`)
-      .then(async (r) => (r.ok ? await r.json() : { focus_list: [] }))
-      .catch(() => ({ focus_list: [] }))
+    async function loadExam() {
+      try {
+        const examResponse = await fetch(`/api/exams/${examId}`, {
+          cache: 'no-store',
+          signal: controller.signal,
+        })
+        if (!examResponse.ok) throw new Error(`HTTP ${examResponse.status}`)
+        const examData = (await examResponse.json()) as ExamApiResponse
+        if (examData.exam.grade !== currentScope.grade) {
+          throw new Error(
+            `该考试属于${formatGradeLabel(examData.exam.grade)}，当前范围是${currentScope.label}。请先切换到对应年级后再查看。`,
+          )
+        }
 
-    Promise.all([examReq, focusReq])
-      .then(([examData, focusData]) => {
-        if (cancelled) return
+        let focusData: { focus_list?: FocusStudent[] } | null = null
+        try {
+          const focusResponse = await fetch(
+            `/api/focus-list/${examId}?class_num=${currentScope.classNum}`,
+            { cache: 'no-store', signal: controller.signal },
+          )
+          if (!focusResponse.ok) {
+            throw new Error(`重点关注加载失败 (HTTP ${focusResponse.status})`)
+          }
+          focusData = (await focusResponse.json()) as { focus_list?: FocusStudent[] }
+        } catch (cause) {
+          if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
+          setFocusError(cause instanceof Error ? cause.message : '重点关注加载失败')
+        }
+
         setExam(examData.exam)
         setClassAverages(examData.class_averages || [])
         setStats(examData.stats || {})
@@ -778,23 +810,19 @@ export default function ExamDetailPage() {
         setBandConfig(examData.band_config || DEFAULT_BAND_CONFIG)
         setRankDistribution(examData.rank_distribution || [])
         // focusData 来自 /api/focus-list；examData.focus_list 兼容（如果后端某天合并）
-        const list: FocusStudent[] =
-          (focusData?.focus_list as FocusStudent[]) || examData.focus_list || []
+        const list: FocusStudent[] = focusData?.focus_list || []
         setFocusList(list)
-      })
-      .catch((err) => {
-        if (cancelled) return
-        console.error(err)
-        setError(err?.message || '加载失败')
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-
-    return () => {
-      cancelled = true
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return
+        setError(err instanceof Error ? err.message : '加载失败')
+      } finally {
+        if (!controller.signal.aborted) setLoading(false)
+      }
     }
-  }, [examId, reloadKey])
+
+    void loadExam()
+    return () => controller.abort()
+  }, [activeScope?.classNum, activeScope?.grade, activeScope?.label, examId, reloadKey, scopeError, scopeLoading])
 
   useEffect(() => {
     if (!exam) return
@@ -805,34 +833,11 @@ export default function ExamDetailPage() {
     setRangeExamId(exam.id)
   }, [exam?.id, exam?.grade])
 
-  // 拉取本班绑定（用于趋势图默认选中本班）
-  useEffect(() => {
-    let cancelled = false
-    fetch('/api/teacher')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d: TeacherClasses | null) => {
-        if (!cancelled && d) setTeacherInfo(d)
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (!cancelled) setTeacherLoaded(true)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
   useEffect(() => {
     const grade = exam?.grade
-    if (!grade || !teacherLoaded || rankClass !== undefined) return
-    const bound =
-      grade === 1
-        ? teacherInfo?.target_class_high1
-        : grade === 2
-          ? teacherInfo?.target_class_high2
-          : teacherInfo?.target_class_high3
-    setRankClass(bound ?? null)
-  }, [exam?.grade, teacherLoaded, teacherInfo, rankClass])
+    if (!grade || scopeLoading || rankClass !== undefined) return
+    setRankClass(activeScope?.grade === grade ? activeScope.classNum : null)
+  }, [activeScope?.classNum, activeScope?.grade, exam?.grade, rankClass, scopeLoading])
 
   useEffect(() => {
     if (!exam?.grade) return
@@ -908,17 +913,11 @@ export default function ExamDetailPage() {
   // 初始化默认班级（本班）+ 拉取历次段位趋势；改阈值（reloadKey）后同步刷新
   useEffect(() => {
     const grade = exam?.grade
-    if (!grade || !teacherLoaded) return
+    if (!grade || scopeLoading) return
 
     // 首次：把默认班级设为本班（无绑定则全年级）
     if (trendClass === undefined) {
-      const bound =
-        grade === 1
-          ? teacherInfo?.target_class_high1
-          : grade === 2
-            ? teacherInfo?.target_class_high2
-            : teacherInfo?.target_class_high3
-      setTrendClass(bound ?? null)
+      setTrendClass(activeScope?.grade === grade ? activeScope.classNum : null)
       return
     }
 
@@ -935,7 +934,7 @@ export default function ExamDetailPage() {
     return () => {
       cancelled = true
     }
-  }, [exam?.grade, teacherLoaded, teacherInfo, trendClass, reloadKey])
+  }, [activeScope?.classNum, activeScope?.grade, exam?.grade, scopeLoading, trendClass, reloadKey])
 
   function openBandEditor() {
     setBandDraft(bandConfig)
@@ -1012,8 +1011,8 @@ export default function ExamDetailPage() {
   }, [students])
 
   const examKpis = useMemo(
-    () => (exam ? getExamKpis(exam.grade, stats, focusList.length) : []),
-    [exam, stats, focusList.length],
+    () => (exam ? getExamKpis(exam.grade, stats, focusError ? null : focusList.length) : []),
+    [exam, focusError, focusList.length, stats],
   )
 
   const frequencyMetricOptions = useMemo(
@@ -1035,13 +1034,16 @@ export default function ExamDetailPage() {
   // 学生成绩：过滤 + 排序
   const visibleStudents = useMemo(() => {
     const q = studentQuery.trim().toLowerCase()
-    let list = q
-      ? students.filter(
+    let list = students.filter(
+      (student) => !onlyCurrentClass || student.class_num === activeScope?.classNum,
+    )
+    list = q
+      ? list.filter(
           (s) =>
             (s.name || '').toLowerCase().includes(q) ||
             (s.student_id || '').toLowerCase().includes(q),
         )
-      : students.slice()
+      : list.slice()
 
     if (studentSortKey && studentSortDir) {
       const dir = studentSortDir === 'asc' ? 1 : -1
@@ -1058,7 +1060,7 @@ export default function ExamDetailPage() {
       list = list.slice().sort((a, b) => compareStudentId(a.student_id, b.student_id))
     }
     return list
-  }, [students, studentQuery, studentSortKey, studentSortDir])
+  }, [activeScope?.classNum, onlyCurrentClass, students, studentQuery, studentSortKey, studentSortDir])
 
   function toggleSort(key: string) {
     if (studentSortKey !== key) {
@@ -1075,9 +1077,9 @@ export default function ExamDetailPage() {
 
   if (loading) {
     return (
-      <div className="space-y-6">
+      <div className="space-y-5" aria-label="正在加载考试详情">
         <Skeleton className="h-9 w-72" />
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           {Array.from({ length: 4 }).map((_, i) => (
             <Skeleton key={i} className="h-28 w-full" />
           ))}
@@ -1094,62 +1096,63 @@ export default function ExamDetailPage() {
 
   if (error || !exam) {
     return (
-      <Card>
-        <CardContent className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-          <AlertCircle className="h-10 w-10 text-danger-500" />
-          <div className="text-base font-medium text-slate-900">加载失败</div>
-          <div className="text-sm text-slate-500">
-            {error || '未找到该考试'}
-          </div>
-          <Link href="/">
-            <Button variant="outline" size="sm">
-              <ChevronLeft className="mr-1 h-4 w-4" /> 返回首页
+      <StatePanel
+        tone="error"
+        title="考试详情加载失败"
+        description={error || '未找到该考试'}
+        action={
+          <div className="flex flex-wrap justify-center gap-2">
+            <Button variant="outline" onClick={() => setReloadKey((key) => key + 1)}>
+              重新加载
             </Button>
-          </Link>
-        </CardContent>
-      </Card>
+            <Button asChild variant="ghost">
+              <Link href="/exam"><ChevronLeft className="h-4 w-4" />返回考试列表</Link>
+            </Button>
+          </div>
+        }
+      />
     )
   }
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="space-y-3">
-        <Link
-          href="/"
-          className="inline-flex items-center text-sm text-slate-500 hover:text-slate-900"
-        >
-          <ChevronLeft className="mr-1 h-4 w-4" /> 返回
-        </Link>
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h1 className="text-2xl font-semibold text-slate-900">{exam.name}</h1>
-            <p className="mt-1 text-sm text-slate-500">
-              分析时间口径来自 EXAM_ORDER
-            </p>
-          </div>
+    <div className="space-y-5">
+      <PageHeader
+        eyebrow="Exam analysis"
+        title={exam.name}
+        description="成绩、排名、段位与重点关注统一使用当前考试的真实数据口径。"
+        actions={
           <div className="flex flex-wrap items-center gap-2">
+            <Button asChild variant="outline" size="lg" className="min-h-11">
+              <Link href="/exam"><ChevronLeft className="h-4 w-4" />考试列表</Link>
+            </Button>
             <Badge variant="default">{formatGradeLabel(exam.grade)}</Badge>
             <Badge variant="secondary">{exam.exam_date || '—'}</Badge>
-            {exam.exam_type ? (
-              <Badge variant="outline">{exam.exam_type}</Badge>
-            ) : null}
+            {exam.exam_type ? <Badge variant="outline">{exam.exam_type}</Badge> : null}
           </div>
-        </div>
-      </div>
+        }
+      />
 
       {/* KPI */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {examKpis.map((kpi) => (
-          <KpiCard
+          <StatCard
             key={kpi.title}
             icon={kpi.icon}
-            title={kpi.title}
+            label={kpi.title}
             value={kpi.value}
-            hint={kpi.hint}
+            helper={kpi.hint}
           />
         ))}
       </div>
+
+      {focusError ? (
+        <div
+          role="status"
+          className="rounded-lg border border-warning-200 bg-warning-50 px-4 py-3 text-sm text-warning-800"
+        >
+          重点关注名单加载失败，本页其余成绩与排名数据不受影响。重点关注指标暂以“—”显示。
+        </div>
+      ) : null}
 
       {rankDistribution.length > 0 ? (
         <Card>
@@ -1164,7 +1167,7 @@ export default function ExamDetailPage() {
 
       {/* Tabs */}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-        <TabsList className="flex h-auto max-w-full justify-start overflow-x-auto [-webkit-overflow-scrolling:touch] [&>button]:shrink-0">
+        <TabsList className="flex h-auto max-w-full justify-start overflow-x-auto [-webkit-overflow-scrolling:touch] [&>button]:min-h-11 [&>button]:shrink-0">
           <TabsTrigger value="averages">
             班级均分表
           </TabsTrigger>
@@ -1190,8 +1193,8 @@ export default function ExamDetailPage() {
             <Card className="overflow-hidden">
               <CardHeader className="flex flex-row items-center justify-end space-y-0 border-b border-slate-200 bg-white px-4 py-3">
                 <Button
-                  size="sm"
-                  className="h-8 gap-1.5"
+                  size="lg"
+                  className="min-h-11 gap-1.5"
                   onClick={() =>
                     exportClassAverageCsv(
                       classAverages,
@@ -1242,7 +1245,19 @@ export default function ExamDetailPage() {
               </div>
             </CardHeader>
             <CardContent>
-              {filteredFocus.length === 0 ? (
+              {focusError ? (
+                <StatePanel
+                  tone="error"
+                  title="重点关注暂不可用"
+                  description={`${focusError}。考试成绩与其他统计仍可正常查看。`}
+                  action={
+                    <Button type="button" variant="outline" size="lg" onClick={() => setReloadKey((key) => key + 1)}>
+                      重新加载重点关注
+                    </Button>
+                  }
+                  className="border-warning-200 bg-warning-50"
+                />
+              ) : filteredFocus.length === 0 ? (
                 <EmptyState
                   icon={<AlertCircle className="h-8 w-8 text-success-500" />}
                   title={focusQuery ? '没有匹配的学生' : '暂无重点关注'}
@@ -1278,7 +1293,7 @@ export default function ExamDetailPage() {
                           <TableCell>
                             <Link
                               href={`/student/${s.student_id}`}
-                              className="inline-flex items-center gap-2 text-slate-900 hover:text-brand-600"
+                              className="inline-flex min-h-11 items-center gap-2 text-slate-900 hover:text-brand-600"
                             >
                               <Avatar className="h-7 w-7">
                                 <AvatarFallback className="bg-brand-50 text-xs text-brand-700">
@@ -1331,7 +1346,7 @@ export default function ExamDetailPage() {
                   分数按各科相对名次配色，缺考显示「—」。
                 </CardDescription>
               </div>
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <FilterBar className="border-0 bg-transparent p-0 sm:flex-nowrap">
                 <div className="relative w-full sm:w-72">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                   <Input
@@ -1342,10 +1357,18 @@ export default function ExamDetailPage() {
                     disabled={students.length === 0}
                   />
                 </div>
-                <Button variant="outline" size="sm" disabled>
-                  仅看本班
+                <Button
+                  type="button"
+                  variant={onlyCurrentClass ? 'default' : 'outline'}
+                  size="lg"
+                  className="min-h-11"
+                  aria-pressed={onlyCurrentClass}
+                  onClick={() => setOnlyCurrentClass((value) => !value)}
+                  disabled={students.length === 0}
+                >
+                  {onlyCurrentClass ? `仅看${activeScope?.classNum ?? '本'}班` : '查看全部班级'}
                 </Button>
-              </div>
+              </FilterBar>
             </CardHeader>
             <CardContent>
               {students.length === 0 ? (
@@ -1353,6 +1376,12 @@ export default function ExamDetailPage() {
                   icon={<Users className="h-8 w-8 text-slate-400" />}
                   title="学生成绩明细暂不可用"
                   desc="后端 /api/exams/{id} 暂未返回完整学生分数列表。"
+                />
+              ) : visibleStudents.length === 0 ? (
+                <EmptyState
+                  icon={<Users className="h-8 w-8 text-slate-400" />}
+                  title={onlyCurrentClass ? `当前${activeScope?.classNum ?? ''}班暂无学生成绩` : '没有匹配的学生'}
+                  desc={onlyCurrentClass ? '可关闭“仅看本班”查看本场考试的其他班级。' : '请调整搜索关键词后重试。'}
                 />
               ) : (
                 <>
@@ -1387,7 +1416,7 @@ export default function ExamDetailPage() {
                     {bandConfig.weak_min} 名及以后。
                   </CardDescription>
                 </div>
-                <Button variant="outline" size="sm" onClick={openBandEditor}>
+                <Button variant="outline" size="lg" className="min-h-11" onClick={openBandEditor}>
                   自定义段位
                 </Button>
               </div>
@@ -1453,13 +1482,14 @@ export default function ExamDetailPage() {
                   <div className="mt-3 flex items-center justify-end gap-2">
                     <Button
                       variant="outline"
-                      size="sm"
+                      size="lg"
+                      className="min-h-11"
                       onClick={() => setBandEditorOpen(false)}
                       disabled={savingBand}
                     >
                       取消
                     </Button>
-                    <Button size="sm" onClick={saveBandConfig} disabled={savingBand}>
+                    <Button size="lg" className="min-h-11" onClick={saveBandConfig} disabled={savingBand}>
                       {savingBand ? '保存中…' : '保存并应用'}
                     </Button>
                   </div>
@@ -1547,7 +1577,7 @@ export default function ExamDetailPage() {
                       <label
                         key={choice.id}
                         className={cn(
-                          'inline-flex cursor-pointer items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs',
+                          'inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-xs',
                           checked
                             ? 'border-brand-300 bg-brand-50 text-brand-700'
                             : 'border-slate-200 bg-white text-slate-600',
@@ -1677,7 +1707,11 @@ function RankDistributionChart({
   keys: string[]
 }) {
   return (
-    <div className="h-56 w-full">
+    <div
+      className="h-56 w-full"
+      role="img"
+      aria-label={`排名分布柱状图，共${data.length}个排名区间，展示${keys.join('、') || '当前指标'}`}
+    >
       <ResponsiveContainer width="100%" height="100%">
         <BarChart data={data} margin={{ top: 8, right: 18, bottom: 0, left: 0 }}>
           <CartesianGrid stroke="#e5e7eb" strokeDasharray="3 3" vertical={false} />
@@ -1768,9 +1802,9 @@ function MetricButtonGroup({
           <Button
             key={option.value}
             type="button"
-            size="sm"
+            size="lg"
             variant={option.value === value ? 'default' : 'outline'}
-            className="h-8 px-2.5 text-xs"
+            className="min-h-11 px-3 text-xs"
             onClick={() => onChange(option.value)}
           >
             {option.label}
@@ -1900,8 +1934,8 @@ function StudentScoresTable({
 }) {
   if (grade === 1) {
     return (
-      <div className="max-h-[calc(100vh-18rem)] overflow-auto rounded-sm border border-slate-300 bg-white">
-        <table className="w-full min-w-[2100px] border-collapse text-center text-xs text-slate-900">
+      <DataTableShell maxHeight aria-label="高一学生成绩矩阵">
+        <table className="w-full min-w-[2100px] border-collapse text-right text-xs text-slate-900">
           <thead className="bg-white text-sm font-semibold text-slate-950">
             <tr>
               <ScoreTitleHead colSpan={34} className="sticky top-0 z-40 h-8">
@@ -1964,13 +1998,13 @@ function StudentScoresTable({
           <tbody>
             {rows.map((student) => (
               <tr key={student.student_id} className="bg-white">
-                <ScoreCell className="sticky left-0 z-20 w-[84px] min-w-[84px] bg-white font-mono text-xs text-slate-600">
+                <ScoreCell className="sticky left-0 z-20 w-[84px] min-w-[84px] bg-white text-left font-mono text-xs text-slate-600">
                   {student.student_id}
                 </ScoreCell>
-                <ScoreCell className="sticky left-[84px] z-20 w-12 min-w-12 bg-white text-slate-600">
+                <ScoreCell className="sticky left-[84px] z-20 w-12 min-w-12 bg-white text-right text-slate-600">
                   {student.class_num != null ? student.class_num : '—'}
                 </ScoreCell>
-                <ScoreCell className="sticky left-[132px] z-20 w-12 min-w-12 bg-white text-slate-600">
+                <ScoreCell className="sticky left-[132px] z-20 w-12 min-w-12 bg-white text-right text-slate-600">
                   {student.xueji ?? '—'}
                 </ScoreCell>
                 <ScoreCell className="sticky left-[180px] z-20 w-20 min-w-20 bg-white text-left shadow-[inset_-2px_0_0_#cbd5e1]">
@@ -1996,13 +2030,13 @@ function StudentScoresTable({
             ))}
           </tbody>
         </table>
-      </div>
+      </DataTableShell>
     )
   }
 
   return (
-    <div className="max-h-[calc(100vh-18rem)] overflow-auto rounded-sm border border-slate-300 bg-white">
-      <table className="w-full min-w-[1660px] border-collapse text-center text-xs text-slate-900">
+    <DataTableShell maxHeight aria-label="高二高三学生成绩矩阵">
+      <table className="w-full min-w-[1660px] border-collapse text-right text-xs text-slate-900">
         <thead className="bg-[#dbe4f2] text-sm font-semibold text-slate-950">
           <tr>
             <ScoreHead rowSpan={2} className="sticky left-0 top-0 z-50 w-[84px] min-w-[84px] bg-[#dbe4f2]">
@@ -2069,7 +2103,7 @@ function StudentScoresTable({
         <tbody>
           {rows.map((student) => (
             <tr key={student.student_id} className="bg-white">
-              <ScoreCell className="sticky left-0 z-20 w-[84px] min-w-[84px] bg-white font-mono text-xs text-slate-600">
+              <ScoreCell className="sticky left-0 z-20 w-[84px] min-w-[84px] bg-white text-left font-mono text-xs text-slate-600">
                 {student.student_id}
               </ScoreCell>
               <ScoreCell className="sticky left-[84px] z-20 w-20 min-w-20 bg-white text-left">
@@ -2077,7 +2111,7 @@ function StudentScoresTable({
                   {student.name}
                 </Link>
               </ScoreCell>
-              <ScoreCell className="sticky left-[164px] z-20 w-14 min-w-14 bg-white text-slate-600 shadow-[inset_-2px_0_0_#cbd5e1]">
+              <ScoreCell className="sticky left-[164px] z-20 w-14 min-w-14 bg-white text-right text-slate-600 shadow-[inset_-2px_0_0_#cbd5e1]">
                 {student.class_num != null ? `${student.class_num}班` : '—'}
               </ScoreCell>
               {BASE_AVERAGE_SUBJECTS.map((subject) => (
@@ -2101,7 +2135,7 @@ function StudentScoresTable({
           ))}
         </tbody>
       </table>
-    </div>
+    </DataTableShell>
   )
 }
 
@@ -2120,28 +2154,28 @@ function StudentScoreMobileCards({
     : (['主三门', '3+3'] as const)
 
   return (
-    <div className="space-y-3 md:hidden">
+    <ScoreMatrixMobile aria-label="移动端学生成绩卡片">
       {rows.map((student) => (
         <div
           key={student.student_id}
-          className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm"
+          className="rounded-lg border border-border bg-white p-3"
         >
           {/* 头部：姓名 + 班级 / 学籍 / 学号 */}
-          <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-2">
+          <div className="flex flex-col items-start justify-between gap-2 border-b border-border pb-2 sm:flex-row sm:items-center">
             <Link
               href={`/student/${student.student_id}`}
-              className="font-medium text-slate-900 hover:text-brand-600"
+              className="inline-flex min-h-11 items-center font-medium text-slate-900 hover:text-brand-600"
             >
               {student.name}
             </Link>
-            <div className="flex items-center gap-1.5 text-xs text-slate-500">
+            <div className="flex max-w-full flex-wrap items-center gap-1.5 text-xs text-muted-foreground sm:justify-end">
               {student.class_num != null && (
                 <Badge variant="secondary" className="font-normal">
                   {student.class_num}班
                 </Badge>
               )}
               {isGradeOne && student.xueji != null && <span>学籍{student.xueji}</span>}
-              <span className="font-mono">{student.student_id}</span>
+              <span className="break-all font-mono">{student.student_id}</span>
             </div>
           </div>
 
@@ -2164,17 +2198,38 @@ function StudentScoreMobileCards({
               const rank = isGradeOne
                 ? getStudentTotalXuejiRank(student, tt)
                 : getStudentTotalRank(student, tt)
+              const percentile = isGradeOne ? getStudentTotalPercentile(student, tt) : null
+              const gradeRank = isGradeOne ? getStudentTotalGradeRank(student, tt) : null
               return (
-                <div key={tt} className="rounded bg-slate-50 px-2 py-1 text-xs">
-                  <span className="text-slate-500">{tt}</span>
-                  <span className="ml-1 font-semibold tabular-nums text-slate-900">
-                    {score == null ? '—' : formatInt(score)}
-                  </span>
-                  {rank != null && (
-                    <span className="ml-1 text-slate-400">
-                      {isGradeOne ? '学籍' : ''}名次{formatInt(rank)}
-                    </span>
-                  )}
+                <div key={tt} className="min-w-full rounded-md border border-border bg-slate-50 px-3 py-2 text-xs">
+                  <div className="font-semibold text-slate-700">{tt}</div>
+                  <dl className={cn('mt-1 grid gap-x-3 gap-y-1', isGradeOne ? 'grid-cols-2' : 'grid-cols-2')}>
+                    <div>
+                      <dt className="text-[10px] text-slate-400">总分</dt>
+                      <dd className="font-semibold tabular-nums text-slate-900">{score == null ? '—' : formatInt(score)}</dd>
+                    </div>
+                    {isGradeOne ? (
+                      <>
+                        <div>
+                          <dt className="text-[10px] text-slate-400">年级百分位</dt>
+                          <dd className="tabular-nums text-slate-700">{formatPercentile(percentile)}</dd>
+                        </div>
+                        <div>
+                          <dt className="text-[10px] text-slate-400">学籍排名</dt>
+                          <dd className="tabular-nums text-slate-700">{rank == null ? '—' : formatInt(rank)}</dd>
+                        </div>
+                        <div>
+                          <dt className="text-[10px] text-slate-400">年级排名</dt>
+                          <dd className="tabular-nums text-slate-700">{gradeRank == null ? '—' : formatInt(gradeRank)}</dd>
+                        </div>
+                      </>
+                    ) : (
+                      <div>
+                        <dt className="text-[10px] text-slate-400">排名</dt>
+                        <dd className="tabular-nums text-slate-700">{rank == null ? '—' : formatInt(rank)}</dd>
+                      </div>
+                    )}
+                  </dl>
                 </div>
               )
             })}
@@ -2207,7 +2262,7 @@ function StudentScoreMobileCards({
           </div>
         </div>
       ))}
-    </div>
+    </ScoreMatrixMobile>
   )
 }
 
@@ -2261,12 +2316,12 @@ function StudentScoreCell({
   const content = value == null ? '—' : formatInt(value)
   if (asTableCell) {
     return (
-      <TableCell className={cn('text-center text-sm tabular-nums', cls, className)}>
+      <TableCell className={cn('text-right text-sm tabular-nums', cls, className)}>
         {content}
       </TableCell>
     )
   }
-  return <ScoreCell className={cn('tabular-nums', cls, className)}>{content}</ScoreCell>
+  return <ScoreCell className={cn('text-right tabular-nums', cls, className)}>{content}</ScoreCell>
 }
 
 function StudentPercentileCell({
@@ -2279,7 +2334,7 @@ function StudentPercentileCell({
   return (
     <ScoreCell
       className={cn(
-        'tabular-nums',
+        'text-right tabular-nums',
         value == null ? 'bg-slate-50 text-slate-400' : 'bg-white text-slate-700',
         className,
       )}
@@ -2306,16 +2361,29 @@ function ScoreTitleHead({
 
 function ScoreHead({
   className,
+  children,
   ...props
 }: ThHTMLAttributes<HTMLTableCellElement>) {
+  const sortProps = isValidElement<SortableHeadProps>(children) ? children.props : null
+  const ariaSort =
+    sortProps?.active === sortProps?.sortKey && sortProps?.dir
+      ? sortProps.dir === 'asc'
+        ? 'ascending'
+        : 'descending'
+      : sortProps?.sortKey
+        ? 'none'
+        : undefined
   return (
     <th
       className={cn(
-        'border border-slate-600 px-1 py-1 align-middle whitespace-nowrap',
+        'whitespace-nowrap border border-strong-border px-1 py-1 align-middle',
         className,
       )}
+      aria-sort={ariaSort}
       {...props}
-    />
+    >
+      {children}
+    </th>
   )
 }
 
@@ -2326,7 +2394,7 @@ function ScoreCell({
   return (
     <td
       className={cn(
-        'border border-slate-300 px-1.5 py-1 align-middle whitespace-nowrap',
+        'whitespace-nowrap border border-border px-1.5 py-1 align-middle',
         className,
       )}
       {...props}
@@ -2579,34 +2647,6 @@ function getSortValue(
   }
 }
 
-interface KpiCardProps {
-  icon: React.ReactNode
-  title: string
-  value: string
-  hint?: string
-}
-
-function KpiCard({ icon, title, value, hint }: KpiCardProps) {
-  return (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-sm font-medium text-slate-500">
-          {title}
-        </CardTitle>
-        <span className="text-slate-400">{icon}</span>
-      </CardHeader>
-      <CardContent>
-        <div className="text-2xl font-semibold text-slate-900 tabular-nums">
-          {value}
-        </div>
-        {hint ? (
-          <p className="mt-1 text-xs text-slate-500">{hint}</p>
-        ) : null}
-      </CardContent>
-    </Card>
-  )
-}
-
 interface EmptyStateProps {
   icon: React.ReactNode
   title: string
@@ -2661,8 +2701,9 @@ function SortButton({
     <button
       type="button"
       onClick={() => onSort(sortKey)}
+      aria-label={`${label}排序${isActive ? (dir === 'asc' ? '，当前升序' : '，当前降序') : ''}`}
       className={cn(
-        'flex w-full items-center gap-1 text-xs font-semibold text-slate-900 hover:text-brand-700',
+        'flex min-h-11 w-full items-center gap-1 text-xs font-semibold text-foreground hover:text-brand-700 md:min-h-0',
         justify,
       )}
     >
@@ -2700,12 +2741,16 @@ function SortableHead({
       ? 'justify-end'
       : 'justify-start'
   return (
-    <TableHead className={cn('cursor-pointer select-none', className)}>
+    <TableHead
+      className={cn('cursor-pointer select-none', className)}
+      aria-sort={isActive ? (dir === 'asc' ? 'ascending' : 'descending') : 'none'}
+    >
       <button
         type="button"
         onClick={() => onSort(sortKey)}
+        aria-label={`${label}排序${isActive ? (dir === 'asc' ? '，当前升序' : '，当前降序') : ''}`}
         className={cn(
-          'flex w-full items-center gap-1 text-xs font-medium text-slate-500 hover:text-slate-900',
+          'flex min-h-11 w-full items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground md:min-h-0',
           justify,
         )}
       >

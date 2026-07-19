@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+产品名称为 **成绩分析（班主任版）**。全站以教师已绑定的 `grade + class_num` 为唯一运行时作用域；禁止添加固定班号回退。
+
 ## 快速命令
 
 跨平台启动器在 `run.py`，所有 `.sh / .command / .bat` 双击入口都委托给它。
@@ -24,6 +26,7 @@ cd backend && source .venv/bin/activate && uvicorn app.main:app --reload --port 
 cd frontend && npm run dev          # localhost:3000
 npx tsc --noEmit                    # 类型检查
 npm run build                       # 生产构建
+npm run test:ui                     # UI 契约 + 班级作用域交互测试
 
 # 后端测试
 cd backend && source .venv/bin/activate && pytest tests/

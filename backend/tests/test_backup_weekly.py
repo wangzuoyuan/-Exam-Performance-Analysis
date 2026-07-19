@@ -1,11 +1,23 @@
 """备份/恢复与本周关注的测试。"""
 
-import os
-
 import pytest
+from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.paths import BACKUP_DIR
+
+
+@pytest.fixture(autouse=True)
+def bind_weekly_focus_class():
+    from app.db.models import SessionLocal, Teacher
+
+    db = SessionLocal()
+    teacher = db.query(Teacher).first() or Teacher()
+    teacher.target_class_high1 = 4
+    db.add(teacher)
+    db.commit()
+    db.close()
 
 
 @pytest.fixture
@@ -29,10 +41,9 @@ def test_backup_list_download(client):
     assert dl.content[:2] == b"PK"  # zip 魔数
 
     # 清理刚生成的测试备份
-    backup_dir = os.path.expanduser("~/.exam-tracker-backups")
-    path = os.path.join(backup_dir, body["filename"])
-    if os.path.exists(path):
-        os.remove(path)
+    path = Path(BACKUP_DIR) / body["filename"]
+    if path.exists():
+        path.unlink()
 
 
 def test_restore_missing_file(client):
@@ -41,7 +52,7 @@ def test_restore_missing_file(client):
 
 
 def test_weekly_focus_shape(client):
-    r = client.get("/api/weekly-focus?class_num=6")
+    r = client.get("/api/weekly-focus?class_num=4")
     assert r.status_code == 200
     body = r.json()
     assert "students" in body and "week" in body

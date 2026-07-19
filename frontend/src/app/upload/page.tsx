@@ -3,9 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import {
-  Check,
   FileSpreadsheet,
-  History,
   Loader2,
   UploadCloud,
   X,
@@ -34,6 +32,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { useHomeroomScope } from '@/components/providers/HomeroomScopeProvider'
+import { PageHeader } from '@/components/patterns/PageHeader'
+import { StepWizard } from '@/components/patterns/StepWizard'
+import { UploadDropzone } from '@/components/patterns/UploadDropzone'
+import { PartialSuccessPanel } from '@/components/patterns/PartialSuccessPanel'
+import { StatePanel } from '@/components/patterns/StatePanel'
 
 type StepKey = 'class' | 'file' | 'done'
 
@@ -113,78 +117,19 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
 }
 
-interface StepDef {
-  key: StepKey
-  index: number
-  title: string
+async function responseError(response: Response, fallback: string) {
+  const body = (await response.json().catch(() => null)) as { detail?: string; message?: string } | null
+  return new Error(body?.detail || body?.message || `${fallback}（HTTP ${response.status}）`)
 }
 
-const STEPS: StepDef[] = [
-  { key: 'class', index: 1, title: '绑定班级' },
-  { key: 'file', index: 2, title: '选择 Excel 文件' },
-  { key: 'done', index: 3, title: '解析与确认' },
+const STEPS = [
+  { key: 'class', title: '绑定班级', description: '确认行政班范围' },
+  { key: 'file', title: '选择文件', description: '支持多份 Excel' },
+  { key: 'done', title: '解析与确认', description: '逐文件核对后入库' },
 ]
 
-function StepIndicator({
-  currentStep,
-  completed,
-}: {
-  currentStep: StepKey
-  completed: Record<StepKey, boolean>
-}) {
-  const currentIdx = STEPS.findIndex((s) => s.key === currentStep)
-
-  return (
-    <div className="flex items-center">
-      {STEPS.map((step, i) => {
-        const isDone = completed[step.key]
-        const isActive = step.key === currentStep && !isDone
-        const isPending = !isDone && !isActive
-
-        return (
-          <div key={step.key} className="flex flex-1 items-center">
-            <div className="flex items-center gap-3">
-              <div
-                className={cn(
-                  'flex h-9 w-9 items-center justify-center rounded-full text-sm font-semibold transition-colors',
-                  isDone && 'bg-success-500 text-white',
-                  isActive && 'bg-brand-500 text-white',
-                  isPending && 'bg-slate-200 text-slate-500'
-                )}
-              >
-                {isDone ? <Check className="h-5 w-5" /> : step.index}
-              </div>
-              <div className="hidden sm:block">
-                <div
-                  className={cn(
-                    'text-sm font-medium',
-                    isDone && 'text-success-500',
-                    isActive && 'text-brand-700',
-                    isPending && 'text-slate-500'
-                  )}
-                >
-                  {step.title}
-                </div>
-              </div>
-            </div>
-            {i < STEPS.length - 1 && (
-              <div
-                className={cn(
-                  'mx-4 h-px flex-1 border-t border-dashed',
-                  i < currentIdx || completed[STEPS[i + 1].key]
-                    ? 'border-success-500'
-                    : 'border-slate-300'
-                )}
-              />
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
 export default function UploadPage() {
+  const { refreshTeacher } = useHomeroomScope()
   const [step, setStep] = useState<StepKey>('class')
   const [completed, setCompleted] = useState<Record<StepKey, boolean>>({
     class: false,
@@ -194,6 +139,8 @@ export default function UploadPage() {
 
   // 班级绑定
   const [teacher, setTeacher] = useState<TeacherInfo | null>(null)
+  const [teacherLoading, setTeacherLoading] = useState(true)
+  const [teacherError, setTeacherError] = useState<string | null>(null)
   const [bindHigh1, setBindHigh1] = useState<string>(NO_CLASS)
   const [bindHigh2, setBindHigh2] = useState<string>(NO_CLASS)
   const [bindHigh3, setBindHigh3] = useState<string>(NO_CLASS)
@@ -202,10 +149,8 @@ export default function UploadPage() {
 
   // 文件上传
   const [files, setFiles] = useState<File[]>([])
-  const [isDragging, setIsDragging] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
   const fileSectionRef = useRef<HTMLDivElement>(null)
 
   // 解析结果
@@ -221,11 +166,16 @@ export default function UploadPage() {
 
   // 拉取已绑定状态
   useEffect(() => {
-    let aborted = false
-    fetch('/api/teacher')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data: TeacherInfo | null) => {
-        if (aborted || !data) return
+    const controller = new AbortController()
+    setTeacherLoading(true)
+    setTeacherError(null)
+    fetch('/api/teacher', { cache: 'no-store', signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw await responseError(response, '班级配置加载失败')
+        return response.json() as Promise<TeacherInfo>
+      })
+      .then((data) => {
+        if (controller.signal.aborted) return
         setTeacher(data)
         setBindHigh1(selectValueOf(data.target_class_high1))
         setBindHigh2(selectValueOf(data.target_class_high2))
@@ -239,9 +189,15 @@ export default function UploadPage() {
           setStep((s) => (s === 'class' ? 'file' : s))
         }
       })
-      .catch(() => undefined)
+      .catch((cause) => {
+        if (controller.signal.aborted) return
+        setTeacherError(cause instanceof Error ? cause.message : '班级配置加载失败')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setTeacherLoading(false)
+      })
     return () => {
-      aborted = true
+      controller.abort()
     }
   }, [])
 
@@ -250,15 +206,13 @@ export default function UploadPage() {
   }
 
   async function postBind(grade: 1 | 2 | 3, classNum: number | null) {
-    // 接口必须传 class_num；未带班用 0 占位实际意义不明，因此仅在 classNum != null 时调用
-    if (classNum == null) return
     const res = await fetch('/api/teacher/bind-class', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ class_num: classNum, grade }),
     })
     if (!res.ok) {
-      throw new Error(`保存高${grade}班级失败 (${res.status})`)
+      throw await responseError(res, `保存高${grade}班级失败`)
     }
   }
 
@@ -270,22 +224,17 @@ export default function UploadPage() {
       const h2 = parseSelect(bindHigh2)
       const h3 = parseSelect(bindHigh3)
 
-      if (h1 == null && h2 == null && h3 == null) {
-        setBindError('至少为一个年级选择班级')
-        setSavingBind(false)
-        return
-      }
-
-      // 依次提交（后端按 grade 分字段保存）
-      if (h1 != null) await postBind(1, h1)
-      if (h2 != null) await postBind(2, h2)
-      if (h3 != null) await postBind(3, h3)
+      // 三个年级都提交，null 表示真实解除该年级绑定。
+      await postBind(1, h1)
+      await postBind(2, h2)
+      await postBind(3, h3)
 
       setTeacher({
         target_class_high1: h1,
         target_class_high2: h2,
         target_class_high3: h3,
       })
+      await refreshTeacher()
       setCompleted((c) => ({ ...c, class: true }))
       setStep('file')
       // 滚动到 Step 2
@@ -302,19 +251,8 @@ export default function UploadPage() {
   function addFiles(incoming: FileList | File[]) {
     const next = Array.from(incoming).filter((f) => f.name.toLowerCase().endsWith('.xlsx'))
     if (next.length === 0) return
-    setFiles((prev) => {
-      // 去重（按 name + size）
-      const seen = new Set(prev.map((f) => `${f.name}::${f.size}`))
-      const merged = [...prev]
-      for (const f of next) {
-        const key = `${f.name}::${f.size}`
-        if (!seen.has(key)) {
-          merged.push(f)
-          seen.add(key)
-        }
-      }
-      return merged
-    })
+    // 不按文件名/大小去重：来自不同目录的同名文件必须逐份预览和提交。
+    setFiles((prev) => [...prev, ...next])
   }
 
   function removeFile(idx: number) {
@@ -333,7 +271,7 @@ export default function UploadPage() {
     try {
       const res = await fetch('/api/uploads/preview', { method: 'POST', body: formData })
       if (!res.ok) {
-        throw new Error(`识别失败（HTTP ${res.status}）`)
+        throw await responseError(res, '识别失败')
       }
       const data: { files?: PreviewItem[] } = await res.json()
       const thisYear = new Date().getFullYear()
@@ -374,6 +312,7 @@ export default function UploadPage() {
         body: JSON.stringify({
           items: previewItems.map((it) => ({
             token: it.token,
+            filename: it.filename,
             grade: it.grade,
             semester: it.semester,
             exam_type: it.exam_type,
@@ -383,7 +322,7 @@ export default function UploadPage() {
         }),
       })
       if (!res.ok) {
-        throw new Error(`入库失败（HTTP ${res.status}）`)
+        throw await responseError(res, '入库失败')
       }
       const data: UploadResponse = await res.json()
       setResults(data.results || [])
@@ -409,24 +348,15 @@ export default function UploadPage() {
 
   return (
     <div className="space-y-6">
-      {/* 顶部 */}
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-900">数据上传</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            上传学生分数表 / 班级均分表 / 名次段表（.xlsx）
-          </p>
-        </div>
-        <Button variant="outline" disabled title="即将上线">
-          <History className="mr-1 h-4 w-4" />
-          查看上传历史
-        </Button>
-      </div>
+      <PageHeader title="数据上传" description="上传学生分数表、班级均分表和名次段表；系统先识别预览，确认后才写入数据库。" />
+
+      {teacherLoading && <StatePanel tone="loading" title="正在读取班级绑定" />}
+      {teacherError && <StatePanel tone="error" title="班级绑定读取失败" description={teacherError} />}
 
       {/* 三步指示器 */}
       <Card>
         <CardContent className="py-5">
-          <StepIndicator currentStep={step} completed={completed} />
+          <StepWizard steps={STEPS} current={step} completed={STEPS.filter((item) => completed[item.key as StepKey]).map((item) => item.key)} />
         </CardContent>
       </Card>
 
@@ -516,48 +446,7 @@ export default function UploadPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div
-            onDragOver={(e) => {
-              e.preventDefault()
-              setIsDragging(true)
-            }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={(e) => {
-              e.preventDefault()
-              setIsDragging(false)
-              addFiles(e.dataTransfer.files)
-            }}
-            onClick={() => inputRef.current?.click()}
-            className={cn(
-              'flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-12 text-center transition-colors',
-              isDragging
-                ? 'border-brand-500 bg-brand-50'
-                : 'border-slate-300 hover:border-brand-500 hover:bg-brand-50'
-            )}
-          >
-            <UploadCloud
-              className={cn(
-                'h-12 w-12 transition-colors',
-                isDragging ? 'text-brand-500' : 'text-slate-400'
-              )}
-            />
-            <p className="mt-3 text-sm text-slate-600">
-              拖入 Excel 文件，或
-              <span className="ml-1 font-medium text-brand-600">点击选择文件</span>
-            </p>
-            <p className="mt-1 text-xs text-slate-400">仅支持 .xlsx，可多选</p>
-            <input
-              ref={inputRef}
-              type="file"
-              multiple
-              accept=".xlsx"
-              className="hidden"
-              onChange={(e) => {
-                if (e.target.files) addFiles(e.target.files)
-                e.target.value = ''
-              }}
-            />
-          </div>
+          <UploadDropzone onFiles={addFiles} disabled={uploading} />
 
           {files.length > 0 && (
             <div className="space-y-2">
@@ -812,6 +701,13 @@ export default function UploadPage() {
           </DialogHeader>
 
           <div className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
+            {results.length > 0 && (
+              <PartialSuccessPanel
+                label="文件解析"
+                success={results.filter((item) => item.parsed_ok).length}
+                failed={results.filter((item) => !item.parsed_ok).length}
+              />
+            )}
             {results.map((r, i) => (
               <Card
                 key={`${r.filename}-${i}`}

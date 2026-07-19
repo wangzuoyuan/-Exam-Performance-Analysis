@@ -1,11 +1,13 @@
 {
   "name": "exam-tracker-frontend",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "next build",
-    "start": "next start -p 3000"
+    "start": "next start -p 3000",
+    "test:ui": "node --test tests/ui-contracts.test.mjs && npm run test:scope",
+    "test:scope": "vitest run tests/homeroom-scope-provider.test.tsx"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.11",
@@ -33,9 +35,12 @@
     "typescript": "^5.5.0"
   },
   "devDependencies": {
+    "@testing-library/react": "^16.3.0",
     "@types/node": "^20.0.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
-    "autoprefixer": "^10.5.0"
+    "autoprefixer": "^10.5.0",
+    "jsdom": "^26.1.0",
+    "vitest": "^3.2.4"
   }
 }

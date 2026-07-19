@@ -4,36 +4,60 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    --background: 36 33% 97%;
+    --foreground: 210 20% 23%;
     --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card-foreground: 210 20% 23%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
-    --radius: 0.5rem;
+    --popover-foreground: 210 20% 23%;
+    --primary: 211 47% 44%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 36 33% 92%;
+    --secondary-foreground: 210 20% 23%;
+    --muted: 36 33% 92%;
+    --muted-foreground: 210 10% 44%;
+    --accent: 35 64% 95%;
+    --accent-foreground: 33 68% 39%;
+    --destructive: 1 47% 53%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 35 24% 90%;
+    --input: 35 19% 82%;
+    --ring: 211 47% 44%;
+    --radius: 0.625rem;
+  }
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 12mm;
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
   }
 }
 
 @layer base {
   * {
-    @apply border-[var(--border)];
+    @apply border-border;
+    box-sizing: border-box;
+  }
+  html {
+    background: hsl(var(--background));
   }
   body {
-    @apply bg-background text-foreground;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    @apply min-h-screen bg-background text-foreground antialiased;
+    font-family: Mulish, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  ::selection {
+    background: rgba(59, 110, 165, 0.18);
+  }
+  :focus-visible {
+    outline-color: #3b6ea5;
   }
   /* 触屏惯性滚动：所有横向滚动容器（宽表格、Tab 条）在 iOS 上顺滑滑动 */
   .overflow-x-auto {
