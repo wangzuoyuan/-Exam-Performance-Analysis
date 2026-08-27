@@ -200,12 +200,12 @@ mcp_servers:
     connect_timeout: 60
 ```
 
-改完**重启 Hermes**；交互会话中也可执行 `/reload-mcp` 热加载。连接成功后，工具分别以 **`mcp_homeroom_grade_tracker_`** 与 **`mcp_grade_tracker_`** 前缀出现（如 `mcp_homeroom_grade_tracker_student_learning_profile`）—— 前缀来自**连接 key**（客户端命名空间要求），服务端不给工具改名、不建重复别名。
+改完**重启 Hermes**；交互会话中也可执行 `/reload-mcp` 热加载。连接成功后，Hermes 以双下划线命名工具（`mcp__<server_key>__<tool>`），分别以 **`mcp__homeroom_grade_tracker__`** 与 **`mcp__grade_tracker__`** 前缀出现（如 `mcp__homeroom_grade_tracker__student_learning_profile`）—— 前缀来自 **Hermes 客户端命名空间**（由连接 key 派生），服务端不给工具改名、不建重复别名。
 
 **两个应用怎么选**（写给 Hermes 里的 AI / 自己记）：
 
-- 提到 **班主任、行政班、全科、总分、综合画像、作业/谈话档案** → 用班主任版（`mcp_homeroom_grade_tracker_*`）
-- 提到 **任课老师、教学班、任教学科、单科** → 用任课教师版（`mcp_grade_tracker_*`）
+- 提到 **班主任、行政班、全科、总分、综合画像、作业/谈话档案** → 用班主任版（`mcp__homeroom_grade_tracker__*`）
+- 提到 **任课老师、教学班、任教学科、单科** → 用任课教师版（`mcp__grade_tracker__*`）
 
 > 提示：Hermes 运行环境需已安装 `mcp` Python 包（`pip install "mcp>=2"`）。token 等同全量只读学情权限，不要提交到 git。
 
@@ -248,7 +248,7 @@ curl -s -X POST https://grade.zuoyuan.wang:9500/mcp/ \
 hermes mcp test homeroom_grade_tracker
 ```
 
-最终以 Hermes 实际调用为准：重启 Hermes（或会话内 `/reload-mcp`）后，直接用自然语言让 AI 调 `mcp_homeroom_grade_tracker_list_exams`（如「用班主任版列一下已建档考试」），确认返回真实数据。
+最终以 Hermes 实际调用为准：重启 Hermes（或会话内 `/reload-mcp`）后，直接用自然语言让 AI 调 `mcp__homeroom_grade_tracker__list_exams`（如「用班主任版列一下已建档考试」），确认返回真实数据。
 
 ### 7. 安全边界
 

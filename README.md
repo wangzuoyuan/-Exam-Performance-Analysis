@@ -382,12 +382,12 @@ OPENAI_MODEL=gpt-4o-mini
 
 ### 与任课教师版（教学版）在 Hermes 中并存
 
-两个应用完全独立部署，服务端**不给工具名加前缀、不建重复别名**。Hermes 里靠**连接 key** 区分命名空间（这是客户端要求）：班主任版连接 key 写 `homeroom_grade_tracker`，任课教师版保持 `grade_tracker`，两者的 token 也各自独立。连接成功后工具分别显示为 `mcp_homeroom_grade_tracker_*` 与 `mcp_grade_tracker_*`。
+两个应用完全独立部署，服务端**不给工具名加前缀、不建重复别名**。Hermes 里靠**连接 key** 区分命名空间（这是客户端要求）：班主任版连接 key 写 `homeroom_grade_tracker`，任课教师版保持 `grade_tracker`，两者的 token 也各自独立。连接成功后 Hermes 以双下划线命名工具，分别显示为 `mcp__homeroom_grade_tracker__*` 与 `mcp__grade_tracker__*`。
 
 简短使用规则（写给 Hermes 里的 AI / 自己记）：
 
-- 提到 **班主任、行政班、全科、总分、综合画像、作业/谈话档案** → 用班主任版（`mcp_homeroom_grade_tracker_*`）
-- 提到 **任课老师、教学班、任教学科、单科** → 用任课教师版（`mcp_grade_tracker_*`）
+- 提到 **班主任、行政班、全科、总分、综合画像、作业/谈话档案** → 用班主任版（`mcp__homeroom_grade_tracker__*`）
+- 提到 **任课老师、教学班、任教学科、单科** → 用任课教师版（`mcp__grade_tracker__*`）
 
 Token 生成、NAS 配置、Hermes 笔记本端配置与验证命令见 [DEPLOY.md](DEPLOY.md) 的「只读 MCP 服务端」一节。
 
