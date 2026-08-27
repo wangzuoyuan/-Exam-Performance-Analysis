@@ -97,15 +97,15 @@ tail -f ~/.exam-tracker/frontend.log
 - `notes/router.py`（`/api/notes`）：`GET /{student_id}`、`POST`、`PUT /{id}`（含跟进勾选）、`DELETE /{id}`，管理 `student_note` 成长/谈话档案。
 - `backup/router.py`（`/api/backup`）：`POST /backup`、`GET /backups`、`GET /backup/{name}/download`、`POST /restore`。备份目录 `~/.exam-tracker-backups`（在 DATA_DIR 之外）。
 
-## 对话工具集（19 个只读工具，`chat/tools.py`）
+## 对话工具集（20 个只读工具，`chat/tools.py`）
 
-成绩 15 个：`list_exams` / `student_lookup` / `student_exam_detail` / `student_trend` / `student_learning_profile` / `class_trend` / `compare_classes` / `focus_list` / `subject_weakness` / `subject_progress_ranking` / `multi_exam_progress_ranking` / `band_trend` / `custom_rank_band_trend` / `rank_range_filter` / `rank_frequency_stat`
+成绩 16 个：`list_exams` / `student_lookup` / `student_identity_lookup` / `student_exam_detail` / `student_trend` / `student_learning_profile` / `class_trend` / `compare_classes` / `focus_list` / `subject_weakness` / `subject_progress_ranking` / `multi_exam_progress_ranking` / `band_trend` / `custom_rank_band_trend` / `rank_range_filter` / `rank_frequency_stat`
 
 作业 3 个：`student_homework_summary` / `class_homework_ranking` / `homework_grade_correlation`（支持 `subject` 参数，总览模式附各科皮尔逊相关排序）
 
 档案 1 个：`student_notes`（读取某生成长/谈话档案，结合成绩与缺交辅助起草谈话/家长沟通）
 
-新增工具只需在 `tools.py` 里添加函数并注册到 `TOOL_FUNCTIONS` 字典和 `TOOLS` 列表，`session.py` 自动调度。
+新增工具只需在 `tools.py` 里添加函数、注册到 `TOOL_FUNCTIONS` 字典，并在 `TOOL_REGISTRY` 加条目（纯只读查询标 `read_only: True`）。`TOOLS` 是注册表的投影（name/description/input_schema 三键，`session.py` 自动调度）；`read_only: True` 的条目同时会进入只读 MCP 目录（`app/mcp_server.py`，`MCP_ENABLED` 默认关闭），写入/删除类工具不要标。
 
 ## 数据流关键路径
 

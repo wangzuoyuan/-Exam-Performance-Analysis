@@ -1,3 +1,5 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
@@ -5,7 +7,32 @@ import os
 
 from starlette.responses import JSONResponse as _JSONResponse  # noqa: E402
 
-app = FastAPI(title="成绩分析（班主任版）API", version="2.0.0")
+# 只读 MCP 服务端（Streamable HTTP）。MCP_ENABLED 缺省 false：不挂载、不导入
+# mcp SDK、现有应用完全不受影响。启用时 token/目录校验失败会让启动直接失败
+# （fail closed：宁可不起，也不裸奔）。
+_MCP_ENABLED = os.environ.get("MCP_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+_MCP_MOUNT = None
+if _MCP_ENABLED:
+    from app.mcp_server import MCP_MOUNT_PATH, MCPMount, mount_mcp
+
+    _MCP_MOUNT: MCPMount = mount_mcp()
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """宿主 lifespan：MCP 启用时进入其 session manager（挂载的子应用
+    lifespan 不会被 Starlette 执行，必须由最外层 ASGI 应用负责）。"""
+    if _MCP_MOUNT is not None:
+        async with _MCP_MOUNT.session_manager().run():
+            yield
+    else:
+        yield
+
+
+app = FastAPI(title="成绩分析（班主任版）API", version="2.0.0", lifespan=_lifespan)
+
+if _MCP_MOUNT is not None:
+    app.mount(MCP_MOUNT_PATH, _MCP_MOUNT.app)
 
 # 生产同源（经反代）时无需 CORS；本地 dev 前端 3000 → 后端 8000 跨源需放行。
 # 额外可用 CORS_ORIGINS（逗号分隔）显式追加来源。

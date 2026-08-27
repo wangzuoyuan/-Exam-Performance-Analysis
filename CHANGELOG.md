@@ -1,5 +1,14 @@
 # Changelog
 
+## 未发布
+
+### 新增
+
+- 只读 MCP 服务端（`app/mcp_server.py`，Streamable HTTP、stateless JSON，挂载 `/mcp`）：供笔记本 Hermes 等远程 AI 客户端经公网 HTTPS 调用。`MCP_ENABLED` 默认关闭，关闭时不挂载、不导入 mcp SDK，现有应用行为不变；启用后经独立 Bearer Token（`MCP_BEARER_TOKEN`，缺失/弱/短于 32 字符直接启动失败）+ MCP SDK Host/Origin 防护对外。
+- `chat/tools.py` 引入单一注册源 `TOOL_REGISTRY`（每项显式 `read_only`）：公开 `TOOLS` 改为其三键投影（结构、顺序、内容不变），MCP 目录自动取 `read_only: True` 条目，tools/call 一律经既有 `execute_tool()` 分发。
+- `backend/tests/test_mcp.py`：MCP 协议/认证/投影测试（含 TOOLS 与 git HEAD 基线一致性校验）。
+- `Caddyfile` 增加 `/mcp` 与 `/mcp/*` → backend:8000 路由；文档补充 Hermes 配置与 NAS 部署说明。
+
 ## 2.0.0 - 2026-07-18
 
 ### 新增

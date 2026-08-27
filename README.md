@@ -338,6 +338,7 @@ OPENAI_MODEL=gpt-4o-mini
 |------|----------|------|
 | `list_exams` | `grade?`, `year_range?` | 罗列已建档考试 |
 | `student_lookup` | `name?`, `student_id?` | 按姓名或学号定位学生 |
+| `student_identity_lookup` | `name?`, `student_id?` | 查学生跨学年「人」身份与学号履历（identity_id、各学年学号及班级） |
 | `student_exam_detail` | `student_id`, `exam_id` | 某生某次考试完整成绩 |
 | `student_trend` | `student_id`, `total_type?`, `exam_ids?` | 某个学生的跨次总分趋势 |
 | `student_learning_profile` | `student_id?`, `name?` | 学生综合学情画像 |
@@ -367,6 +368,28 @@ OPENAI_MODEL=gpt-4o-mini
 - `高一主三门300到350名有哪些学生？`
 - `本班这学期缺交最多的5个学生，他们主三门排名如何？`
 - `哪门课缺交最影响成绩？数学缺交多的学生数学成绩怎么样？`
+
+## 只读 MCP 服务端（供 Hermes 等远程 AI 客户端）
+
+后端内置一个**只读 MCP（Model Context Protocol）服务端**（`backend/app/mcp_server.py`），与 AI 对话助手共用同一套工具注册表（`backend/app/chat/tools.py` 的 `TOOL_REGISTRY`）：凡是注册表中标记 `read_only: True` 的工具自动出现在 MCP 目录中，调用一律经既有的 `execute_tool()` 分发。默认关闭（`MCP_ENABLED` 留空时完全不挂载、不导入 mcp SDK，应用行为与之前一致）。
+
+- 传输：MCP Streamable HTTP，stateless JSON（无会话），规范路径 `https://你的域名/mcp/`（`/mcp` 会 307 跳转到 `/mcp/`，客户端自动跟随）
+- 认证：独立 Bearer Token（`MCP_BEARER_TOKEN`），缺失/错误 token 返回 401 + `WWW-Authenticate: Bearer`；启用但 token 缺失/弱占位符/短于 32 字符时后端直接启动失败（fail closed）
+- 暴露工具：注册表当前全部 20 个只读工具（成绩 16 + 作业 3 + 档案 1，含 `student_identity_lookup`），全部标注 `readOnlyHint=true`、`destructiveHint=false`、`idempotentHint=true`、`openWorldHint=false`
+- 安全边界：token 等同**全量只读学情数据**权限（含学生成绩、缺交、谈话档案）；公网必须 HTTPS；保留 MCP SDK 的 Host/Origin 防护（`MCP_ALLOWED_HOSTS` / `MCP_ALLOWED_ORIGINS` 可配）
+
+**新增业务工具只需一次注册**：在 `tools.py` 的 `TOOL_REGISTRY` 加条目（只读工具标 `read_only: True`）并登记 `TOOL_FUNCTIONS`，聊天助手和 MCP 同时可用，无需写第二份清单或 wrapper。写入/删除类工具不要标 `read_only`，它们不会进入 MCP；未来如需写操作 MCP，必须单独设计权限与确认机制。
+
+### 与任课教师版（教学版）在 Hermes 中并存
+
+两个应用完全独立部署，服务端**不给工具名加前缀、不建重复别名**。Hermes 里靠**连接 key** 区分命名空间（这是客户端要求）：班主任版连接 key 写 `homeroom_grade_tracker`，任课教师版保持 `grade_tracker`，两者的 token 也各自独立。连接成功后工具分别显示为 `mcp_homeroom_grade_tracker_*` 与 `mcp_grade_tracker_*`。
+
+简短使用规则（写给 Hermes 里的 AI / 自己记）：
+
+- 提到 **班主任、行政班、全科、总分、综合画像、作业/谈话档案** → 用班主任版（`mcp_homeroom_grade_tracker_*`）
+- 提到 **任课老师、教学班、任教学科、单科** → 用任课教师版（`mcp_grade_tracker_*`）
+
+Token 生成、NAS 配置、Hermes 笔记本端配置与验证命令见 [DEPLOY.md](DEPLOY.md) 的「只读 MCP 服务端」一节。
 
 ## 开发命令
 
@@ -417,6 +440,7 @@ pytest tests/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py
+│   │   ├── mcp_server.py   # 只读 MCP 服务端（/mcp，MCP_ENABLED 默认关闭）
 │   │   ├── db/
 │   │   ├── ingest/
 │   │   ├── analysis/
@@ -439,7 +463,7 @@ pytest tests/
 
 ## Docker 部署 / 远程访问
 
-除本地 `run.py` 运行外，本项目可直接用 Docker 部署到服务器或群晖 NAS，让手机 / 电脑在外网随时访问。根目录 `docker-compose.yml` 起 backend + frontend + caddy 三个容器，`Caddyfile` 做 `/api`→后端、`/`→前端的路径分流；密钥与登录写在 `backend/.env`（已被 gitignore）。完整步骤见 [DEPLOY.md](DEPLOY.md)。
+除本地 `run.py` 运行外，本项目可直接用 Docker 部署到服务器或群晖 NAS，让手机 / 电脑在外网随时访问。根目录 `docker-compose.yml` 起 backend + frontend + caddy 三个容器，`Caddyfile` 做 `/api`→后端、`/mcp`→后端（只读 MCP，可选）、`/`→前端的路径分流；密钥与登录写在 `backend/.env`（已被 gitignore，backend 容器经 `env_file` 整体透传）。NAS 上 compose 命令须带 `-p grade_tracker`（项目目录名含中文，裸跑会另建平行栈）。完整步骤见 [DEPLOY.md](DEPLOY.md)。
 
 - **按入口区分鉴权**：内网（局域网 IP 直连）免登录；外网（经配置的 `PUBLIC_HOST` 域名）需输入 `APP_PASSWORD` 登录。不设 `APP_PASSWORD` 则完全不启用登录（纯本地使用无感）。
 - **数据隔离**：容器数据落在挂载卷 `/data`，与本地 `~/.exam-tracker` 互不影响；通过 `EXAM_TRACKER_DIR` 等环境变量切换，缺省仍回落到 `~/.exam-tracker`。
