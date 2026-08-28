@@ -283,10 +283,60 @@ test('upload and rollover preserve unique files, real unbinding, dynamic grades,
   assert.match(identity, /previous_grade = target_grade - 1/)
   assert.match(rolloverService, /ClassRoster\.class_num == class_num/)
   assert.match(rollover, /requestJson/)
-  assert.match(rollover, /body\?\.detail \|\| body\?\.message/)
+  // 后端错误 detail 仍透传（兼容 FastAPI 422 的数组型 detail，不再渲染 [object Object]）
+  assert.match(rollover, /detail \|\| body\?\.message/)
+  assert.match(rollover, /Array\.isArray\(body\?\.detail\)/)
   assert.match(rollover, /target_grade: grade/)
   assert.match(rollover, /grade: grade - 1/)
   assert.doesNotMatch(rollover, /grade:\s*1,/)
+})
+
+test('rollover roster paste accepts name-only and official-id rows with real validation', () => {
+  const rollover = read('frontend/src/app/settings/rollover/page.tsx')
+  const parser = read('frontend/src/lib/roster-parser.ts')
+  const router = read('backend/app/rollover/router.py')
+  const service = read('backend/app/rollover/service.py')
+
+  // 解析器是纯模块（行为由 vitest 契约覆盖），页面不得内联「首列当学号」的旧解析
+  assert.match(rollover, /import \{ parseRosterText \} from '@\/lib\/roster-parser'/)
+  assert.doesNotMatch(rollover, /const student_id = parts\[0\]/)
+  assert.match(parser, /student_id: string \| null/)
+  assert.match(parser, /超过两列/)
+  assert.match(parser, /缺少姓名/)
+
+  // 请求结构：仅姓名行 student_id 为 null（不再把姓名当学号提交）
+  assert.match(rollover, /rows: rows\.map\(\(r\) => \(\{ student_id: r\.student_id, name: r\.name \}\)\)/)
+
+  // 成功/错误文案分流：错误用 alert + danger 色，成功计数含补学号/修复旧数据
+  assert.match(rollover, /rosterMsg\.tone === 'error' \? 'alert' : 'status'/)
+  assert.match(rollover, /text-danger-600/)
+  assert.match(rollover, /补学号 \$\{data\.replaced\}/)
+  assert.match(rollover, /修复旧数据 \$\{data\.repaired\}/)
+  assert.match(rollover, /本班共 \$\{data\.total\} 人/)
+  // 两种格式的输入提示
+  assert.match(rollover, /或单独/)
+  assert.match(rollover, /TMP- 临时号|临时学号/)
+  assert.match(rollover, /先记作业/)
+
+  // 后端：行级 class_num 一律忽略（防 class_num NULL 脏行）；学号可空 + 临时学号 + 事务替换
+  assert.match(router, /student_id: Optional\[str\] = None/)
+  assert.doesNotMatch(service, /r\.get\("class_num", class_num\)/)
+  assert.match(service, /TEMP_SID_PREFIX = "TMP-"/)
+  assert.match(service, /class_num\.is_\(None\)/)
+  assert.match(service, /_replace_placeholder_sid/)
+  assert.match(service, /RosterScopeError/)
+})
+
+test('student list renders roster-only students with dashes instead of zeros', () => {
+  const list = read('frontend/src/app/student/page.tsx')
+  const analysis = read('backend/app/analysis/router.py')
+
+  // roster-only 学生来自 /api/students 的花名册补位；空值一律「—」
+  assert.match(analysis, /roster_meta/)
+  assert.match(analysis, /旧版缺陷行/)
+  assert.match(list, /仅有花名册的学生成绩\/名次显示为「—」/)
+  assert.match(list, /formatInt\(student\.latest_main_score\)/)
+  assert.match(list, /student\.latest_exam_name \|\| '—'/)
 })
 
 test('runtime source contains no fixed class 6 fallback', () => {

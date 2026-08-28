@@ -17,6 +17,7 @@ import {
 
 import { cn } from '@/lib/utils'
 import { formatClassLabel } from '@/lib/labels'
+import { parseRosterText } from '@/lib/roster-parser'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -114,6 +115,8 @@ interface Preview {
 interface RosterResult {
   created: number
   updated: number
+  replaced: number
+  repaired: number
   total: number
 }
 interface CrosswalkResult {
@@ -131,8 +134,13 @@ const DASH = '—'
 async function requestJson<T>(url: string, init?: RequestInit, fallback = '操作失败'): Promise<T> {
   const response = await fetch(url, init)
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { detail?: string; message?: string } | null
-    throw new Error(body?.detail || body?.message || `${fallback}（HTTP ${response.status}）`)
+    const body = (await response.json().catch(() => null)) as
+      | { detail?: string | Array<{ msg?: string }>; message?: string }
+      | null
+    const detail = Array.isArray(body?.detail)
+      ? body.detail.map((d) => d?.msg ?? '').filter(Boolean).join('；')
+      : body?.detail
+    throw new Error(detail || body?.message || `${fallback}（HTTP ${response.status}）`)
   }
   return (await response.json()) as T
 }
@@ -163,7 +171,7 @@ export default function RolloverWizardPage() {
   const [bindMsg, setBindMsg] = useState<string | null>(null)
   const [rosterText, setRosterText] = useState('')
   const [rosterBusy, setRosterBusy] = useState(false)
-  const [rosterMsg, setRosterMsg] = useState<string | null>(null)
+  const [rosterMsg, setRosterMsg] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null)
 
   // Step 2
   const [preview, setPreview] = useState<Preview | null>(null)
@@ -222,20 +230,7 @@ export default function RolloverWizardPage() {
     }
   }
 
-  // 把粘贴文本解析成 [{student_id,name}]，容错：一行一个，逗号/制表符分隔
-  function parseRosterText(text: string): { student_id: string; name?: string }[] {
-    const out: { student_id: string; name?: string }[] = []
-    for (const raw of text.split(/\r?\n/)) {
-      const line = raw.trim()
-      if (!line) continue
-      const parts = line.split(/[,\t，\s]+/).map((s) => s.trim()).filter(Boolean)
-      if (parts.length === 0) continue
-      const student_id = parts[0]
-      const name = parts[1] || undefined
-      out.push({ student_id, name })
-    }
-    return out
-  }
+  // 解析逻辑在 @/lib/roster-parser（纯函数，供行为测试）：单列=姓名，两列=学号,姓名
 
   async function buildRosterFromScores() {
     if (effectiveClassNum == null) return
@@ -251,9 +246,12 @@ export default function RolloverWizardPage() {
           class_num: effectiveClassNum,
         }),
       }, '派生名册失败')
-      setRosterMsg(`已从成绩派生名册：新增 ${data.created}、更新 ${data.updated}、共 ${data.total}`)
+      setRosterMsg({
+        tone: 'ok',
+        text: `已从成绩派生名册：新增 ${data.created}、更新 ${data.updated}、本班共 ${data.total} 人`,
+      })
     } catch (cause) {
-      setRosterMsg(displayError(cause, '派生名册失败'))
+      setRosterMsg({ tone: 'error', text: displayError(cause, '派生名册失败') })
     } finally {
       setRosterBusy(false)
     }
@@ -261,9 +259,13 @@ export default function RolloverWizardPage() {
 
   async function buildRosterFromText() {
     if (effectiveClassNum == null) return
-    const rows = parseRosterText(rosterText)
+    const { rows, errors } = parseRosterText(rosterText)
+    if (errors.length > 0) {
+      setRosterMsg({ tone: 'error', text: errors.join('；') })
+      return
+    }
     if (rows.length === 0) {
-      setRosterMsg('请先粘贴学生（每行一个：学号,姓名）')
+      setRosterMsg({ tone: 'error', text: '请先粘贴学生：每行「学号,姓名」或单独「姓名」' })
       return
     }
     setRosterBusy(true)
@@ -276,13 +278,20 @@ export default function RolloverWizardPage() {
           from_scores: false,
           grade: Number(targetGrade),
           class_num: effectiveClassNum,
-          rows: rows.map((r) => ({ student_id: r.student_id, name: r.name ?? null })),
+          rows: rows.map((r) => ({ student_id: r.student_id, name: r.name })),
         }),
       }, '写入名册失败')
-      setRosterMsg(`名册已写入：新增 ${data.created}、更新 ${data.updated}、共 ${data.total}`)
+      const parts = [
+        `新增 ${data.created}`,
+        `更新 ${data.updated}`,
+        data.replaced > 0 ? `补学号 ${data.replaced}` : null,
+        data.repaired > 0 ? `修复旧数据 ${data.repaired}` : null,
+        `本班共 ${data.total} 人`,
+      ].filter(Boolean)
+      setRosterMsg({ tone: 'ok', text: `名册已写入：${parts.join('、')}` })
       setRosterText('')
     } catch (cause) {
-      setRosterMsg(displayError(cause, '写入名册失败'))
+      setRosterMsg({ tone: 'error', text: displayError(cause, '写入名册失败') })
     } finally {
       setRosterBusy(false)
     }
@@ -481,16 +490,22 @@ export default function RolloverWizardPage() {
 
               <div className="space-y-2">
                 <label className="text-sm text-slate-600">
-                  或粘贴名单（每行一个：<code className="rounded bg-slate-100 px-1">学号,姓名</code>，逗号 / 制表符 / 空格分隔均可）
+                  或粘贴名单（每行一个：<code className="rounded bg-slate-100 px-1">学号,姓名</code> 或单独
+                  <code className="ml-1 rounded bg-slate-100 px-1">姓名</code>
+                  ；逗号 / 制表符 / 空格分隔均可）
                 </label>
                 <textarea
                   value={rosterText}
                   onChange={(e) => setRosterText(e.target.value)}
-                  placeholder={'20250201,张三\n20250202,李四'}
+                  placeholder={'张三\n李四\n20250201,王五'}
                   rows={6}
                   className="w-full rounded-md border border-slate-200 p-2 font-mono text-sm text-base"
                 />
-                <div className="flex items-center gap-3">
+                <p className="text-xs text-slate-400">
+                  还没有学号？只粘姓名即可先建花名册、先记作业（学号显示为 TMP- 临时号）；
+                  拿到正式学号后在同一个框再粘一次「学号,姓名」，作业与档案记录会自动跟到正式学号。
+                </p>
+                <div className="flex items-start gap-3">
                   <Button
                     variant="outline"
                     onClick={buildRosterFromText}
@@ -499,7 +514,17 @@ export default function RolloverWizardPage() {
                     <Plus className="mr-1 h-4 w-4" />
                     写入名册
                   </Button>
-                  {rosterMsg && <span className="text-sm text-slate-600">{rosterMsg}</span>}
+                  {rosterMsg && (
+                    <span
+                      role={rosterMsg.tone === 'error' ? 'alert' : 'status'}
+                      className={cn(
+                        'min-w-0 break-words text-sm',
+                        rosterMsg.tone === 'ok' ? 'text-success-600' : 'text-danger-600',
+                      )}
+                    >
+                      {rosterMsg.text}
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -711,15 +736,15 @@ function PreviewStep({
           <BucketCard
             title="无成绩数据"
             tone="slate"
-            hint={`花名册里有、但高${grade}暂无成绩。等成绩上传 / 核对学号后再次刷新即可。`}
+            hint={`花名册里有、但高${grade}暂无成绩。仅粘姓名导入的学生先用 TMP- 临时学号记作业；等成绩上传 / 正式学号补录后再次刷新即可。`}
             count={preview.summary.unmatched}
             empty="暂无"
             rows={preview.unmatched.map((r) => ({
               key: r.student_id,
               student_id: r.student_id,
               name: r.name,
-              extra: null,
-              actions: <span className="text-xs text-slate-400">等待成绩上传</span>,
+              extra: r.student_id.startsWith('TMP-') ? '临时学号 · 待补正式学号' : null,
+              actions: <span className="text-xs text-slate-400">可先记作业 · 等待成绩上传</span>,
             }))}
           />
 

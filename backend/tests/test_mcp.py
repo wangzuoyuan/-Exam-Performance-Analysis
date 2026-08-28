@@ -11,24 +11,23 @@
 - 新增只读注册项自动出现在 MCP；写入项/未标记项默认不出现（扩展性 + 安全）
 - 非法 Host / Origin 被 SDK 防护拒绝（421 / 403）；无 Origin 放行；allowed hosts 可配置
 - /mcp/ 在 follow_redirects=False 下正确 token 直接 200、缺 token 直接 401；/mcp 是 307
-- 现有 chat TOOLS 三键结构、顺序、内容与 git HEAD 基线完全一致
+- 现有 chat TOOLS 恰为 TOOL_REGISTRY 的三键投影：20 个名称/顺序固定、注册表全只读
 - 现有 /api/chat 行为不变
 
-不依赖真实 NAS、真实 token、真实 LLM。
+不依赖真实 NAS、真实 token、真实 LLM、git 仓库状态。
 """
 
 import json
-import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 STRONG_TOKEN = "f" * 48  # 满足 >=32 且非占位符
 
-# 班主任版注册表当前必须暴露的全部只读工具（成绩 16 + 作业 3 + 档案 1）。
-REQUIRED_TOOLS = {
+# 班主任版注册表当前必须暴露的全部只读工具（成绩 16 + 作业 3 + 档案 1），
+# 顺序即对外契约（TOOLS 投影、MCP 目录都保持这一顺序）。
+REQUIRED_TOOL_ORDER = (
     "list_exams", "student_lookup", "student_identity_lookup",
     "student_exam_detail", "student_trend", "student_learning_profile",
     "class_trend", "compare_classes", "focus_list", "subject_weakness",
@@ -36,7 +35,8 @@ REQUIRED_TOOLS = {
     "custom_rank_band_trend", "rank_range_filter", "rank_frequency_stat",
     "student_homework_summary", "class_homework_ranking",
     "homework_grade_correlation", "student_notes",
-}
+)
+REQUIRED_TOOLS = set(REQUIRED_TOOL_ORDER)
 
 
 def _set_mcp_env(monkeypatch, enabled="true", token=STRONG_TOKEN,
@@ -450,44 +450,29 @@ def test_session_build_tools_list_is_public_projection():
         assert list(t.keys()) == ["name", "description", "input_schema"]
 
 
-# ───────────────── TOOLS 投影与 git HEAD 基线完全一致 ─────────────────
+# ───────────────── TOOLS 恰为 TOOL_REGISTRY 三键投影 ─────────────────
 
-def _baseline_tools_from_head():
-    """从 git HEAD 提取重构前的 TOOLS 字面量（引入 TOOL_REGISTRY 之前）。"""
-    repo_root = Path(__file__).resolve().parents[2]
-    try:
-        src = subprocess.run(
-            ["git", "show", "HEAD:backend/app/chat/tools.py"],
-            cwd=repo_root, capture_output=True, text=True, check=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError) as exc:
-        pytest.skip(f"git baseline unavailable: {exc}")
-    marker = "TOOLS = ["
-    hits = [i for i, line in enumerate(src.split("\n"))
-            if line.startswith(marker)]
-    assert len(hits) == 1
-    block = "\n".join(src.split("\n")[hits[0]:])
-    namespace: dict = {}
-    exec(compile(block, "<head-baseline>", "exec"), namespace)  # noqa: S102
-    return namespace["TOOLS"]
-
-
-def test_public_tools_match_head_baseline_exactly():
-    """公开 TOOLS（session 聊天协议输入）与 git HEAD 基线逐项一致：
-    三键结构、顺序、name/description/input_schema 内容全都不变。"""
-    baseline = _baseline_tools_from_head()
+def test_public_tools_exactly_registry_projection():
+    """公开 TOOLS（session 聊天协议输入）恰为 TOOL_REGISTRY 的三键投影：
+    结构（name/description/input_schema）、顺序、内容逐项一致；注册表
+    20 项全只读、名称与顺序固定。不依赖 git 基线自执行。"""
     from app.chat.tools import TOOLS, TOOL_REGISTRY
 
-    assert len(baseline) == 20
-    assert len(TOOLS) == len(baseline)
-    assert [t["name"] for t in TOOLS] == [t["name"] for t in baseline]
-    for current, old in zip(TOOLS, baseline):
-        assert list(current.keys()) == ["name", "description", "input_schema"]
-        assert current == old
-    # 注册表条目按序与基线一一对应（仅多出 read_only 元数据键）。
-    assert len(TOOL_REGISTRY) == len(baseline)
-    for entry, old in zip(TOOL_REGISTRY, baseline):
-        assert entry["name"] == old["name"]
-        assert entry["description"] == old["description"]
-        assert entry["input_schema"] == old["input_schema"]
+    assert len(TOOL_REGISTRY) == 20
+    assert len(TOOLS) == 20
+    expected = [
+        {
+            "name": e["name"],
+            "description": e["description"],
+            "input_schema": e["input_schema"],
+        }
+        for e in TOOL_REGISTRY
+    ]
+    assert TOOLS == expected
+    for t in TOOLS:
+        assert list(t.keys()) == ["name", "description", "input_schema"]
+    assert [t["name"] for t in TOOLS] == list(REQUIRED_TOOL_ORDER)
+    assert [e["name"] for e in TOOL_REGISTRY] == list(REQUIRED_TOOL_ORDER)
+    assert set(REQUIRED_TOOL_ORDER) == REQUIRED_TOOLS
+    for entry in TOOL_REGISTRY:
         assert entry["read_only"] is True

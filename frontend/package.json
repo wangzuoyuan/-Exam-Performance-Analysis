@@ -1,13 +1,14 @@
 {
   "name": "exam-tracker-frontend",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "next build",
     "start": "next start -p 3000",
-    "test:ui": "node --test tests/ui-contracts.test.mjs && npm run test:scope",
-    "test:scope": "vitest run tests/homeroom-scope-provider.test.tsx"
+    "test:ui": "node --test tests/ui-contracts.test.mjs && npm run test:scope && npm run test:roster",
+    "test:scope": "vitest run tests/homeroom-scope-provider.test.tsx",
+    "test:roster": "vitest run tests/roster-parser.test.ts tests/student-roster-only.test.tsx"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.11",

@@ -160,7 +160,7 @@ export default function StudentSearchPage() {
             ) : state === 'error' ? (
               <StatePanel tone="error" title="学生名单加载失败" description={error} action={<Button variant="outline" onClick={() => setReloadKey((key) => key + 1)}>重新加载</Button>} className="rounded-none border-x-0 border-b-0" />
             ) : students.length === 0 ? (
-              <StatePanel tone="empty" title="当前班级暂无学生" description="上传当前班成绩后，学生会按身份去重显示在这里。" action={<Button asChild><Link href="/upload">上传成绩</Link></Button>} className="rounded-none border-x-0 border-b-0" />
+              <StatePanel tone="empty" title="当前班级暂无学生" description="上传当前班成绩或在升级换届页粘贴名单建花名册后，学生会显示在这里；仅有花名册的学生成绩/名次显示为「—」。" action={<Button asChild><Link href="/upload">上传成绩</Link></Button>} className="rounded-none border-x-0 border-b-0" />
             ) : visibleStudents.length === 0 ? (
               <StatePanel tone="empty" title="没有匹配的学生" description={`没有找到“${query.trim()}”`} action={<Button variant="outline" onClick={() => setQuery('')}>清除搜索</Button>} className="rounded-none border-x-0 border-b-0" />
             ) : (

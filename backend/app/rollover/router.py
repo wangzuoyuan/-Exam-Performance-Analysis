@@ -66,7 +66,9 @@ async def rollover_preview(grade: int, class_num: int):
 
 
 class RosterRow(BaseModel):
-    student_id: str
+    # student_id 可空：仅姓名行（后端生成临时学号）；行级 class_num 一律忽略，
+    # 严格按目标 grade+class（与教师绑定一致）写入，防止 class_num=None 脏行。
+    student_id: Optional[str] = None
     name: Optional[str] = None
     seat_no: Optional[int] = None
     gender: Optional[str] = None
@@ -91,6 +93,10 @@ async def rollover_roster(payload: RosterPayload):
             from_scores=payload.from_scores,
             rows=[r.model_dump() for r in payload.rows] if payload.rows else None,
         )
+    except service.RosterScopeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     finally:
         db.close()
 

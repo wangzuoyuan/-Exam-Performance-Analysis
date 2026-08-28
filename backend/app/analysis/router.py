@@ -617,6 +617,8 @@ async def get_student(student_id: str):
         Exam,
         ImportedHistory,
         StudentIdentity,
+        ClassRoster,
+        Teacher,
     )
     from app.analysis.identity import person_ids, identity_of, aliases_of
 
@@ -626,15 +628,46 @@ async def get_student(student_id: str):
         ids = person_ids(db, student_id)
         iid = identity_of(db, student_id)
 
+        # 花名册行（roster-only 学生：已建册尚无成绩，至少能安全展示姓名/作业/档案）
+        roster_rows = (
+            db.query(ClassRoster).filter(ClassRoster.student_id.in_(ids)).all()
+        )
+
         # 获取该生所有考试（按年级分组）—— 同一人所有学号的考试并集
         exams = db.query(Exam).join(TotalScore, Exam.id == TotalScore.exam_id).filter(
             TotalScore.student_id.in_(ids)
         ).order_by(Exam.grade, Exam.exam_date).all()
 
-        if not exams and iid is None:
+        if not exams and iid is None and not roster_rows:
             raise HTTPException(404, "该学生无成绩记录")
 
+        # roster-only 作用域：仅凭花名册可见的学生，行必须属于教师绑定的
+        # grade+class（他班 roster-only 直接请求 → 404，不越权展示）；
+        # 有成绩（或身份/导入历史）的画像维持既有跨学年行为不变。
+        if not exams and roster_rows:
+            t = db.query(Teacher).first()
+            bound = (
+                {
+                    1: t.target_class_high1,
+                    2: t.target_class_high2,
+                    3: t.target_class_high3,
+                }
+                if t
+                else {}
+            )
+            if not any(
+                r.grade is not None and bound.get(r.grade) == r.class_num
+                for r in roster_rows
+            ):
+                raise HTTPException(404, "该学生不在当前班级花名册中")
+
+        # 年级集合并入合法花名册年级（有年级且有班级的正常行；缺陷行不算）：
+        # 高二先建册后出分的学生 grades 含高二，顶层 class_num 取最高年级作用域，
+        # 不出现「class_by_grade 有高二、顶层仍高一」的错位。
         grades = set(e.grade for e in exams)
+        for r in roster_rows:
+            if r.grade in (1, 2, 3) and r.class_num is not None:
+                grades.add(r.grade)
         has_cross_year = len(grades) > 1
 
         # 主三门趋势（跨学年只取主三门）
@@ -666,7 +699,8 @@ async def get_student(student_id: str):
             SubjectScore.student_id.in_(ids)
         ).order_by(SubjectScore.exam_id).all()
 
-        # 姓名：优先 identity.display_name（人工确认），否则取成绩录入的 name
+        # 姓名：优先 identity.display_name（人工确认），其次成绩录入的 name，
+        # 最后回退花名册 name（roster-only 学生）
         name = student_id
         if iid is not None:
             ident = db.query(StudentIdentity).filter(StudentIdentity.id == iid).first()
@@ -676,6 +710,11 @@ async def get_student(student_id: str):
             name_row = db.query(SubjectScore).filter(SubjectScore.student_id.in_(ids)).first()
             if name_row and name_row.name:
                 name = name_row.name
+        if name == student_id:
+            for r in roster_rows:
+                if r.name:
+                    name = r.name
+                    break
 
         # ── ImportedHistory 合并（仅展示，不参与任何排名/均分计算）──
         imported_rows = []
@@ -742,8 +781,17 @@ async def get_student(student_id: str):
         for g, counter in grade_class_counter.items():
             if counter:
                 class_by_grade[g] = counter.most_common(1)[0][0]
-        # 标量班级（向后兼容）：取最高年级的班级
+        # 花名册补位：该学号无成绩但已建册的年级（高二先建册后出分）
+        for r in roster_rows:
+            if r.grade is not None and r.class_num is not None and r.grade not in class_by_grade:
+                class_by_grade[r.grade] = r.class_num
+        # 标量班级（向后兼容）：取最高年级的班级；无成绩时回退花名册最高年级
         class_num_value = class_by_grade[max(grades)] if grades else None
+        if class_num_value is None and roster_rows:
+            for r in sorted(roster_rows, key=lambda r: (r.grade or 0), reverse=True):
+                if r.class_num is not None:
+                    class_num_value = r.class_num
+                    break
         xueji_counter = Counter(s.xueji for s in subject_scores if s.xueji is not None)
         xueji_code_value = xueji_counter.most_common(1)[0][0] if xueji_counter else None
 
@@ -910,9 +958,10 @@ async def list_students(search: Optional[str] = Query(None)):
 
     把所有学号按 identity 聚合：有 alias 的归到同一 identity（一桶多号），
     无 alias 的学号各成一桶。每桶挑一个代表学号（出现在最高年级、且最近
-    考试的学号），返回 {student_id, name, current_grade, class_num, history,
-    latest_exam_name, latest_main_score, latest_main_rank}。
-    ?search= 按 name / student_id 服务端模糊匹配。
+    考试的学号；roster-only 学号按花名册年级参与比较），返回 {student_id,
+    name, current_grade, class_num, history, latest_exam_name,
+    latest_main_score, latest_main_rank}。仅花名册的学生只纳入教师绑定的
+    年级班级。?search= 按 name / student_id 服务端模糊匹配。
     """
     from collections import defaultdict
     from app.db.models import (
@@ -922,8 +971,9 @@ async def list_students(search: Optional[str] = Query(None)):
         TotalScore,
         Teacher,
         StudentIdentity,
+        ClassRoster,
     )
-    from app.analysis.identity import identity_of
+    from app.analysis.identity import identity_of, aliases_of
 
     db = SessionLocal()
     try:
@@ -945,7 +995,45 @@ async def list_students(search: Optional[str] = Query(None)):
                 or (sid and search in sid)
             ]
 
-        if not rows:
+        # 成绩学号全集（未过滤），用于判断花名册行是否 roster-only
+        score_sid_set = {
+            r[0]
+            for r in db.query(SubjectScore.student_id)
+            .filter(SubjectScore.student_id.isnot(None))
+            .distinct()
+            .all()
+        }
+
+        # 花名册补位：只有 ClassRoster、尚无成绩的学生（如高二先建册后出分）。
+        # 已出现在成绩库的学号跳过；已链接身份的不跳过——其 roster 学号并入
+        # 同一 identity 桶（先建册后关联高一的学生仍以当前班为代表，绝不消失）。
+        # roster-only 行只纳入教师绑定的年级班级（他班/未绑定不入列，防越权）。
+        # 搜索时同样按姓名/学号过滤，保证「按姓名搜索 roster-only 学生」可用。
+        teacher_row = db.query(Teacher).first()
+        bound_class: dict = (
+            {
+                1: teacher_row.target_class_high1,
+                2: teacher_row.target_class_high2,
+                3: teacher_row.target_class_high3,
+            }
+            if teacher_row
+            else {}
+        )
+        roster_meta: dict[str, dict] = {}
+        for r in db.query(ClassRoster).all():
+            sid = r.student_id
+            if sid is None or sid in score_sid_set or sid in roster_meta:
+                continue
+            if r.class_num is None and not r.name:
+                continue  # 旧版缺陷行（student_id=姓名、无班级无名），待收编，不入列
+            if r.grade is None or bound_class.get(r.grade) != r.class_num:
+                continue  # 他班 / 教师未绑定的 roster-only 学生不入列
+            if search:
+                if not ((r.name and search in r.name) or (sid and search in sid)):
+                    continue
+            roster_meta[sid] = {"name": r.name, "grade": r.grade, "class_num": r.class_num}
+
+        if not rows and not roster_meta:
             return []
 
         # name 取每个学号的第一个非空 name
@@ -958,6 +1046,10 @@ async def list_students(search: Optional[str] = Query(None)):
         all_sids = [sid for sid, _ in rows if sid is not None]
         # 去重学号
         all_sids = list(dict.fromkeys(all_sids))
+        for sid in roster_meta:
+            all_sids.append(sid)
+            if roster_meta[sid]["name"]:
+                name_by_sid[sid] = roster_meta[sid]["name"]
 
         # 按人分桶：iid 相同归一桶；无 iid 的学号用 ("sid", sid) 哨兵各成单桶
         buckets: dict = defaultdict(list)  # key -> [student_id, ...]
@@ -1020,10 +1112,17 @@ async def list_students(search: Optional[str] = Query(None)):
                     if class_in_grade.get(sid) is None:
                         class_in_grade[sid] = cn
 
-        # 每桶挑代表学号：(max_grade desc, latest_date desc) 最大的那个
+        # 每桶挑代表学号：(max_grade desc, latest_date desc) 最大的那个。
+        # roster-only 学号没有成绩年级，用花名册年级参与比较：高二先建册后
+        # 出分（即使已关联高一学号）的学生以高二 roster 学号为当前代表，
+        # 旧学号进 history；current_grade/class_num 即高二目标班。
         def _rep_key(sid):
             info = grade_info.get(sid, {})
-            return (info.get("max_grade") or 0, info.get("latest_date") or "")
+            m = roster_meta.get(sid) or {}
+            return (
+                info.get("max_grade") or m.get("grade") or 0,
+                info.get("latest_date") or "",
+            )
 
         results = []
         # 代表学号最近一场考试的主三门分数/排名
@@ -1059,9 +1158,11 @@ async def list_students(search: Optional[str] = Query(None)):
             rep_sid = max(sids, key=_rep_key)
             info = grade_info.get(rep_sid, {})
             latest_exam_id = info.get("latest_exam_id")
-            current_grade = info.get("max_grade")
-            class_num = class_in_grade.get(rep_sid)
-            name = name_by_sid.get(rep_sid, rep_sid)
+            # roster-only 学生（尚无成绩）：年级/班级/姓名回退花名册，考试字段为 None
+            meta = roster_meta.get(rep_sid) or {}
+            current_grade = info.get("max_grade") or meta.get("grade")
+            class_num = class_in_grade.get(rep_sid) or meta.get("class_num")
+            name = name_by_sid.get(rep_sid) or meta.get("name") or rep_sid
 
             # identity display_name 优先（已链接时）
             iid = key if isinstance(key, int) else None
@@ -1083,10 +1184,11 @@ async def list_students(search: Optional[str] = Query(None)):
             for sid in sids:
                 if sid == rep_sid:
                     continue
+                m = roster_meta.get(sid) or {}
                 history.append({
                     "student_id": sid,
-                    "grade": grade_info.get(sid, {}).get("max_grade"),
-                    "class_num": class_in_grade.get(sid),
+                    "grade": grade_info.get(sid, {}).get("max_grade") or m.get("grade"),
+                    "class_num": class_in_grade.get(sid) or m.get("class_num"),
                 })
 
             # 搜索过滤（针对桶内代表 name/sid；上面已对原始行过滤，这里再兜底）

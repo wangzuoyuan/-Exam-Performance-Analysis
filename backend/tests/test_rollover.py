@@ -231,13 +231,18 @@ def test_unlink_alias_endpoint(client):
 
 
 def test_crosswalk_bulk_link(client, db):
-    """bulk 名册导入：两个全新组合 link 成功，返回计数。"""
+    """bulk 名册导入：两个全新组合 link 成功，返回计数。
+
+    故意的「假链」挂在隔离学号 g2_299（无成绩、不入花名册派生）上：
+    正式学号导入现在会统一校验别名归属，若假链挂在有成绩的学号上，
+    后续 from_scores 派生会按契约整批拒绝。
+    """
     r = client.post(
         "/api/rollover/crosswalk",
         json={
             "rows": [
                 {"g1_sid": "g1_101", "g2_sid": "g2_201", "name": "陈一"},
-                {"g1_sid": "g1_102", "g2_sid": "g2_203", "name": "同名假链"},
+                {"g1_sid": "g1_102", "g2_sid": "g2_299", "name": "同名假链"},
             ]
         },
     )
