@@ -327,6 +327,47 @@ test('rollover roster paste accepts name-only and official-id rows with real val
   assert.match(service, /RosterScopeError/)
 })
 
+test('rollover ambiguous confirm runs inline batch flow without per-row dialogs', () => {
+  const rollover = read('frontend/src/app/settings/rollover/page.tsx')
+  const batchCard = read('frontend/src/components/rollover/AmbiguousBatchCard.tsx')
+  const batchLib = read('frontend/src/lib/rollover-batch.ts')
+  const rolloverRouter = read('backend/app/rollover/router.py')
+  const rolloverService = read('backend/app/rollover/service.py')
+  const identity = read('backend/app/analysis/identity.py')
+
+  // 旧版逐人「辨认」Dialog 已删除；同名待确认改为行内批量确认卡
+  assert.doesNotMatch(rollover, /CandidateDialog/)
+  assert.match(rollover, /<AmbiguousBatchCard/)
+  assert.match(rollover, /buildDefaultDecisions/)
+  assert.match(rollover, /boundClassMatch/)
+  assert.match(rollover, /\/api\/rollover\/confirm-batch/)
+  assert.match(rollover, /撤销本次确认|onUndoBatch/)
+
+  // 行内三态单选（原生 radio，键盘可达）+ 多候选行内展开 + 桌面表/移动卡双渲染
+  assert.match(batchCard, /role="radiogroup"/)
+  assert.match(batchCard, /type="radio"/)
+  assert.match(batchCard, /aria-expanded=\{expanded\}/)
+  assert.match(batchCard, /确认已选择的 \$\{selectedCount\} 人/)
+  assert.match(batchCard, /确认关联全部 \$\{selectedCount\} 人/)
+  assert.match(batchCard, /撤销本次确认/)
+  assert.match(batchCard, /md:block/)
+  assert.match(batchCard, /md:hidden/)
+  assert.match(batchCard, /min-h-11/)
+
+  // 纯逻辑与后端安全口径对齐（姓名规范化、默认选择、提交载荷）
+  assert.match(batchLib, /normalizeName/)
+  assert.match(batchLib, /buildDefaultDecisions/)
+  assert.match(batchLib, /buildSubmitItems/)
+
+  // 后端：单事务整批预检落库 + 批次撤销；identity 层支持事务内组合写
+  assert.match(rolloverRouter, /def rollover_confirm_batch\(/)
+  assert.match(rolloverRouter, /rollover\/confirm-batch\/\{batch_id\}\/undo/)
+  assert.match(rolloverService, /def confirm_batch\(/)
+  assert.match(rolloverService, /绝不信任前端的 safe 标记/)
+  assert.match(rolloverService, /def undo_confirm_batch\(/)
+  assert.match(identity, /commit=False/)
+})
+
 test('student list renders roster-only students with dashes instead of zeros', () => {
   const list = read('frontend/src/app/student/page.tsx')
   const analysis = read('backend/app/analysis/router.py')

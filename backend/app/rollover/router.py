@@ -194,6 +194,56 @@ async def rollover_unlink(student_id: str):
         db.close()
 
 
+# ─────────────────────────── 同名批量确认（单事务，整批成败） ───────────────────────────
+
+
+class ConfirmBatchItem(BaseModel):
+    g2_student_id: str
+    # name 仅作展示回显；服务端一律以成绩库/花名册内的姓名为真相重新核验。
+    name: Optional[str] = None
+    decision: Literal["link", "new"]
+    g1_student_id: Optional[str] = None
+
+
+class ConfirmBatchPayload(BaseModel):
+    grade: int
+    class_num: Optional[int] = None
+    items: list[ConfirmBatchItem]
+
+
+@router.post("/rollover/confirm-batch")
+async def rollover_confirm_batch(payload: ConfirmBatchPayload):
+    db = next(get_db())
+    try:
+        return service.confirm_batch(
+            db,
+            payload.grade,
+            payload.class_num,
+            [i.model_dump() for i in payload.items],
+        )
+    except service.RosterScopeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        db.close()
+
+
+@router.post("/rollover/confirm-batch/{batch_id}/undo")
+async def rollover_confirm_batch_undo(batch_id: str):
+    db = next(get_db())
+    try:
+        return service.undo_confirm_batch(db, batch_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except service.RosterScopeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        db.close()
+
+
 # ─────────────────────────── 名册导入 ───────────────────────────
 
 

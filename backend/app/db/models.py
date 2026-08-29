@@ -207,6 +207,22 @@ class StudentAlias(Base):
     )
 
 
+class RolloverConfirmBatch(Base):
+    """换届「同名批量确认」的一次提交快照。
+
+    只为「撤销本次确认」服务：undo 只删本表记录的、由本批事务实际新建的
+    StudentAlias / StudentIdentity，绝不触碰提交前已存在的关联。"""
+    __tablename__ = "rollover_confirm_batch"
+    id = Column(String, primary_key=True)  # uuid hex 批次令牌
+    grade = Column(Integer, nullable=False)          # 目标年级 2/3
+    class_num = Column(Integer, nullable=False)      # 目标行政班（=教师绑定）
+    created_at = Column(DateTime, default=datetime.utcnow)
+    undone = Column(Integer, nullable=False, default=0)
+    payload = Column(JSON)             # [{g2_student_id, name, decision, g1_student_id}]（审计）
+    created_aliases = Column(JSON)     # 本批新建的 alias：[{student_id, identity_id}]
+    created_identities = Column(JSON)  # 本批新建的 identity id 列表
+
+
 class ImportedHistory(Base):
     """班主任手工导入的历史成绩（从旧班主任本子/Excel 搬来的过往考试）。
     与 SubjectScore/TotalScore 完全隔离——不参与全年级排名、班均、段位

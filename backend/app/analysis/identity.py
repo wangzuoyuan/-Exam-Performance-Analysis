@@ -63,8 +63,12 @@ def aliases_of(db, identity_id) -> list:
     return rows
 
 
-def ensure_identity(db, *, display_name=None, gender=None, ext_key=None) -> int:
-    """新建 StudentIdentity 并 commit，返回 id。"""
+def ensure_identity(db, *, display_name=None, gender=None, ext_key=None, commit=True) -> int:
+    """新建 StudentIdentity 并 commit，返回 id。
+
+    commit=False 时只 flush 不提交，供调用方在同一事务内组合多个写操作
+    （如换届同名批量确认）后统一 commit / rollback。
+    """
     from app.db.models import StudentIdentity
 
     ident = StudentIdentity(
@@ -73,16 +77,19 @@ def ensure_identity(db, *, display_name=None, gender=None, ext_key=None) -> int:
         ext_key=ext_key,
     )
     db.add(ident)
-    db.commit()
-    db.refresh(ident)
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return ident.id
 
 
-def link_aliases(db, identity_id, items, source) -> dict:
+def link_aliases(db, identity_id, items, source, commit=True) -> dict:
     """把多个学号挂到同一 identity。
 
     items=[(student_id, grade), ...]；source in
-    {name_confirmed, crosswalk, manual, ext_key}。
+    {name_confirmed, crosswalk, manual, ext_key}；commit=False 时只入事务
+    不提交，供调用方组合多个写后统一 commit / rollback。
 
     对每个 student_id：
       - 已存在 alias 指向*其他* identity -> 记 conflict（不覆盖）
@@ -122,7 +129,8 @@ def link_aliases(db, identity_id, items, source) -> dict:
             )
         )
         linked.append(sid)
-    db.commit()
+    if commit:
+        db.commit()
     return {"linked": linked, "conflicts": conflicts, "skipped": skipped}
 
 

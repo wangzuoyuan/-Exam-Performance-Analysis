@@ -1,4 +1,4 @@
-"""升级换届服务：四态分类 + 名册结转 + 高一成绩导入。
+"""升级换届服务：四态分类 + 名册结转 + 高一成绩导入 + 同名批量确认。
 
 换届把班主任从某学年带到下一学年：根据跨学年身份（StudentAlias）与上一
 年级成绩同名记录，把新班级里每个学生判为 inherited（已链身份）/ ambiguous
@@ -7,9 +7,15 @@
 （ClassRoster，grade=target_grade），以及把班主任手头的历史分数隔离地写
 入 ImportedHistory（不参与任何聚合）。
 
+同名批量确认（confirm_batch）：先完整预检（姓名规范化一致、唯一候选、
+候选未被占用、教师绑定目标班、目标班 roster/成绩归属、批内 g1/g2 唯一），
+全部通过后在同一事务落库并记录批次快照；任一项不通过整批拒绝回滚，绝不
+部分成功。撤销（undo_confirm_batch）只删本批实际新建的 alias/identity。
+
 身份层完全复用 app.analysis.identity，绝不在本模块按姓名自动合并。
 """
 
+import uuid
 from typing import Optional
 
 
@@ -728,6 +734,337 @@ def build_roster(
         "replaced": 0,
         "repaired": 0,
         "total": total,
+    }
+
+
+# ─────────────────────────── 同名批量确认（confirm-batch） ───────────────────────────
+
+
+def _norm_name(name) -> str:
+    """姓名规范化：去掉全部空白（含全角空格/制表符），供同名安全判定。"""
+    return "".join(str(name or "").split())
+
+
+def _g2_scope_name(db, sid, target_grade, class_num) -> Optional[str]:
+    """校验 g2 学号属于目标班作用域，并返回库内姓名（服务端真相，不信前端）。
+
+    作用域口径与 _validate_official_sid 一致：
+      - 目标年级成绩出现在其他班 -> 拒绝；
+      - 目标年级本班有成绩，或目标班花名册（grade+class）有该行 -> 在册；
+      - 两者皆无 -> 拒绝。
+    姓名优先目标年级成绩库，回退目标班花名册；查不到返回 None（调用方拒绝）。
+    """
+    from app.db.models import SubjectScore, Exam, ClassRoster
+
+    other_class = (
+        db.query(SubjectScore.class_num)
+        .join(Exam, Exam.id == SubjectScore.exam_id)
+        .filter(
+            Exam.grade == target_grade,
+            SubjectScore.student_id == sid,
+            SubjectScore.class_num.isnot(None),
+            SubjectScore.class_num != class_num,
+        )
+        .first()
+    )
+    if other_class is not None:
+        raise ValueError(
+            f"学号 {sid} 的高{target_grade}成绩在 {other_class[0]} 班，"
+            f"与你的班级（{class_num}班）不一致，已拒绝"
+        )
+
+    in_class = (
+        db.query(SubjectScore.student_id)
+        .join(Exam, Exam.id == SubjectScore.exam_id)
+        .filter(
+            Exam.grade == target_grade,
+            SubjectScore.student_id == sid,
+            SubjectScore.class_num == class_num,
+        )
+        .first()
+    )
+    roster_row = (
+        db.query(ClassRoster)
+        .filter(
+            ClassRoster.student_id == sid,
+            ClassRoster.grade == target_grade,
+            ClassRoster.class_num == class_num,
+        )
+        .first()
+    )
+    if in_class is None and roster_row is None:
+        raise ValueError(
+            f"学号 {sid} 不在高{target_grade}（{class_num}班）的成绩或花名册中，已拒绝"
+        )
+
+    name = _student_name_in_grade(db, sid, target_grade)
+    if name is None and roster_row is not None:
+        name = roster_row.name
+    return name
+
+
+def confirm_batch(db, target_grade, class_num, items) -> dict:
+    """同名批量确认：先完整预检，再单事务落库，任一违规整批回滚。
+
+    items=[{g2_student_id, decision: link|new, g1_student_id?}]。「稍后处理」
+    的行由前端直接不发，服务端不写。
+
+    服务端重新核验（绝不信任前端的 safe 标记）：
+      1. 教师目标 grade/class（与绑定一致，否则 409）；
+      2. 每个 g2 学号的目标班 roster/成绩归属，且尚未关联任何身份；
+      3. link：g1 候选在 prev_grade 成绩库姓名规范化后与本行一致；未显式
+         指定时必须恰好一个同名候选，多个必须明确选择；g1 未被关联到别人；
+      4. 批内 g2 / g1 学号各自唯一，且任意 g1 不得与本批任意 g2 相同
+         （两阶段预检：逐行收集后统一比对，与输入顺序无关，否则落库时会
+         撞 uq_alias_student 唯一约束）；
+      5. new：同一事务内建独立 identity，只挂 g2 学号。
+
+    返回 {batch_id, linked, new_students, results[]}；batch_id 供 undo 精确
+    回滚本批新增的关联。
+    """
+    from app.db.models import SubjectScore, Exam, RolloverConfirmBatch
+    from app.analysis.identity import (
+        identity_of,
+        ensure_identity,
+        link_aliases,
+        name_candidates,
+    )
+
+    if target_grade not in (2, 3):
+        raise ValueError("批量确认只支持升入高二/高三的换届")
+    class_num = _validated_target_class(db, target_grade, class_num)
+    prev_grade = target_grade - 1
+    if not items:
+        raise ValueError("批量确认至少需要一名学生")
+
+    errors = []
+    seen_g2: dict[str, int] = {}
+    seen_g1: dict[str, int] = {}
+    plans = []
+    for idx, raw in enumerate(items, start=1):
+        g2 = str(raw.get("g2_student_id") or "").strip()
+        decision = raw.get("decision")
+        if not g2:
+            errors.append(f"第 {idx} 行：缺少高{target_grade}学号")
+            continue
+        if g2 in seen_g2:
+            errors.append(f"第 {idx} 行：学号 {g2} 与第 {seen_g2[g2]} 行重复")
+            continue
+        seen_g2[g2] = idx
+        if decision not in ("link", "new"):
+            errors.append(f"第 {idx} 行（{g2}）：判定必须是 link 或 new")
+            continue
+        try:
+            name = _g2_scope_name(db, g2, target_grade, class_num)
+        except ValueError as exc:
+            errors.append(f"第 {idx} 行：{exc}")
+            continue
+        if not name:
+            errors.append(f"第 {idx} 行：学号 {g2} 在成绩库/花名册中无姓名，无法核验")
+            continue
+        if identity_of(db, g2) is not None:
+            errors.append(
+                f"第 {idx} 行：学号 {g2} 已关联跨学年身份，请刷新预览后重试"
+            )
+            continue
+
+        plan = {"idx": idx, "g2": g2, "name": name, "decision": decision, "g1": None}
+        if decision == "link":
+            g1_raw = raw.get("g1_student_id")
+            g1 = str(g1_raw).strip() if g1_raw else None
+            if g1 is None:
+                cands = name_candidates(db, name, prev_grade)
+                if len(cands) != 1:
+                    errors.append(
+                        f"第 {idx} 行（{name}）：高{prev_grade}同名候选有 "
+                        f"{len(cands)} 个，必须明确选择其一后才能关联"
+                    )
+                    continue
+                g1 = cands[0]["student_id"]
+            if g1 in seen_g1:
+                errors.append(
+                    f"第 {idx} 行：高{prev_grade}学号 {g1} 与第 {seen_g1[g1]} 行重复使用，已拒绝"
+                )
+                continue
+            # 候选核验：该学号在 prev_grade 成绩库确为本行学生的同名（规范化后一致）
+            cand_names = {
+                r[0]
+                for r in db.query(SubjectScore.name)
+                .join(Exam, Exam.id == SubjectScore.exam_id)
+                .filter(
+                    Exam.grade == prev_grade,
+                    SubjectScore.student_id == g1,
+                    SubjectScore.name.isnot(None),
+                )
+                .all()
+            }
+            if not cand_names or not any(
+                _norm_name(n) == _norm_name(name) for n in cand_names
+            ):
+                errors.append(
+                    f"第 {idx} 行：学号 {g1} 不是「{name}」在高{prev_grade}的同名候选，已拒绝"
+                )
+                continue
+            if identity_of(db, g1) is not None:
+                errors.append(
+                    f"第 {idx} 行：高{prev_grade}学号 {g1} 已被关联到其他学生，已拒绝"
+                )
+                continue
+            seen_g1[g1] = idx
+            plan["g1"] = g1
+        plans.append(plan)
+
+    # 预检第二阶段（与输入顺序无关）：本批任意 g1 不得与本批任意 g2 相同。
+    # g1 在前、g2 在后 / g2 在前、g1 在后 / 同行自撞三种顺序都必须在此拦下。
+    for p in plans:
+        if p["g1"] and p["g1"] in seen_g2:
+            errors.append(
+                f"第 {p['idx']} 行：高{prev_grade}候选学号 {p['g1']} 与第 "
+                f"{seen_g2[p['g1']]} 行的高{target_grade}学号相同，"
+                "批内不能混用同一学号，已拒绝"
+            )
+
+    if errors:
+        raise ValueError("；".join(errors))
+
+    # 单事务落库：任一步失败整体回滚（包括批次快照本身）
+    batch_id = uuid.uuid4().hex
+    created_aliases: list[dict] = []
+    created_identities: list[int] = []
+    results = []
+    try:
+        for p in plans:
+            iid = ensure_identity(db, display_name=p["name"], commit=False)
+            created_identities.append(iid)
+            alias_items = [(p["g2"], target_grade)]
+            if p["g1"]:
+                alias_items.append((p["g1"], prev_grade))
+            res = link_aliases(db, iid, alias_items, "name_confirmed", commit=False)
+            if res["conflicts"]:
+                raise ValueError(
+                    f"学号 {p['g2']} 关联时发生身份冲突，整批已回滚，请刷新后重试"
+                )
+            for sid in res["linked"]:
+                created_aliases.append({"student_id": sid, "identity_id": iid})
+            results.append(
+                {
+                    "g2_student_id": p["g2"],
+                    "name": p["name"],
+                    "decision": p["decision"],
+                    "g1_student_id": p["g1"],
+                    "identity_id": iid,
+                    "status": "linked" if p["decision"] == "link" else "new",
+                }
+            )
+        db.add(
+            RolloverConfirmBatch(
+                id=batch_id,
+                grade=target_grade,
+                class_num=class_num,
+                payload=[
+                    {
+                        "g2_student_id": p["g2"],
+                        "name": p["name"],
+                        "decision": p["decision"],
+                        "g1_student_id": p["g1"],
+                    }
+                    for p in plans
+                ],
+                created_aliases=created_aliases,
+                created_identities=created_identities,
+            )
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    linked_n = sum(1 for r in results if r["status"] == "linked")
+    return {
+        "batch_id": batch_id,
+        "grade": target_grade,
+        "class_num": class_num,
+        "linked": linked_n,
+        "new_students": len(results) - linked_n,
+        "results": results,
+    }
+
+
+def undo_confirm_batch(db, batch_id) -> dict:
+    """撤销一次同名批量确认：只删该批事务实际新建的 alias / identity。
+
+    安全口径：
+      - 批次不存在 -> 404；已撤销过 -> 409；
+      - 教师当前绑定的高{grade}班级与批次目标班不一致 -> 409（越权防呆）；
+      - 只删批内记录、且仍指向本批 identity、link_source 仍为
+        name_confirmed 的 alias（被单独解除/后续改动的跳过并说明原因），
+        绝不触碰提交前已存在的关联；
+      - 本批新建的 identity 仅在无残留 alias 且无 imported_history 时删除。
+    """
+    from app.db.models import (
+        RolloverConfirmBatch,
+        StudentAlias,
+        StudentIdentity,
+        ImportedHistory,
+    )
+
+    batch = (
+        db.query(RolloverConfirmBatch)
+        .filter(RolloverConfirmBatch.id == str(batch_id))
+        .first()
+    )
+    if batch is None:
+        raise KeyError("找不到该确认批次")
+    if batch.undone:
+        raise ValueError("该批次已撤销过，不能重复撤销")
+    bound = _teacher_target_class(db, batch.grade)
+    if bound is None or int(bound) != int(batch.class_num):
+        raise RosterScopeError(
+            f"当前绑定的高{batch.grade}班级与该批次（{batch.class_num}班）不一致，拒绝撤销"
+        )
+
+    removed_aliases, skipped = [], []
+    for rec in batch.created_aliases or []:
+        sid, iid = rec["student_id"], rec["identity_id"]
+        row = (
+            db.query(StudentAlias).filter(StudentAlias.student_id == sid).first()
+        )
+        if row is None:
+            skipped.append(
+                {"student_id": sid, "reason": "该学号已无关联（可能已单独解除）"}
+            )
+            continue
+        if row.identity_id != iid or row.link_source != "name_confirmed":
+            skipped.append(
+                {"student_id": sid, "reason": "关联已被后续操作改动，保留现状"}
+            )
+            continue
+        db.delete(row)
+        removed_aliases.append(sid)
+
+    removed_identities = []
+    for iid in batch.created_identities or []:
+        still_aliased = (
+            db.query(StudentAlias)
+            .filter(StudentAlias.identity_id == iid)
+            .count()
+        )
+        has_history = (
+            db.query(ImportedHistory)
+            .filter(ImportedHistory.identity_id == iid)
+            .count()
+        )
+        if still_aliased == 0 and has_history == 0:
+            db.query(StudentIdentity).filter(StudentIdentity.id == iid).delete()
+            removed_identities.append(iid)
+
+    batch.undone = 1
+    db.commit()
+    return {
+        "batch_id": batch.id,
+        "removed_aliases": removed_aliases,
+        "removed_identities": removed_identities,
+        "skipped": skipped,
     }
 
 

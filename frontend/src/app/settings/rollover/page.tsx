@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import {
   AlertTriangle,
@@ -16,8 +16,19 @@ import {
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
-import { formatClassLabel } from '@/lib/labels'
 import { parseRosterText } from '@/lib/roster-parser'
+import {
+  buildDefaultDecisions,
+  type AmbiguousCandidate as Candidate,
+  type AmbiguousStudent as AmbiguousRow,
+  type ConfirmBatchItemPayload,
+  type ConfirmDecision,
+} from '@/lib/rollover-batch'
+import {
+  AmbiguousBatchCard,
+  BatchResultCard,
+  type BatchResultData,
+} from '@/components/rollover/AmbiguousBatchCard'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -73,20 +84,6 @@ interface InheritedRow {
   name: string | null
   identity_id: number
   prev_aliases: PrevAlias[]
-}
-interface Candidate {
-  student_id: string
-  name: string
-  class_num: number | null
-  latest_exam_name: string | null
-  latest_main_score: number | null
-  latest_main_rank: number | null
-  already_linked: boolean
-}
-interface AmbiguousRow {
-  student_id: string
-  name: string | null
-  candidates: Candidate[]
 }
 interface SimpleRow {
   student_id: string
@@ -180,6 +177,18 @@ export default function RolloverWizardPage() {
   const [msg, setMsg] = useState<string | null>(null)
   const [crosswalkOpen, setCrosswalkOpen] = useState(false)
 
+  // Step 2 同名批量确认（行内选择 + 单事务提交 + 撤销本批）
+  const [batchDecisions, setBatchDecisions] = useState<Record<string, ConfirmDecision>>({})
+  const [batchResult, setBatchResult] = useState<BatchResultData | null>(null)
+  const [batchUndone, setBatchUndone] = useState(false)
+  const [batchBusy, setBatchBusy] = useState(false)
+  const [batchError, setBatchError] = useState<string | null>(null)
+  const [undoBusy, setUndoBusy] = useState(false)
+
+  // 目标范围（年级+班）代际号：范围一变自增，在途的旧响应/旧提交结果回来时
+  // 对比代际后直接丢弃，防止慢响应把旧范围的数据盖到新范围上。
+  const scopeGenRef = useRef(0)
+
   const loadTeacher = useCallback(async () => {
     setTeacherLoading(true)
     setTeacherError(null)
@@ -211,6 +220,15 @@ export default function RolloverWizardPage() {
     const n = Number(classNum)
     return Number.isFinite(n) && n > 0 ? n : null
   }, [classNum])
+
+  // 当前预览班级是否恰为教师绑定的目标年级行政班（严格安全项的前提之一；
+  // 服务端 confirm-batch 会按绑定重新校验，这里只用于前端默认勾选与提示）
+  const boundClassMatch = useMemo(() => {
+    if (!teacher || effectiveClassNum == null) return false
+    const g = Number(targetGrade)
+    const bound = g === 2 ? teacher.target_class_high2 : g === 3 ? teacher.target_class_high3 : null
+    return bound != null && bound === effectiveClassNum
+  }, [teacher, effectiveClassNum, targetGrade])
 
   // ─── Step 1 动作 ───
   async function bindClass() {
@@ -304,23 +322,57 @@ export default function RolloverWizardPage() {
       setPreviewError(null)
       return
     }
+    const gen = scopeGenRef.current
     setPreviewBusy(true)
     setPreviewError(null)
     try {
       const response = await fetch(`/api/rollover/preview?grade=${Number(targetGrade)}&class_num=${effectiveClassNum}`, { cache: 'no-store' })
+      if (gen !== scopeGenRef.current) return // 范围已切换，丢弃旧响应
       if (!response.ok) {
         const body = (await response.json().catch(() => null)) as { detail?: string } | null
         throw new Error(body?.detail || `换届预览加载失败 (${response.status})`)
       }
       const data = (await response.json()) as Preview
+      if (gen !== scopeGenRef.current) return
       setPreview(data)
     } catch (cause) {
+      if (gen !== scopeGenRef.current) return
       setPreview(null)
       setPreviewError(displayError(cause, '换届预览加载失败'))
     } finally {
-      setPreviewBusy(false)
+      if (gen === scopeGenRef.current) setPreviewBusy(false)
     }
   }, [effectiveClassNum, targetGrade])
+
+  // 预览更新（提交成功 / 手动刷新 / 绑定变化）后按最新数据重置默认选择；
+  // 提交失败不更新 preview，未提交的选择得以保留。
+  useEffect(() => {
+    if (preview) {
+      setBatchDecisions(buildDefaultDecisions(preview.ambiguous, boundClassMatch))
+    }
+  }, [preview, boundClassMatch])
+
+  // 目标范围（年级+班）变化时，清空旧范围的全部派生状态。仅在步骤间
+  // 来回切换不清空批次结果，这样用户仍可返回第 2 步撤销刚才的确认。
+  const scopeKey = `${Number(targetGrade)}-${effectiveClassNum ?? 'none'}`
+  useEffect(() => {
+    scopeGenRef.current += 1
+    setPreview(null)
+    setPreviewError(null)
+    setBatchDecisions({})
+    setBatchResult(null)
+    setBatchUndone(false)
+    setBatchBusy(false)
+    setBatchError(null)
+    setUndoBusy(false)
+    setMsg(null)
+  }, [scopeKey])
+
+  // 进入第 2 步或目标范围变化后请求一次新预览；失败后不自动循环重试。
+  useEffect(() => {
+    if (tab !== 'step2' || effectiveClassNum == null) return
+    loadPreview().catch(() => {})
+  }, [tab, scopeKey])
 
   async function linkG1(g2_sid: string, g1_sid: string, name?: string | null) {
     setMsg(null)
@@ -337,19 +389,56 @@ export default function RolloverWizardPage() {
     }
   }
 
-  async function markNew(g2_sid: string, name?: string | null) {
-    // 不传上一年级学号：作为独立新学生解析/建立 identity。
+  async function submitConfirmBatch(items: ConfirmBatchItemPayload[]) {
+    if (effectiveClassNum == null || items.length === 0) return
+    const gen = scopeGenRef.current
+    setBatchBusy(true)
+    setBatchError(null)
     setMsg(null)
     try {
-      await requestJson('/api/rollover/link', {
+      const data = await requestJson<BatchResultData>('/api/rollover/confirm-batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ g2_student_id: g2_sid, name: name ?? null, grade: Number(targetGrade) }),
-      }, '操作失败')
-      setMsg(`已确认 ${name ?? g2_sid} 为新学生（不关联高${Number(targetGrade) - 1}）`)
+        body: JSON.stringify({
+          grade: Number(targetGrade),
+          class_num: effectiveClassNum,
+          items: items.map((it) => ({
+            g2_student_id: it.g2_student_id,
+            name: it.name,
+            decision: it.decision,
+            g1_student_id: it.decision === 'link' ? it.g1_student_id : null,
+          })),
+        }),
+      }, '批量确认失败')
+      if (gen !== scopeGenRef.current) return // 范围已切换：不显示旧范围的批次结果
+      setBatchResult(data)
+      setBatchUndone(false)
+      setMsg(`同名批量确认完成：关联 ${data.linked} 人、新学生 ${data.new_students} 人`)
       await loadPreview()
     } catch (cause) {
-      setMsg(displayError(cause, '操作失败'))
+      if (gen !== scopeGenRef.current) return
+      // 整批被服务端拒绝：保留未提交的选择，修正后可直接重试
+      setBatchError(displayError(cause, '批量确认失败'))
+    } finally {
+      if (gen === scopeGenRef.current) setBatchBusy(false)
+    }
+  }
+
+  async function undoConfirmBatch() {
+    if (!batchResult || undoBusy) return
+    const gen = scopeGenRef.current
+    setUndoBusy(true)
+    try {
+      await requestJson(`/api/rollover/confirm-batch/${batchResult.batch_id}/undo`, { method: 'POST' }, '撤销失败')
+      if (gen !== scopeGenRef.current) return
+      setBatchUndone(true)
+      setMsg('已撤销本次确认：本批新增的关联已解除，此前已有的关联不受影响')
+      await loadPreview()
+    } catch (cause) {
+      if (gen !== scopeGenRef.current) return
+      setMsg(displayError(cause, '撤销失败'))
+    } finally {
+      if (gen === scopeGenRef.current) setUndoBusy(false)
     }
   }
 
@@ -386,7 +475,7 @@ export default function RolloverWizardPage() {
     <div className="space-y-6">
       <PageHeader
         title="升级换届向导"
-        description="把上一学年的身份和作业名册平滑迁移到新年级；同名学生始终由你逐人确认。"
+        description="把上一学年的身份和作业名册平滑迁移到新年级；同名学生由你逐项核对，安全匹配可一键批量确认。"
         actions={<Button asChild variant="outline"><Link href="/"><ChevronLeft className="h-4 w-4" />返回仪表盘</Link></Button>}
       />
 
@@ -548,12 +637,21 @@ export default function RolloverWizardPage() {
             msg={msg}
             onLoad={loadPreview}
             onLink={linkG1}
-            onMarkNew={markNew}
             onUnlink={unlink}
             crosswalkOpen={crosswalkOpen}
             setCrosswalkOpen={setCrosswalkOpen}
             onCrosswalkDone={loadPreview}
             setMsg={setMsg}
+            boundClassMatch={boundClassMatch}
+            batchDecisions={batchDecisions}
+            onBatchDecisionsChange={setBatchDecisions}
+            batchResult={batchResult}
+            batchUndone={batchUndone}
+            batchBusy={batchBusy}
+            batchError={batchError}
+            undoBusy={undoBusy}
+            onSubmitBatch={submitConfirmBatch}
+            onUndoBatch={undoConfirmBatch}
           />
         </TabsContent>
 
@@ -622,12 +720,21 @@ interface PreviewStepProps {
   msg: string | null
   onLoad: () => void
   onLink: (g2_sid: string, g1_sid: string, name?: string | null) => void
-  onMarkNew: (g2_sid: string, name?: string | null) => void
   onUnlink: (student_id: string) => void
   crosswalkOpen: boolean
   setCrosswalkOpen: (v: boolean) => void
   onCrosswalkDone: () => void
   setMsg: (m: string | null) => void
+  boundClassMatch: boolean
+  batchDecisions: Record<string, ConfirmDecision>
+  onBatchDecisionsChange: (d: Record<string, ConfirmDecision>) => void
+  batchResult: BatchResultData | null
+  batchUndone: boolean
+  batchBusy: boolean
+  batchError: string | null
+  undoBusy: boolean
+  onSubmitBatch: (items: ConfirmBatchItemPayload[]) => void
+  onUndoBatch: () => void
 }
 
 function PreviewStep({
@@ -639,12 +746,21 @@ function PreviewStep({
   msg,
   onLoad,
   onLink,
-  onMarkNew,
   onUnlink,
   crosswalkOpen,
   setCrosswalkOpen,
   onCrosswalkDone,
   setMsg,
+  boundClassMatch,
+  batchDecisions,
+  onBatchDecisionsChange,
+  batchResult,
+  batchUndone,
+  batchBusy,
+  batchError,
+  undoBusy,
+  onSubmitBatch,
+  onUndoBatch,
 }: PreviewStepProps) {
   return (
     <>
@@ -693,6 +809,16 @@ function PreviewStep({
         </CardContent>
       </Card>
 
+      {batchResult && (
+        <BatchResultCard
+          result={batchResult}
+          remainingCount={preview?.ambiguous.length ?? 0}
+          undone={batchUndone}
+          undoBusy={undoBusy}
+          onUndo={onUndoBatch}
+        />
+      )}
+
       {preview && (
         <>
           {/* 继承 */}
@@ -721,12 +847,17 @@ function PreviewStep({
             }))}
           />
 
-          {/* 同名待确认 */}
-          <AmbiguousBucket
+          {/* 同名待确认：行内批量确认（无弹窗） */}
+          <AmbiguousBatchCard
             rows={preview.ambiguous}
             grade={grade}
-            onLink={onLink}
-            onMarkNew={onMarkNew}
+            classNum={classNum}
+            boundClassMatch={boundClassMatch}
+            decisions={batchDecisions}
+            onDecisionsChange={onBatchDecisionsChange}
+            submitBusy={batchBusy}
+            onSubmit={onSubmitBatch}
+            submitError={batchError}
           />
 
           {/* 新学生 */}
@@ -871,179 +1002,6 @@ function BucketCard({
         )}
       </CardContent>
     </Card>
-  )
-}
-
-// ─── 同名待确认（带候选 Dialog） ───
-function AmbiguousBucket({
-  rows,
-  grade,
-  onLink,
-  onMarkNew,
-}: {
-  rows: AmbiguousRow[]
-  grade: number
-  onLink: (g2_sid: string, g1_sid: string, name?: string | null) => void
-  onMarkNew: (g2_sid: string, name?: string | null) => void
-}) {
-  const [openFor, setOpenFor] = useState<AmbiguousRow | null>(null)
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          同名待确认
-          <Badge variant="warning">同名待确认</Badge>
-          <span className="text-sm font-normal text-slate-400">{rows.length}</span>
-        </CardTitle>
-        <CardDescription>
-          这些高{grade}学生与高{grade - 1}某生同名，但学号不同。点「辨认」逐个确认——切勿批量自动合并，避免把两个同名误并为一人。
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        {rows.length === 0 ? (
-          <div className="py-6 text-center text-sm text-slate-400">暂无同名待确认</div>
-        ) : (
-          <>
-            <div className="hidden overflow-x-auto md:block">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-40">高{grade}学号</TableHead>
-                    <TableHead>姓名</TableHead>
-                    <TableHead>候选数</TableHead>
-                    <TableHead className="text-right">操作</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {rows.map((r) => (
-                    <TableRow key={r.student_id} className="hover:bg-slate-50">
-                      <TableCell className="font-mono text-slate-500">{r.student_id}</TableCell>
-                      <TableCell className="font-medium">{r.name ?? DASH}</TableCell>
-                      <TableCell>
-                        <Badge variant="warning">{r.candidates.length} 个高{grade - 1}同名</Badge>
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Button variant="outline" size="sm" onClick={() => setOpenFor(r)}>
-                          辨认
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-            <div className="space-y-2 md:hidden">
-              {rows.map((r) => (
-                <div key={r.student_id} className="rounded-md border border-slate-200 p-3">
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium">{r.name ?? DASH}</span>
-                    <Button variant="outline" size="sm" onClick={() => setOpenFor(r)}>
-                      辨认
-                    </Button>
-                  </div>
-                  <div className="mt-1 font-mono text-xs text-slate-500">{r.student_id}</div>
-                  <div className="mt-1">
-                    <Badge variant="warning">{r.candidates.length} 个高{grade - 1}同名</Badge>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
-      </CardContent>
-
-      <CandidateDialog
-        row={openFor}
-        grade={grade}
-        onOpenChange={(v) => !v && setOpenFor(null)}
-        onLink={(g1_sid) => {
-          if (openFor) onLink(openFor.student_id, g1_sid, openFor.name)
-          setOpenFor(null)
-        }}
-        onMarkNew={() => {
-          if (openFor) onMarkNew(openFor.student_id, openFor.name)
-          setOpenFor(null)
-        }}
-      />
-    </Card>
-  )
-}
-
-function CandidateDialog({
-  row,
-  grade,
-  onOpenChange,
-  onLink,
-  onMarkNew,
-}: {
-  row: AmbiguousRow | null
-  grade: number
-  onOpenChange: (v: boolean) => void
-  onLink: (g1_sid: string) => void
-  onMarkNew: () => void
-}) {
-  return (
-    <Dialog open={row != null} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-sm:h-screen max-sm:w-screen max-sm:max-w-none max-sm:rounded-none max-sm:p-4">
-        <DialogHeader>
-          <DialogTitle>辨认同名 · {row?.name ?? ''}</DialogTitle>
-          <DialogDescription>
-            高{grade}学号 <span className="font-mono">{row?.student_id}</span>。请逐一对比下面的高{grade - 1}候选人，确认是否为同一人。
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="max-h-[60vh] space-y-2 overflow-y-auto">
-          {row?.candidates.map((c) => (
-            <div
-              key={c.student_id}
-              className={cn(
-                'rounded-md border border-slate-200 p-3',
-                c.already_linked && 'bg-slate-50',
-              )}
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="space-y-0.5">
-                  <div className="font-medium">
-                    {c.name}
-                    {c.already_linked && (
-                      <Badge className="ml-2 border-transparent bg-slate-100 text-slate-500">
-                        已被关联
-                      </Badge>
-                    )}
-                  </div>
-                  <div className="font-mono text-xs text-slate-500">高{grade - 1}学号 {c.student_id}</div>
-                  <div className="text-xs text-slate-500">
-                    高{grade - 1}行政班：
-                    {formatClassLabel(grade - 1, c.class_num) ?? DASH}
-                    {' · '}
-                    {c.latest_exam_name ?? '无考试'}：
-                    主三门 {c.latest_main_score ?? DASH} 分 / 名次 {c.latest_main_rank ?? DASH}
-                  </div>
-                </div>
-                <Button
-                  size="sm"
-                  onClick={() => onLink(c.student_id)}
-                  disabled={c.already_linked}
-                  title={c.already_linked ? `该高${grade - 1}学号已被关联到别人` : undefined}
-                >
-                  是某某（关联）
-                </Button>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <DialogFooter className="flex-col gap-2 sm:flex-row sm:justify-between">
-          <Button variant="ghost" onClick={onMarkNew}>
-            都不是 · 新学生
-          </Button>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            稍后处理
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   )
 }
 
