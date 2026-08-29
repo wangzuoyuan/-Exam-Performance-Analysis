@@ -63,7 +63,7 @@ tail -f ~/.exam-tracker/frontend.log
 | DELETE | `/api/exams/{id}` | 删除考试及所有关联数据（级联） |
 | GET  | `/api/exams/{id}` | 考试详情：含 `students[]`、`rank_bands`、`rank_distribution`、`class_averages`、`stats` |
 | GET  | `/api/focus-list/{id}` | 重点关注名单（临界段/薄弱段/严重偏科），支持 `?class_num=` |
-| GET  | `/api/students/{id}` | 学生跨学年画像：含 `main_total_trend`（每项含 `class_rank`）、`five_trend`、`plus3_trend`、`san3_trend`、`subject_trend` |
+| GET  | `/api/students/{id}` | 学生跨学年画像：含 `main_total_trend`（每项含 `class_rank`）、`five_trend`、`nine_trend`、`plus3_trend`、`san3_trend`、`subject_trend`（单科含 `grade_score`） |
 | GET  | `/api/class/compare` | 班级横向对比，支持 `?exam_id=` |
 | GET  | `/api/subject-weakness/{id}` | 单科薄弱名单，支持 `?class_num=` |
 | GET  | `/api/band-trend` | 历次考试高分段/临界段/薄弱段人数趋势，支持 `?grade=&class_num=` |

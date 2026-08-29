@@ -81,7 +81,7 @@ tail -f ~/.exam-tracker/frontend.log
 | GET  | `/api/exams/{id}` | 考试详情：含 `students[]`、`rank_bands`、`rank_distribution`、`class_averages`、`stats` |
 | GET  | `/api/focus-list/{id}` | 重点关注名单（临界段/薄弱段/严重偏科），支持 `?class_num=` |
 | GET  | `/api/students` | 学生列表（按「人」去重）：合并同一人多学号（含已关联身份的 roster-only 学号，高二学号为当前代表、旧学号进 history），返回当前班级/学号 + 历史学号 + 最近主三门摘要；roster-only 行仅纳入教师绑定年级班级；`?search=` 模糊匹配 |
-| GET  | `/api/students/{id}` | 学生跨学年画像：含 `main_total_trend`（每项含 `class_rank`）、`five_trend`、`plus3_trend`、`san3_trend`、`subject_trend`；带 `identity.aliases`（每个学号各年级 class_num）、`class_by_grade`（JSON 字符串键，并入合法花名册年级，顶层 `class_num` 取最高年级作用域）、每个趋势点 `imported` 标记、合并 `imported_history`（隔离，不进排名/班均）；仅凭花名册可见的学生须属教师绑定班（他班 404） |
+| GET  | `/api/students/{id}` | 学生跨学年画像：含 `main_total_trend`（每项含 `class_rank`）、`five_trend`、`nine_trend`、`plus3_trend`、`san3_trend`、`subject_trend`（单科含 `grade_score`）；带 `identity.aliases`（每个学号各年级 class_num）、`class_by_grade`（JSON 字符串键，并入合法花名册年级，顶层 `class_num` 取最高年级作用域）、每个趋势点 `imported` 标记、合并 `imported_history`（隔离，不进排名/班均）；仅凭花名册可见的学生须属教师绑定班（他班 404） |
 | GET  | `/api/class/compare` | 班级横向对比，支持 `?exam_id=` |
 | GET  | `/api/subject-weakness/{id}` | 单科薄弱名单，支持 `?class_num=` |
 | GET  | `/api/band-trend` | 历次考试三段（高分/临界/薄弱）人数趋势，支持 `?grade=&class_num=` |

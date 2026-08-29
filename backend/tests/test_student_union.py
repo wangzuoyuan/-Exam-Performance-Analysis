@@ -89,7 +89,16 @@ def _seed_exam(eid, name, grade, exam_date):
     s.close()
 
 
-def _seed_subject(exam_id, student_id, name, class_num, subject="语文", raw=80.0):
+def _seed_subject(
+    exam_id,
+    student_id,
+    name,
+    class_num,
+    subject="语文",
+    raw=80.0,
+    grade_score=None,
+    grade_percentile=None,
+):
     s = SessionLocal()
     s.add(
         SubjectScore(
@@ -99,6 +108,8 @@ def _seed_subject(exam_id, student_id, name, class_num, subject="语文", raw=80
             class_num=class_num,
             subject=subject,
             raw_score=raw,
+            grade_score=grade_score,
+            grade_percentile=grade_percentile,
         )
     )
     s.commit()
@@ -148,10 +159,20 @@ def seed():
     _seed_subject(1001, "g1_102", "李四", 6, raw=70.0)  # 同班同学，排名基准
     _seed_total(1001, "g1_101", "主三门", 250.0, 8)
     _seed_total(1001, "g1_102", "主三门", 220.0, 15)
+    _seed_total(1001, "g1_101", "九门", 660.0, 6)
 
     # ── 高二（grade=2）班 3 ──
     _seed_subject(2001, "g2_201", "陈一", 3, raw=88.0)
     _seed_subject(2001, "g2_202", "王五", 3, raw=90.0)  # 同班同学，排名基准
+    _seed_subject(
+        2001,
+        "g2_201",
+        "陈一",
+        3,
+        subject="物理",
+        raw=78.0,
+        grade_score=64.0,
+    )
     _seed_total(2001, "g2_201", "主三门", 270.0, 5)
     _seed_total(2001, "g2_202", "主三门", 280.0, 3)
 
@@ -192,6 +213,7 @@ def seed():
             kind="subject",
             subject="数学",
             raw_score=110.0,
+            grade_score=67.0,
         )
     )
     s.commit()
@@ -244,6 +266,30 @@ def test_get_student_imported_history_subject_point(client):
     body = client.get("/api/students/g2_201").json()
     subj_imp = [p for p in body["subject_trend"] if p.get("imported") is True]
     assert any(p.get("subject") == "数学" and p.get("raw_score") == 110.0 for p in subj_imp)
+
+
+def test_student_profile_returns_stage_specific_metrics(client):
+    """画像返回高一九门趋势，并保留高二选科与手工导入历史的等级分。"""
+    body = client.get("/api/students/g2_201").json()
+
+    assert any(
+        point["exam_id"] == 1001 and point["total_score"] == 660.0
+        for point in body["nine_trend"]
+    )
+
+    physics = [
+        point
+        for point in body["subject_trend"]
+        if point["subject"] == "物理" and point["exam_id"] == 2001
+    ]
+    assert physics and physics[0]["grade_score"] == 64.0
+
+    imported_math = [
+        point
+        for point in body["subject_trend"]
+        if point.get("imported") is True and point["subject"] == "数学"
+    ]
+    assert imported_math and imported_math[0]["grade_score"] == 67.0
 
 
 def test_get_student_class_rank_per_exam(client):

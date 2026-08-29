@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useParams } from 'next/navigation'
 import {
@@ -48,6 +48,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   Tooltip,
   TooltipContent,
@@ -60,7 +61,7 @@ import { StatCard } from '@/components/patterns/StatCard'
 import { useHomeroomScope } from '@/components/providers/HomeroomScopeProvider'
 
 interface MainTrendPoint {
-  exam_id: number
+  exam_id?: number | null
   exam_name: string
   grade?: number | null
   total_score?: number | null
@@ -73,11 +74,12 @@ interface MainTrendPoint {
 }
 
 interface SubjectTrendPoint {
-  exam_id: number
+  exam_id?: number | null
   exam_name: string
   exam_date?: string | null
   subject: string
   raw_score?: number | null
+  grade_score?: number | null
   grade_percentile?: number | null
   class_avg?: number | null
   imported?: boolean
@@ -99,6 +101,7 @@ interface StudentProfile {
   main_total_trend: MainTrendPoint[]
   subject_trend: SubjectTrendPoint[]
   five_trend?: MainTrendPoint[]
+  nine_trend?: MainTrendPoint[]
   plus3_trend?: MainTrendPoint[]
   san3_trend?: MainTrendPoint[]
   identity?: StageIdentity
@@ -120,9 +123,12 @@ function decodeRouteId(value: string): string {
   }
 }
 
-type TotalTypeKey = '主三门' | '五门' | '+3' | '3+3'
+type TotalTypeKey = '主三门' | '五门' | '九门' | '+3' | '3+3'
+type ProfileStage = 'grade1' | 'grade23'
 
-const ALL_SUBJECTS = ['语文', '数学', '英语', '物理', '化学', '生物', '政治', '历史', '地理']
+const BASE_SUBJECTS = ['语文', '数学', '英语'] as const
+const ELECTIVE_SUBJECTS = ['物理', '化学', '生物', '政治', '历史', '地理'] as const
+const ALL_SUBJECTS = [...BASE_SUBJECTS, ...ELECTIVE_SUBJECTS]
 const SIGNIFICANT_PCT = 0.1
 
 const DASH = '—'
@@ -135,7 +141,36 @@ function safeNum(v: unknown): number | null {
 }
 
 function hasSubjectScore(point: SubjectTrendPoint): boolean {
-  return safeNum(point.raw_score) !== null
+  return safeNum(point.raw_score) !== null || safeNum(point.grade_score) !== null
+}
+
+function isStageGrade(stage: ProfileStage, grade?: number | null): boolean {
+  if (stage === 'grade1') return grade === 1
+  return grade === 2 || grade === 3
+}
+
+function isElectiveInStage(stage: ProfileStage, subject: string): boolean {
+  return stage === 'grade23' && (ELECTIVE_SUBJECTS as readonly string[]).includes(subject)
+}
+
+function compareByGradeAndDate<T extends {
+  grade?: number | null
+  exam_date?: string | null
+  exam_id?: number | null
+  imported?: boolean
+}>(a: T, b: T): number {
+  const ga = a.grade ?? 0
+  const gb = b.grade ?? 0
+  if (ga !== gb) return ga - gb
+
+  const da = a.exam_date ?? ''
+  const db = b.exam_date ?? ''
+  if (da !== db) return da < db ? -1 : 1
+
+  const ia = a.exam_id ?? Number.MAX_SAFE_INTEGER
+  const ib = b.exam_id ?? Number.MAX_SAFE_INTEGER
+  if (ia !== ib) return ia - ib
+  return Number(a.imported === true) - Number(b.imported === true)
 }
 
 // 取 main_total_trend 中最后一场考试的 grade（用于新学生判定，独立于渲染期的 latestGrade）。
@@ -234,55 +269,34 @@ function EmptyState({ title, hint }: { title: string; hint?: string }) {
 
 function SubjectSparkCard({
   subject,
+  stage,
   points,
 }: {
   subject: string
+  stage: ProfileStage
   points: SubjectTrendPoint[]
 }) {
-  const sorted = points
+  const sorted = [...points].sort(compareByGradeAndDate)
   const latest = sorted[sorted.length - 1]
   const prev = sorted.length >= 2 ? sorted[sorted.length - 2] : null
 
-  const latestPct = safeNum(latest?.grade_percentile)
-  const prevPct = safeNum(prev?.grade_percentile)
+  const elective = isElectiveInStage(stage, subject)
+  const primaryLabel = elective ? '等级分' : '年级百分位'
+  const latestPrimary = safeNum(elective ? latest?.grade_score : latest?.grade_percentile)
+  const prevPrimary = safeNum(elective ? prev?.grade_score : prev?.grade_percentile)
   const latestScore = safeNum(latest?.raw_score)
   const latestAvg = safeNum(latest?.class_avg)
-
-  const hasAnyPct = sorted.some((p) => safeNum(p.grade_percentile) !== null)
-
-  // 趋势箭头：百分位越小越好
-  let trendNode: React.ReactNode = <span className="text-slate-400">{DASH}</span>
-  if (latestPct !== null && prevPct !== null) {
-    const diff = latestPct - prevPct
-    if (Math.abs(diff) < SIGNIFICANT_PCT) {
-      trendNode = (
-        <span className="inline-flex items-center gap-1 text-slate-500">
-          <Minus className="h-3.5 w-3.5" />
-          持平
-        </span>
-      )
-    } else if (diff < 0) {
-      trendNode = (
-        <span className="inline-flex items-center gap-1 font-medium text-success-500">
-          <ArrowUpRight className="h-3.5 w-3.5" />
-          进步
-        </span>
-      )
-    } else {
-      trendNode = (
-        <span className="inline-flex items-center gap-1 font-medium text-danger-500">
-          <ArrowDownRight className="h-3.5 w-3.5" />
-          退步
-        </span>
-      )
-    }
-  }
+  const hasAnyPrimary = sorted.some((p) =>
+    safeNum(elective ? p.grade_score : p.grade_percentile) !== null,
+  )
 
   const sparkData = sorted.map((p) => ({
     name: p.exam_name,
-    pct: hasAnyPct ? safeNum(p.grade_percentile) : safeNum(p.raw_score),
+    value: safeNum(elective ? p.grade_score : p.grade_percentile),
   }))
-  const hasSparkData = sparkData.some((d) => d.pct !== null)
+  const hasSparkData = sparkData.some((d) => d.value !== null)
+  const formatPrimary = (value: number | null) =>
+    elective || value === null ? (value ?? DASH) : formatPercent(value)
 
   return (
     <Card>
@@ -291,34 +305,43 @@ function SubjectSparkCard({
           <div className="flex items-baseline gap-2">
             <span className="text-base font-semibold text-slate-900">{subject}</span>
             <span className="text-sm text-slate-500">
-              {hasAnyPct ? formatPercent(latestPct) : DASH}
+              {hasAnyPrimary ? formatPrimary(latestPrimary) : `${primaryLabel}缺失`}
             </span>
           </div>
-          {trendNode}
+          <DeltaArrow
+            current={latestPrimary}
+            previous={prevPrimary}
+            invert={!elective}
+            threshold={elective ? 0 : SIGNIFICANT_PCT}
+          />
         </div>
 
         <div
           className="h-12 w-full"
           role={hasSparkData ? 'img' : undefined}
-          aria-label={hasSparkData ? `${subject}${hasAnyPct ? '年级百分位' : '原始分'}趋势图，共${sparkData.length}场考试` : undefined}
+          aria-label={
+            hasSparkData
+              ? `${subject}${primaryLabel}趋势图，共${sparkData.length}场考试`
+              : undefined
+          }
         >
           {hasSparkData ? (
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={sparkData} margin={{ top: 4, right: 4, bottom: 4, left: 4 }}>
                 <RXAxis dataKey="name" hide />
-                <RYAxis hide reversed={hasAnyPct} />
+                <RYAxis hide reversed={!elective} />
                 <RTooltip
                   cursor={false}
                   contentStyle={{ fontSize: 11, padding: '4px 8px' }}
                   formatter={(v: number | string) =>
-                    typeof v === 'number' && hasAnyPct ? `${Math.round(v * 100)}%` : v
+                    typeof v === 'number' && !elective ? formatPercent(v) : v
                   }
                   labelFormatter={(label) => String(label)}
                 />
                 <Line
                   type="monotone"
-                  dataKey="pct"
-                  name={hasAnyPct ? '年级百分位' : '原始分'}
+                  dataKey="value"
+                  name={primaryLabel}
                   stroke="#3b6ea5"
                   strokeWidth={1.75}
                   dot={false}
@@ -333,12 +356,16 @@ function SubjectSparkCard({
         </div>
 
         <div className="text-xs text-slate-500">
-          {latestScore !== null ? `最新 ${latestScore} 分` : `最新 ${DASH}`}
+          {latestScore !== null ? `最新原始 ${latestScore} 分` : `最新原始 ${DASH}`}
           {latestAvg !== null && ` / 班均 ${latestAvg} 分`}
         </div>
 
-        {!hasAnyPct && (
-          <div className="text-xs text-slate-400">百分位数据缺失</div>
+        {!hasAnyPrimary && (
+          <div className="text-xs text-slate-400">
+            {elective
+              ? '等级分缺失，原始分仅作参考，不进入趋势线'
+              : '百分位数据缺失，原始分仅作参考'}
+          </div>
         )}
       </CardContent>
     </Card>
@@ -396,6 +423,7 @@ export default function StudentPage() {
   const [profile, setProfile] = useState<StudentProfile | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [stage, setStage] = useState<ProfileStage>('grade23')
   const [importOpen, setImportOpen] = useState(false)
   const [linkOpen, setLinkOpen] = useState(false)
   const [importText, setImportText] = useState('')
@@ -449,161 +477,186 @@ export default function StudentPage() {
     return () => controller.abort()
   }, [activeScope, scopeError, scopeLoading, studentId])
 
-  // 趋势按考试时间（exam_date，格式 YYYY-MM）升序；exam_id 仅作并列兜底。
-  // 注意：不能按 exam_id 排序——上传顺序≠考试时间顺序。
-  const compareByExamDate = (
-    a: { exam_id: number; exam_date?: string | null },
-    b: { exam_id: number; exam_date?: string | null }
-  ) => {
-    const da = a.exam_date ?? ''
-    const db = b.exam_date ?? ''
-    if (da !== db) return da < db ? -1 : 1
-    return a.exam_id - b.exam_id
-  }
-
-  // 主三门趋势按考试时间升序（最早 → 最新）；表格倒序展示
-  const mainTrend = useMemo<MainTrendPoint[]>(() => {
-    if (!profile?.main_total_trend) return []
-    return [...profile.main_total_trend].sort(compareByExamDate)
+  // 趋势统一按（年级、考试日期）排序；导入点没有 exam_id 时排在同年级真实点之后。
+  const gradeSet = useMemo(() => {
+    const grades = new Set<number>(profile?.grades || [])
+    const points = [
+      ...(profile?.main_total_trend || []),
+      ...(profile?.five_trend || []),
+      ...(profile?.nine_trend || []),
+      ...(profile?.plus3_trend || []),
+      ...(profile?.san3_trend || []),
+      ...(profile?.subject_trend || []),
+    ]
+    points.forEach((point) => {
+      if (point.grade === 1 || point.grade === 2 || point.grade === 3) grades.add(point.grade)
+    })
+    return grades
   }, [profile])
 
-  const fiveTrend = useMemo<MainTrendPoint[]>(() => {
-    if (!profile?.five_trend) return []
-    return [...profile.five_trend].sort(compareByExamDate)
-  }, [profile])
+  const hasGradeOne = gradeSet.has(1)
+  const hasUpperGrade = gradeSet.has(2) || gradeSet.has(3)
+  const showStageTabs = hasGradeOne && hasUpperGrade
+  const activeStage: ProfileStage =
+    hasUpperGrade ? stage : hasGradeOne ? 'grade1' : stage
+  useEffect(() => {
+    setStage(hasUpperGrade ? 'grade23' : 'grade1')
+  }, [profile?.student_id, hasUpperGrade])
+  const inActiveStage = useCallback(
+    (point: { grade?: number | null }) => isStageGrade(activeStage, point.grade),
+    [activeStage],
+  )
 
-  const plus3Trend = useMemo<MainTrendPoint[]>(() => {
-    if (!profile?.plus3_trend) return []
-    return [...profile.plus3_trend].sort(compareByExamDate)
-  }, [profile])
-
-  const san3Trend = useMemo<MainTrendPoint[]>(() => {
-    if (!profile?.san3_trend) return []
-    return [...profile.san3_trend].sort(compareByExamDate)
-  }, [profile])
+  // 主三门保留全量跨学年趋势；其他总分与单科趋势按当前学段过滤。
+  const mainTrend = useMemo<MainTrendPoint[]>(
+    () => [...(profile?.main_total_trend || [])].sort(compareByGradeAndDate),
+    [profile],
+  )
+  const stageMainTrend = useMemo(
+    () => mainTrend.filter(inActiveStage),
+    [mainTrend, inActiveStage],
+  )
+  const fiveTrend = useMemo<MainTrendPoint[]>(
+    () => [...(profile?.five_trend || [])].filter(inActiveStage).sort(compareByGradeAndDate),
+    [profile, inActiveStage],
+  )
+  const nineTrend = useMemo<MainTrendPoint[]>(
+    () => [...(profile?.nine_trend || [])].filter(inActiveStage).sort(compareByGradeAndDate),
+    [profile, inActiveStage],
+  )
+  const plus3Trend = useMemo<MainTrendPoint[]>(
+    () => [...(profile?.plus3_trend || [])].filter(inActiveStage).sort(compareByGradeAndDate),
+    [profile, inActiveStage],
+  )
+  const san3Trend = useMemo<MainTrendPoint[]>(
+    () => [...(profile?.san3_trend || [])].filter(inActiveStage).sort(compareByGradeAndDate),
+    [profile, inActiveStage],
+  )
 
   const totalColumnSpecs = useMemo(() => {
-    const grades = profile?.grades || []
-    const hasGradeOne = grades.includes(1)
-    const hasUpperGrade = grades.some((grade) => grade === 2 || grade === 3)
-    const specs: {
-      type: TotalTypeKey
-      scoreLabel: string
-      rankLabel?: string
-    }[] = []
-
-    if (hasGradeOne || !hasUpperGrade) {
-      specs.push(
-        { type: '主三门', scoreLabel: '三门总分', rankLabel: '三门排名' },
-        { type: '五门', scoreLabel: '五门总分', rankLabel: '五门排名' }
-      )
+    if (activeStage === 'grade1') {
+      return [
+        { type: '主三门' as const, scoreLabel: '主三门总分', rankLabel: '主三门排名' },
+        { type: '五门' as const, scoreLabel: '五门总分', rankLabel: '五门排名' },
+        { type: '九门' as const, scoreLabel: '九门总分', rankLabel: '九门排名' },
+      ]
     }
-    if (hasUpperGrade) {
-      if (!specs.some((spec) => spec.type === '主三门')) {
-        specs.push({ type: '主三门', scoreLabel: '三门总分', rankLabel: '三门排名' })
-      }
-      specs.push(
-        { type: '+3', scoreLabel: '+3总分' },
-        { type: '3+3', scoreLabel: '3+3六门总分', rankLabel: '3+3排名' }
-      )
-    }
+    return [
+      { type: '主三门' as const, scoreLabel: '主三门总分', rankLabel: '主三门排名' },
+      { type: '+3' as const, scoreLabel: '+3总分' },
+      { type: '3+3' as const, scoreLabel: '3+3六门总分', rankLabel: '3+3排名' },
+    ]
+  }, [activeStage])
 
-    return specs
-  }, [profile])
+  const subjectColumnSpecs = useMemo(() => {
+    const base = BASE_SUBJECTS.map((subject) => ({
+      subject,
+      primaryLabel: '分数',
+      secondaryLabel: '年级百分位',
+    }))
+    const electives = ELECTIVE_SUBJECTS.map((subject) => ({
+      subject,
+      primaryLabel: '原始分',
+      secondaryLabel: '等级分',
+    }))
+    return activeStage === 'grade1'
+      ? [...base, ...electives.map((item) => ({ ...item, primaryLabel: '分数', secondaryLabel: '年级百分位' }))]
+      : [...base, ...electives]
+  }, [activeStage])
 
-  // 按科目分桶
+  // 按科目分桶；raw/grade_score 任一存在即视为有效成绩点。
   const subjectBuckets = useMemo<Record<string, SubjectTrendPoint[]>>(() => {
     const map: Record<string, SubjectTrendPoint[]> = {}
-    if (!profile?.subject_trend) return map
-    for (const s of profile.subject_trend) {
-      if (!hasSubjectScore(s)) continue
-      if (!map[s.subject]) map[s.subject] = []
-      map[s.subject].push(s)
+    for (const point of profile?.subject_trend || []) {
+      if (!inActiveStage(point) || !hasSubjectScore(point)) continue
+      if (!map[point.subject]) map[point.subject] = []
+      map[point.subject].push(point)
     }
-    Object.keys(map).forEach((k) => {
-      map[k].sort(compareByExamDate)
+    Object.keys(map).forEach((subject) => {
+      map[subject].sort(compareByGradeAndDate)
     })
     return map
-  }, [profile])
+  }, [profile, inActiveStage])
 
-  // 历次考试明细：按 exam_id 倒序
+  // 历次考试明细只收当前学段；导入点用稳定字符串 key，避免 exam_id=null 覆盖真实考试。
   const examRows = useMemo(() => {
+    type ExamRow = {
+      rowKey: string
+      exam_id?: number | null
+      exam_name: string
+      exam_date?: string | null
+      grade?: number | null
+      subjects: Record<string, SubjectTrendPoint | null>
+      totals: Partial<Record<TotalTypeKey, { score: number | null; rank: number | null }>>
+      total: number | null
+      class_rank: number | null
+      xueji_rank: number | null
+    }
+
     if (!profile) return []
-    // 收集所有 exam_id（来自 main + subject）
-    const examMap = new Map<
-      number,
-      {
-        exam_id: number
-        exam_name: string
-        exam_date?: string | null
-        subjects: Record<string, number | null>
-        totals: Record<string, { score: number | null; rank: number | null }>
-        total: number | null
-        class_rank: number | null
-        xueji_rank: number | null
-      }
-    >()
 
-    const ensureExam = (p: MainTrendPoint) => {
-      let entry = examMap.get(p.exam_id)
-      if (!entry) {
-        entry = {
-          exam_id: p.exam_id,
-          exam_name: p.exam_name,
-          exam_date: p.exam_date ?? null,
+    const rowMap = new Map<string, ExamRow>()
+    const rowKey = (point: { exam_id?: number | null; grade?: number | null; exam_name: string }) =>
+      point.exam_id != null
+        ? `exam-${point.exam_id}`
+        : `imported-${point.grade ?? 0}-${point.exam_name}`
+
+    const ensureRow = (point: MainTrendPoint | SubjectTrendPoint): ExamRow => {
+      const key = rowKey(point)
+      let row = rowMap.get(key)
+      if (!row) {
+        row = {
+          rowKey: key,
+          exam_id: point.exam_id,
+          exam_name: point.exam_name,
+          exam_date: point.exam_date ?? null,
+          grade: point.grade ?? null,
           subjects: {},
           totals: {},
           total: null,
           class_rank: null,
           xueji_rank: null,
         }
-        examMap.set(p.exam_id, entry)
+        rowMap.set(key, row)
       }
-      return entry
+      return row
     }
 
-    const addTotal = (type: TotalTypeKey, p: MainTrendPoint) => {
-      const entry = ensureExam(p)
-      const score = safeNum(p.total_score)
-      const rank = safeNum(p.xueji_rank)
-      entry.totals[type] = { score, rank }
+    const addTotal = (type: TotalTypeKey, point: MainTrendPoint) => {
+      if (!inActiveStage(point)) return
+      const row = ensureRow(point)
+      const score = safeNum(point.total_score)
+      const rank = safeNum(point.xueji_rank)
+      row.totals[type] = { score, rank }
       if (type === '主三门') {
-        entry.total = score
-        entry.class_rank = safeNum(p.class_rank)
-        entry.xueji_rank = rank
+        row.total = score
+        row.class_rank = safeNum(point.class_rank)
+        row.xueji_rank = rank
       }
     }
 
-    for (const p of profile.main_total_trend || []) addTotal('主三门', p)
-    for (const p of profile.five_trend || []) addTotal('五门', p)
-    for (const p of profile.plus3_trend || []) addTotal('+3', p)
-    for (const p of profile.san3_trend || []) addTotal('3+3', p)
-
-    for (const s of profile.subject_trend || []) {
-      let entry = examMap.get(s.exam_id)
-      if (!entry) {
-        entry = {
-          exam_id: s.exam_id,
-          exam_name: s.exam_name,
-          exam_date: s.exam_date ?? null,
-          subjects: {},
-          totals: {},
-          total: null,
-          class_rank: null,
-          xueji_rank: null,
-        }
-        examMap.set(s.exam_id, entry)
-      }
-      entry.subjects[s.subject] = safeNum(s.raw_score)
+    for (const point of profile.main_total_trend || []) addTotal('主三门', point)
+    if (activeStage === 'grade1') {
+      for (const point of profile.five_trend || []) addTotal('五门', point)
+      for (const point of profile.nine_trend || []) addTotal('九门', point)
+    } else {
+      for (const point of profile.plus3_trend || []) addTotal('+3', point)
+      for (const point of profile.san3_trend || []) addTotal('3+3', point)
     }
 
-    return Array.from(examMap.values()).sort((a, b) => compareByExamDate(b, a))
-  }, [profile])
+    for (const point of profile.subject_trend || []) {
+      if (!inActiveStage(point) || !hasSubjectScore(point)) continue
+      ensureRow(point).subjects[point.subject] = point
+    }
 
-  // KPI 计算（取最新两次主三门点）
+    return Array.from(rowMap.values()).sort((a, b) => compareByGradeAndDate(b, a))
+  }, [profile, activeStage, inActiveStage])
+
+  // KPI 与当前学段主三门最新点同步；跨学年主三门趋势仍单独展示。
   const kpi = useMemo(() => {
-    const last = mainTrend[mainTrend.length - 1] || null
-    const prev = mainTrend.length >= 2 ? mainTrend[mainTrend.length - 2] : null
+    const last = stageMainTrend[stageMainTrend.length - 1] || null
+    const prev =
+      stageMainTrend.length >= 2 ? stageMainTrend[stageMainTrend.length - 2] : null
     return {
       classRankNow: safeNum(last?.class_rank),
       classRankPrev: safeNum(prev?.class_rank),
@@ -612,7 +665,7 @@ export default function StudentPage() {
       totalNow: safeNum(last?.total_score),
       totalFull: safeNum(last?.total_full),
     }
-  }, [mainTrend])
+  }, [stageMainTrend])
 
   // 主三门趋势学段背景带：按 grade 字段切分连续考试区间。
   // grade=1 → 高一（brand-50），grade=2/3 → 高二及以上（slate-100）。
@@ -854,6 +907,20 @@ export default function StudentPage() {
           </CardContent>
         </Card>
 
+        {/* 成绩口径按学段切换；主三门跨学年趋势仍保留在下方。 */}
+        {showStageTabs && (
+          <Tabs
+            value={activeStage}
+            onValueChange={(value) => setStage(value as ProfileStage)}
+            aria-label="切换学生画像学段口径"
+          >
+            <TabsList className="grid h-11 w-full sm:w-[26rem] sm:grid-cols-2">
+              <TabsTrigger value="grade1">高一 · 九科</TabsTrigger>
+              <TabsTrigger value="grade23">高二/高三 · 6选3</TabsTrigger>
+            </TabsList>
+          </Tabs>
+        )}
+
         {/* KPI 行 */}
         <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
           <StatCard label="最新主三门班排" value={<span className="flex items-baseline gap-2">{kpi.classRankNow ?? DASH}<span className="text-xs"><DeltaArrow current={kpi.classRankNow} previous={kpi.classRankPrev} invert /></span></span>} icon={<TrendingUp className="h-4 w-4" />} />
@@ -874,7 +941,7 @@ export default function StudentPage() {
         {/* 主三门趋势图 */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">主三门总分 + 学籍年级排名趋势</CardTitle>
+            <CardTitle className="text-base">跨学年主三门总分 + 学籍年级排名趋势</CardTitle>
           </CardHeader>
           <CardContent>
             {mainTrend.length > 0 ? (
@@ -893,7 +960,7 @@ export default function StudentPage() {
                   importedKey="imported"
                 />
                 <p className="mt-2 text-xs text-slate-400">
-                  学籍排名越小越好，线越高代表排名越好
+                  学籍排名越小越好，线越高代表排名越好；主三门是唯一跨学段比较口径
                 </p>
                 {hasImportedPoint && (
                   <p className="mt-1 inline-flex items-center gap-1.5 text-xs text-slate-400">
@@ -927,6 +994,30 @@ export default function StudentPage() {
               />
               <p className="mt-2 text-xs text-slate-400">
                 五门 = 语文、数学、英语、物理、化学；排名越小越好
+              </p>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* 九门趋势（高一） */}
+        {nineTrend.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">九门总分 + 学籍年级排名趋势</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <TrendLineChart
+                data={nineTrend.map((p) => ({
+                  exam_name: p.exam_name,
+                  rank: safeNum(p.xueji_rank) ?? undefined,
+                  score: safeNum(p.total_score) ?? undefined,
+                }))}
+                yDataKey="rank"
+                color="#8a6d3b"
+                invertY
+              />
+              <p className="mt-2 text-xs text-slate-400">
+                九门 = 九科固定口径；排名越小越好
               </p>
             </CardContent>
           </Card>
@@ -981,14 +1072,23 @@ export default function StudentPage() {
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
           {ALL_SUBJECTS.map((sub) => {
             const points = subjectBuckets[sub] || []
-            return <SubjectSparkCard key={sub} subject={sub} points={points} />
+            return (
+              <SubjectSparkCard
+                key={sub}
+                subject={sub}
+                stage={activeStage}
+                points={points}
+              />
+            )
           })}
         </div>
 
-        {/* 历次成绩表 */}
+        {/* 历次成绩表：高一/高二高三分别使用分数+百分位、原始分+等级分双列口径。 */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">历次考试明细</CardTitle>
+            <CardTitle className="text-base">
+              历次考试明细 · {activeStage === 'grade1' ? '高一九科' : '高二/高三 6选3'}
+            </CardTitle>
           </CardHeader>
           <CardContent>
             {examRows.length > 0 ? (
@@ -996,65 +1096,110 @@ export default function StudentPage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>考试</TableHead>
-                      <TableHead>日期</TableHead>
-                      {ALL_SUBJECTS.map((s) => (
-                        <TableHead key={s} className="text-right">
-                          {s.charAt(0)}
+                      <TableHead rowSpan={2}>考试</TableHead>
+                      <TableHead rowSpan={2}>日期</TableHead>
+                      {subjectColumnSpecs.map((spec) => (
+                        <TableHead key={spec.subject} colSpan={2} className="text-center">
+                          {spec.subject}
                         </TableHead>
                       ))}
-                      {totalColumnSpecs.map((spec) => (
-                        <TableHead key={`${spec.type}-score`} className="text-right">
-                          {spec.scoreLabel}
-                        </TableHead>
-                      ))}
-                      {totalColumnSpecs.map((spec) => (
+                      {totalColumnSpecs.map((spec) =>
                         spec.rankLabel ? (
-                          <TableHead key={`${spec.type}-rank`} className="text-right">
-                            {spec.rankLabel}
+                          <TableHead key={`${spec.type}-group`} colSpan={2} className="text-center">
+                            {spec.type}
                           </TableHead>
-                        ) : null
+                        ) : (
+                          <TableHead key={`${spec.type}-group`} rowSpan={2} className="text-center">
+                            {spec.scoreLabel}
+                          </TableHead>
+                        ),
+                      )}
+                    </TableRow>
+                    <TableRow>
+                      {subjectColumnSpecs.flatMap((spec) => (
+                        <Fragment key={spec.subject}>
+                          <TableHead className="min-w-16 text-right">
+                            {spec.primaryLabel}
+                          </TableHead>
+                          <TableHead className="min-w-20 text-right">
+                            {spec.secondaryLabel}
+                          </TableHead>
+                        </Fragment>
                       ))}
+                      {totalColumnSpecs.flatMap((spec) =>
+                        spec.rankLabel ? (
+                          <Fragment key={spec.type}>
+                            <TableHead className="text-right">分数</TableHead>
+                            <TableHead className="text-right">
+                              {spec.rankLabel}
+                            </TableHead>
+                          </Fragment>
+                        ) : (
+                          []
+                        ),
+                      )}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {examRows.map((row) => (
-                      <TableRow key={row.exam_id} className="hover:bg-slate-50">
+                      <TableRow key={row.rowKey} className="hover:bg-slate-50">
                         <TableCell className="font-medium">{row.exam_name}</TableCell>
                         <TableCell className="text-slate-500">
                           {row.exam_date || DASH}
                         </TableCell>
-                        {ALL_SUBJECTS.map((s) => {
-                          const v = row.subjects[s]
-                          const missing = v === null || v === undefined
+                        {subjectColumnSpecs.map((spec) => {
+                          const detail = row.subjects[spec.subject] || null
+                          const raw = safeNum(detail?.raw_score)
+                          const secondary = isElectiveInStage(activeStage, spec.subject)
+                            ? safeNum(detail?.grade_score)
+                            : safeNum(detail?.grade_percentile)
                           return (
-                            <TableCell
-                              key={s}
-                              className={cn(
-                                'text-right tabular-nums',
-                                missing && 'bg-slate-50 text-slate-400'
-                              )}
-                            >
-                              {missing ? DASH : v}
-                            </TableCell>
+                            <Fragment key={spec.subject}>
+                              <TableCell
+                                className={cn(
+                                  'text-right tabular-nums',
+                                  raw === null && 'bg-slate-50 text-slate-400',
+                                )}
+                              >
+                                {raw ?? DASH}
+                              </TableCell>
+                              <TableCell
+                                className={cn(
+                                  'text-right tabular-nums',
+                                  secondary === null && 'bg-slate-50 text-slate-400',
+                                )}
+                              >
+                                {isElectiveInStage(activeStage, spec.subject)
+                                  ? secondary ?? DASH
+                                  : secondary === null
+                                    ? DASH
+                                    : formatPercent(secondary)}
+                              </TableCell>
+                            </Fragment>
                           )
                         })}
                         {totalColumnSpecs.map((spec) => {
                           const total = row.totals[spec.type]
-                          const value = total?.score
+                          const value = total?.score ?? null
                           return (
-                            <TableCell key={`${spec.type}-score`} className="text-right tabular-nums font-medium">
-                              {value !== null && value !== undefined ? value : DASH}
+                            <TableCell
+                              key={`${spec.type}-score`}
+                              className="text-right tabular-nums font-medium"
+                            >
+                              {value ?? DASH}
                             </TableCell>
                           )
                         })}
                         {totalColumnSpecs.map((spec) => {
                           if (!spec.rankLabel) return null
                           const total = row.totals[spec.type]
-                          const value = total?.rank
+                          const value = total?.rank ?? null
                           return (
-                            <TableCell key={`${spec.type}-rank`} className="text-right tabular-nums">
-                              {value !== null && value !== undefined ? value : DASH}
+                            <TableCell
+                              key={`${spec.type}-rank`}
+                              className="text-right tabular-nums"
+                            >
+                              {value ?? DASH}
                             </TableCell>
                           )
                         })}
@@ -1064,7 +1209,14 @@ export default function StudentPage() {
                 </Table>
               </div>
             ) : (
-              <EmptyState title="暂无考试记录" />
+              <EmptyState
+                title="暂无考试记录"
+                hint={
+                  activeStage === 'grade1'
+                    ? '当前学生在高一学段暂无成绩记录'
+                    : '当前学生在高二/高三学段暂无成绩记录'
+                }
+              />
             )}
           </CardContent>
         </Card>

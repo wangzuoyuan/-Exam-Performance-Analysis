@@ -691,6 +691,12 @@ async def get_student(student_id: str):
             TotalScore.total_type == "五门"
         ).order_by(TotalScore.exam_id).all()
 
+        # 九门总分趋势（高一：九科固定口径）
+        nine_totals = db.query(TotalScore).filter(
+            TotalScore.student_id.in_(ids),
+            TotalScore.total_type == "九门"
+        ).order_by(TotalScore.exam_id).all()
+
         # +3 总分趋势（高二/高三用）
         plus3_totals = db.query(TotalScore).filter(
             TotalScore.student_id.in_(ids),
@@ -828,6 +834,7 @@ async def get_student(student_id: str):
 
         main_totals_sorted = sorted(main_totals, key=lambda t: exam_sort_key(t.exam_id))
         five_totals_sorted = sorted(five_totals, key=lambda t: exam_sort_key(t.exam_id))
+        nine_totals_sorted = sorted(nine_totals, key=lambda t: exam_sort_key(t.exam_id))
         plus3_totals_sorted = sorted(plus3_totals, key=lambda t: exam_sort_key(t.exam_id))
         san3_totals_sorted = sorted(san3_totals, key=lambda t: exam_sort_key(t.exam_id))
         subject_scores_sorted = sorted(subject_scores, key=lambda s: exam_sort_key(s.exam_id))
@@ -862,6 +869,17 @@ async def get_student(student_id: str):
             "imported": False,
         } for t in five_totals_sorted]
 
+        nine_trend = [{
+            "exam_id": t.exam_id,
+            "exam_name": _exam_attr(t.exam_id, "name", str(t.exam_id) if t.exam_id else ""),
+            "exam_date": _exam_attr(t.exam_id, "exam_date"),
+            "grade": _exam_attr(t.exam_id, "grade"),
+            "total_score": t.total_score,
+            "xueji_rank": t.xueji_rank,
+            "grade_percentile": t.grade_percentile,
+            "imported": False,
+        } for t in nine_totals_sorted]
+
         subject_trend = [{
             "exam_id": s.exam_id,
             "exam_name": _exam_attr(s.exam_id, "name", str(s.exam_id) if s.exam_id else ""),
@@ -869,6 +887,7 @@ async def get_student(student_id: str):
             "grade": _exam_attr(s.exam_id, "grade"),
             "subject": s.subject,
             "raw_score": s.raw_score,
+            "grade_score": s.grade_score,
             "grade_percentile": s.grade_percentile,
             "imported": False,
         } for s in subject_scores_with_score]
@@ -917,6 +936,8 @@ async def get_student(student_id: str):
                         main_total_trend.append(point)
                     elif tt == "五门":
                         five_trend.append(point)
+                    elif tt == "九门":
+                        nine_trend.append(point)
                     elif tt == "+3":
                         plus3_trend.append(point)
                     elif tt == "3+3":
@@ -929,6 +950,7 @@ async def get_student(student_id: str):
                         "grade": g,
                         "subject": row.subject,
                         "raw_score": row.raw_score,
+                        "grade_score": row.grade_score,
                         "grade_percentile": row.grade_percentile,
                         "imported": True,
                     })
@@ -939,6 +961,7 @@ async def get_student(student_id: str):
 
             main_total_trend.sort(key=_sort_key)
             five_trend.sort(key=_sort_key)
+            nine_trend.sort(key=_sort_key)
             subject_trend.sort(key=_sort_key)
             plus3_trend.sort(key=_sort_key)
             san3_trend.sort(key=_sort_key)
@@ -953,6 +976,7 @@ async def get_student(student_id: str):
             "xueji_code": xueji_code_value,
             "main_total_trend": main_total_trend,
             "five_trend": five_trend,
+            "nine_trend": nine_trend,
             "subject_trend": subject_trend,
             "plus3_trend": plus3_trend,
             "san3_trend": san3_trend,
