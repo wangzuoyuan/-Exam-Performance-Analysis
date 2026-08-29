@@ -39,7 +39,13 @@ function buildCrumbs(pathname: string, dynamicLabels: Record<string, string> = {
   segments.forEach((segment, index) => {
     accumulated += `/${segment}`
     const dynamicId = index > 0 && /^[\w-]+$/.test(segment) && SEGMENT_LABELS[segment] === undefined
-    let label = SEGMENT_LABELS[segment] ?? segment
+    let displaySegment = segment
+    try {
+      displaySegment = decodeURIComponent(segment)
+    } catch {
+      // 路径段包含未转义特殊字符时保持原样，避免页面因 decode 失败崩溃。
+    }
+    let label = SEGMENT_LABELS[segment] ?? displaySegment
     if (dynamicId) {
       label = dynamicLabels[accumulated] || `#${segment}`
       if (!dynamicLabels[accumulated] && segments[index - 1] === 'exam') label = `考试 #${segment}`

@@ -112,6 +112,14 @@ interface StudentScopeSummary {
   class_num?: number | null
 }
 
+function decodeRouteId(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
 type TotalTypeKey = '主三门' | '五门' | '+3' | '3+3'
 
 const ALL_SUBJECTS = ['语文', '数学', '英语', '物理', '化学', '生物', '政治', '历史', '地理']
@@ -381,7 +389,8 @@ function StudentDetailSkeleton() {
 
 export default function StudentPage() {
   const params = useParams<{ id: string }>()
-  const studentId = Array.isArray(params?.id) ? params?.id[0] : params?.id
+  const routeId = Array.isArray(params?.id) ? params?.id[0] : params?.id
+  const studentId = routeId ? decodeRouteId(routeId) : routeId
   const { activeScope, loading: scopeLoading, error: scopeError } = useHomeroomScope()
 
   const [profile, setProfile] = useState<StudentProfile | null>(null)
@@ -421,7 +430,7 @@ export default function StudentPage() {
         )
         if (!authorized) throw new Error('该学生不属于当前班级，无法查看学生画像')
 
-        const profileResponse = await fetch(`/api/students/${studentId}`, {
+        const profileResponse = await fetch(`/api/students/${encodeURIComponent(studentId)}`, {
           cache: 'no-store',
           signal: controller.signal,
         })

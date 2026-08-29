@@ -177,7 +177,7 @@ test('student views preserve scoped identity history and A4 report isolation', (
   assert.match(report, /作业数据暂不可用/)
   assert.match(report, /成长档案暂不可用/)
   assert.match(report, /reportMainTrend = mainTrend\.slice\(-6\)/)
-  assert.match(report, /\/api\/students\/\$\{studentId\}/)
+  assert.match(report, /\/api\/students\/\$\{encodeURIComponent\(studentId\)\}/)
   assert.doesNotMatch(report, /print:fixed/)
   assert.match(report, /min-height: 0 !important/)
   assert.match(homeworkCard, /if \(!response\.ok\) throw new Error/)

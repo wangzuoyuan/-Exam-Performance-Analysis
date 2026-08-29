@@ -56,7 +56,16 @@ function num(v: unknown): number | null {
 
 export default function StudentReportPage() {
   const params = useParams<{ id: string }>()
-  const studentId = Array.isArray(params?.id) ? params?.id[0] : params?.id
+  const routeId = Array.isArray(params?.id) ? params?.id[0] : params?.id
+  const studentId = routeId
+    ? (() => {
+        try {
+          return decodeURIComponent(routeId)
+        } catch {
+          return routeId
+        }
+      })()
+    : routeId
   const { activeScope, loading: scopeLoading, error: scopeError } = useHomeroomScope()
 
   const [profile, setProfile] = useState<StudentProfile | null>(null)
@@ -95,15 +104,15 @@ export default function StudentReportPage() {
         )
         if (!authorized) throw new Error('该学生不属于当前班级，无法生成家长会一页纸')
 
-        const profileResponse = await fetch(`/api/students/${studentId}`, { cache: 'no-store', signal: controller.signal })
+        const profileResponse = await fetch(`/api/students/${encodeURIComponent(studentId)}`, { cache: 'no-store', signal: controller.signal })
         if (!profileResponse.ok) throw new Error('无法读取学生报告')
         const profileData = (await profileResponse.json()) as StudentProfile
         const [homeworkResult, notesResult] = await Promise.allSettled([
-          fetch(`/api/homework/student/${studentId}`, { cache: 'no-store', signal: controller.signal }).then(async (response) => {
+          fetch(`/api/homework/student/${encodeURIComponent(studentId)}`, { cache: 'no-store', signal: controller.signal }).then(async (response) => {
             if (!response.ok) throw new Error('作业记录读取失败')
             return (await response.json()) as HomeworkSummary
           }),
-          fetch(`/api/notes/${studentId}`, { cache: 'no-store', signal: controller.signal }).then(async (response) => {
+          fetch(`/api/notes/${encodeURIComponent(studentId)}`, { cache: 'no-store', signal: controller.signal }).then(async (response) => {
             if (!response.ok) throw new Error('成长档案读取失败')
             return (await response.json()) as Note[]
           }),
