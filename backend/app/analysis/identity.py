@@ -63,6 +63,29 @@ def aliases_of(db, identity_id) -> list:
     return rows
 
 
+def display_names(db, student_ids) -> dict:
+    """批量解析学号 -> identity.display_name（主档规范姓名）。
+
+    只返回已链接 identity 且主档有规范名的学号；其余学号不出现（调用方
+    回退成绩/花名册姓名）。展示侧优先用它覆盖 SubjectScore.name 的原始
+    录入快照，快照本身绝不改写。"""
+    from app.db.models import StudentAlias, StudentIdentity
+
+    ids = [str(s) for s in (student_ids or []) if s is not None]
+    if not ids:
+        return {}
+    rows = (
+        db.query(StudentAlias.student_id, StudentIdentity.display_name)
+        .join(StudentIdentity, StudentIdentity.id == StudentAlias.identity_id)
+        .filter(
+            StudentAlias.student_id.in_(ids),
+            StudentIdentity.display_name.isnot(None),
+        )
+        .all()
+    )
+    return {sid: name for sid, name in rows if name}
+
+
 def ensure_identity(db, *, display_name=None, gender=None, ext_key=None, commit=True) -> int:
     """新建 StudentIdentity 并 commit，返回 id。
 

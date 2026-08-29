@@ -159,6 +159,6 @@ OPENAI_MODEL=gpt-4o-mini
 
 ## 测试覆盖
 
-有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser` / `homework_router` / `notes_router` / `roster_import`（换届粘贴名册双格式 / 临时学号 / 正式学号替换迁移 / 旧缺陷行收编）/ `backup_weekly`
+有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser` / `homework_router` / `notes_router` / `roster_import`（换届粘贴名册双格式 / 临时学号 / 正式学号替换迁移 / 旧缺陷行收编）/ `student_management`（学生管理：作用域 / 纠正学号迁移 / 删除预览与确认 / 合并冲突 / 身份回填 / 变更日志）/ `backup_weekly`
 
 **无测试**：`analysis/router.py` 的计算逻辑（trends / class_compare / focus_list / cross_year 模块同样无测试）。

@@ -96,6 +96,89 @@ def test_migrate_active_grade_default():
         db.close()
 
 
+def test_migrate_adds_status_column_to_legacy_db():
+    """旧库升级场景：class_roster 没有 status 列时幂等补列，已有行保持
+    NULL（按在班处理），重复 migrate 不重复加列。"""
+    engine = _fresh_engine()
+
+    # 模拟 status 列引入前的旧库（只有 grade 列，含一行在班学生）
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE class_roster ("
+            "student_id TEXT PRIMARY KEY, name TEXT NOT NULL, class_num INTEGER, "
+            "grade INTEGER, seat_no INTEGER, gender TEXT, excluded INTEGER DEFAULT 0)"
+        ))
+        conn.execute(text(
+            "INSERT INTO class_roster (student_id, name, class_num, grade) "
+            "VALUES ('7250601', '张三', 6, 2)"
+        ))
+
+    Base.metadata.create_all(engine)  # 对已存在表为 no-op
+    summary = migrate(engine)
+
+    with engine.connect() as conn:
+        cols = _columns(conn, "class_roster")
+        assert "status" in cols
+        # 旧行仍在且 status 为 NULL（按在班处理）
+        row = conn.execute(text(
+            "SELECT name, status FROM class_roster WHERE student_id='7250601'"
+        )).fetchone()
+        assert row == ("张三", None)
+
+    assert summary.get("added_status_column") is True
+
+    # 幂等：第二次迁移不再加列
+    summary2 = migrate(engine)
+    with engine.connect() as conn:
+        assert _columns(conn, "class_roster").count("status") == 1
+    assert summary2.get("added_status_column") is False
+
+
+def test_migrate_adds_changelog_scope_columns_to_preview_table():
+    """预览版本可能已建 student_change_log（缺 grade/class_num 列）：
+    migrate 幂等补列，已有行保持 NULL，重复 migrate 不重复加列。"""
+    engine = _fresh_engine()
+
+    with engine.begin() as conn:
+        # 模拟预览版本建出的变更日志表（无作用域列），含一条历史留痕
+        conn.execute(text(
+            "CREATE TABLE student_change_log ("
+            "id INTEGER PRIMARY KEY, op_type TEXT NOT NULL, identity_id INTEGER, "
+            "student_id TEXT, before_summary JSON, after_summary JSON, "
+            "detail JSON, created_at DATETIME)"
+        ))
+        conn.execute(text(
+            "INSERT INTO student_change_log (op_type, student_id) "
+            "VALUES ('create', '7250601')"
+        ))
+        # class_roster 也一并建出，避免 roster 补列分支报错干扰
+        conn.execute(text(
+            "CREATE TABLE class_roster ("
+            "student_id TEXT PRIMARY KEY, name TEXT NOT NULL, class_num INTEGER, "
+            "seat_no INTEGER, gender TEXT, excluded INTEGER DEFAULT 0)"
+        ))
+
+    Base.metadata.create_all(engine)  # 对已存在表为 no-op
+    summary = migrate(engine)
+
+    with engine.connect() as conn:
+        cols = _columns(conn, "student_change_log")
+        assert "grade" in cols and "class_num" in cols
+        row = conn.execute(text(
+            "SELECT student_id, grade, class_num FROM student_change_log"
+        )).fetchone()
+        assert row == ("7250601", None, None)  # 旧行保留，作用域为 NULL
+
+    assert summary.get("added_changelog_columns") == ["grade", "class_num"]
+
+    # 幂等：第二次迁移不再加列
+    summary2 = migrate(engine)
+    with engine.connect() as conn:
+        log_cols = _columns(conn, "student_change_log")
+        assert log_cols.count("grade") == 1 and log_cols.count("class_num") == 1
+    assert summary2.get("added_changelog_columns") == []
+
+
 def test_migrate_messy_db_robust():
     """关键风险测试：脏库（模拟现网 dev DB）下 migrate 不抛错且行为正确。
 

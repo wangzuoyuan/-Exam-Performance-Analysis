@@ -29,7 +29,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
 
 
-app = FastAPI(title="成绩分析（班主任版）API", version="2.2.0", lifespan=_lifespan)
+app = FastAPI(title="成绩分析（班主任版）API", version="2.2.1", lifespan=_lifespan)
 
 if _MCP_MOUNT is not None:
     app.mount(MCP_MOUNT_PATH, _MCP_MOUNT.app)
@@ -73,7 +73,7 @@ os.makedirs(f"{EXAM_TRACKER_DIR}/raw", exist_ok=True)
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "version": "2.2.0"}
+    return {"ok": True, "version": "2.2.1"}
 
 @app.get("/")
 def root():
@@ -240,6 +240,7 @@ from app.homework.router import router as homework_router  # noqa
 from app.notes.router import router as notes_router  # noqa
 from app.backup.router import router as backup_router  # noqa
 from app.rollover.router import router as rollover_router  # noqa
+from app.student_management.router import router as student_management_router  # noqa
 from app.auth_router import router as auth_router  # noqa
 
 app.include_router(auth_router, prefix="/api")
@@ -250,3 +251,4 @@ app.include_router(homework_router, prefix="/api")
 app.include_router(notes_router, prefix="/api")
 app.include_router(backup_router, prefix="/api")
 app.include_router(rollover_router, prefix="/api")
+app.include_router(student_management_router, prefix="/api")

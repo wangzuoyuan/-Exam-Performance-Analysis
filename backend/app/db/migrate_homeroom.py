@@ -1,11 +1,13 @@
-"""班主任版数据层迁移：建表 + 给 class_roster 补 grade 列 + 写入 active_grade。
+"""班主任版数据层迁移：建表 + 给 class_roster 补 grade/status 列 + 给
+student_change_log 补作用域列 + 写入 active_grade。
 
 幂等：可安全地在每次启动时调用。
   - create_all 对已存在的表（student_identity / student_alias）为 no-op，
     只补建 imported_history 等缺失表。
-  - class_roster.grade 列用 PRAGMA table_info 门控：有则跳过，无则 ALTER
-    ADD COLUMN。注意：不读 homework_setting.schema_version 做判断——
-    历史遗留库的 schema_version 可能是 'teaching_v1' 但 grade 列实际不存在，
+  - class_roster.grade / status 与 student_change_log.grade / class_num 列
+    用 PRAGMA table_info 门控：有则跳过，无则 ALTER ADD COLUMN。注意：
+    不读 homework_setting.schema_version 做判断——历史遗留库的
+    schema_version 可能是 'teaching_v1' 但 grade 列实际不存在，
     PRAGMA 才是真相之源。
   - active_grade / schema_version 走 homework_setting 的 KV merge（沿用
     get_semester / set_semester 的 upsert 模式）。
@@ -59,7 +61,9 @@ def migrate(engine=None) -> dict:
     except Exception as e:  # noqa: BLE001
         print(f"[migrate_homeroom] create_all skipped: {e}")
 
-    # (c) PRAGMA 门控：给 class_roster 补 grade 列（核心幂等点）
+    # (c) PRAGMA 门控：给 class_roster 补 grade / status 列（核心幂等点）
+    added_status_column = False
+    added_changelog_columns: list[str] = []
     try:
         with engine.begin() as conn:
             rows = conn.execute(text("PRAGMA table_info(class_roster)")).fetchall()
@@ -67,8 +71,23 @@ def migrate(engine=None) -> dict:
             if "grade" not in cols:
                 conn.execute(text("ALTER TABLE class_roster ADD COLUMN grade INTEGER"))
                 added_grade_column = True
+            if "status" not in cols:
+                # 在班状态（学生管理归档用）：旧库缺省 NULL 一律按在班处理
+                conn.execute(text("ALTER TABLE class_roster ADD COLUMN status VARCHAR(20)"))
+                added_status_column = True
+
+            # student_change_log 作用域列：预览版本可能已建表（缺 grade/class_num）
+            log_rows = conn.execute(text("PRAGMA table_info(student_change_log)")).fetchall()
+            log_cols = [r[1] for r in log_rows]
+            if log_cols:  # 表不存在时 create_all 已按新结构建出
+                for col in ("grade", "class_num"):
+                    if col not in log_cols:
+                        conn.execute(
+                            text(f"ALTER TABLE student_change_log ADD COLUMN {col} INTEGER")
+                        )
+                        added_changelog_columns.append(col)
     except Exception as e:  # noqa: BLE001
-        print(f"[migrate_homeroom] grade column gate skipped: {e}")
+        print(f"[migrate_homeroom] roster column gate skipped: {e}")
 
     # (d)/(e)/(f) 回填 grade、写入 active_grade 与 schema_version 标记
     # 注意：必须绑定到传入的 engine（而非模块级 SessionLocal），否则用临时
@@ -130,6 +149,8 @@ def migrate(engine=None) -> dict:
     summary = {
         "created": created_tables,
         "added_grade_column": added_grade_column,
+        "added_status_column": added_status_column,
+        "added_changelog_columns": added_changelog_columns,
         "backfilled": backfilled,
         "active_grade": active_grade,
         "schema_version": schema_version,
@@ -138,6 +159,8 @@ def migrate(engine=None) -> dict:
         "[migrate_homeroom] "
         f"created={created_tables} "
         f"added_grade_column={added_grade_column} "
+        f"added_status_column={added_status_column} "
+        f"added_changelog_columns={added_changelog_columns} "
         f"backfilled={backfilled} "
         f"active_grade={active_grade} "
         f"schema_version={schema_version}"

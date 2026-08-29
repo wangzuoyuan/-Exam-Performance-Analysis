@@ -42,7 +42,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
     items: [
       { href: '/exam', label: '考试列表', icon: ClipboardList, match: (p) => p.startsWith('/exam') },
       { href: '/compare', label: '班级对比', icon: BarChart3, match: (p) => p.startsWith('/compare') },
-      { href: '/student', label: '学生检索', icon: Users, match: (p) => p.startsWith('/student') },
+      { href: '/student', label: '学生管理', icon: Users, match: (p) => p.startsWith('/student') },
     ],
   },
   {

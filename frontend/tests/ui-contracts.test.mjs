@@ -162,7 +162,8 @@ test('student views preserve scoped identity history and A4 report isolation', (
   const globals = read('frontend/src/app/globals.css')
 
   assert.match(list, /useHomeroomScope\(\)/)
-  assert.match(list, /row\.current_grade === activeScope\.grade && row\.class_num === activeScope\.classNum/)
+  // 学生管理列表走 /api/manage/students：作用域由服务端按教师绑定班级强制
+  assert.match(list, /\/api\/manage\/students/)
   assert.doesNotMatch(list, /row\.history\?\.some/)
   assert.match(list, /AbortController/)
   assert.match(profile, /<PageHeader/)
@@ -372,10 +373,10 @@ test('student list renders roster-only students with dashes instead of zeros', (
   const list = read('frontend/src/app/student/page.tsx')
   const analysis = read('backend/app/analysis/router.py')
 
-  // roster-only 学生来自 /api/students 的花名册补位；空值一律「—」
+  // roster-only 学生（成绩库补位 / 未建册）照常入列；空值一律「—」绝不显示 0
   assert.match(analysis, /roster_meta/)
   assert.match(analysis, /旧版缺陷行/)
-  assert.match(list, /仅有花名册的学生成绩\/名次显示为「—」/)
+  assert.match(list, /未建册/)
   assert.match(list, /formatInt\(student\.latest_main_score\)/)
   assert.match(list, /student\.latest_exam_name \|\| '—'/)
 })

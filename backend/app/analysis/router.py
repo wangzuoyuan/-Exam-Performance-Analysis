@@ -441,6 +441,15 @@ async def get_exam(exam_id: int):
             s["student_id"],
         ),
     )
+
+    # 展示名优先主档规范姓名；SubjectScore.name 保留为原始上传快照，不改写
+    from app.analysis.identity import display_names
+    for sid, canonical in display_names(db, students_by_id.keys()).items():
+        if sid in students_by_id:
+            students_by_id[sid]["name"] = canonical
+    students = [
+        {**s, "name": students_by_id[s["student_id"]]["name"]} for s in students
+    ]
     rank_bands = [
         {"total_type": total_type, "class_num": class_num, **bands}
         for (total_type, class_num), bands in sorted(rank_bands_by_class.items())

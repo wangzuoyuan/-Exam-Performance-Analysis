@@ -114,7 +114,12 @@ class AnalysisConfig(Base):
 class ClassRoster(Base):
     """班级花名册，作业模块的学生主体。student_id 用真实学号（与
     SubjectScore.student_id 同口径）。excluded=1 的学生记录仍保留，
-    但缺交看板/排行默认不统计。"""
+    但缺交看板/排行默认不统计。
+
+    status 记录在班状态（学生管理模块写入）：NULL/'active'=在班，
+    'transferred'=转班离班，'graduated'=毕业离校。归档只改状态、绝不删
+    数据（转班/毕业不是删除）；旧库经 migrate_homeroom 幂等补列，缺省
+    NULL 一律按在班处理，读侧行为与历史版本完全一致。"""
     __tablename__ = "class_roster"
     student_id = Column(String, primary_key=True)  # 真实学号，如 7250601
     name = Column(String, nullable=False)
@@ -123,6 +128,7 @@ class ClassRoster(Base):
     seat_no = Column(Integer, nullable=True)        # 班内座号（原作业库 student_no）
     gender = Column(String, nullable=True)
     excluded = Column(Integer, nullable=False, default=0)
+    status = Column(String, nullable=True)  # NULL/active=在班, transferred=转班, graduated=毕业
 
     __table_args__ = (
         Index("idx_roster_class", "class_num"),
@@ -264,6 +270,39 @@ class StudentNote(Base):
     __table_args__ = (
         Index("idx_note_student", "student_id"),
         Index("idx_note_date", "date"),
+    )
+
+
+# ────────────────────────────── 学生信息变更日志 ──────────────────────────────
+
+class StudentChangeLog(Base):
+    """学生管理模块的变更审计日志（谁改了什么只到操作粒度，本地单教师使用）。
+
+    每条记录一次学生信息操作：op_type in
+      create/update/correct_sid/new_year_sid/archive/restore/delete/merge/backfill。
+    before/after_summary 存字段级摘要（姓名/性别/座号/备注/学号等），只记业务
+    字段，绝不含任何凭据类信息。删除/合并等破坏性操作额外在 detail 里带
+    影响计数与自动备份文件名，便于事后追溯。
+
+    grade/class_num 记录操作发生时教师绑定的作用域：变更日志列表只返回当前
+    绑定作用域的留痕，绝不外泄其他班级的操作记录。旧库由 migrate_homeroom
+    幂等补列（PRAGMA 门控）。"""
+    __tablename__ = "student_change_log"
+    id = Column(Integer, primary_key=True)
+    op_type = Column(String, nullable=False)
+    identity_id = Column(Integer, nullable=True)   # 涉及的「人」（可为空）
+    student_id = Column(String, nullable=True)     # 操作时的当前代表学号
+    before_summary = Column(JSON, nullable=True)   # 修改前摘要 {field: value}
+    after_summary = Column(JSON, nullable=True)    # 修改后摘要 {field: value}
+    detail = Column(JSON, nullable=True)           # 附加信息（影响计数/备份文件名等）
+    grade = Column(Integer, nullable=True)         # 操作时的绑定年级（作用域）
+    class_num = Column(Integer, nullable=True)     # 操作时的绑定行政班（作用域）
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_scl_student", "student_id"),
+        Index("idx_scl_created", "created_at"),
+        Index("idx_scl_scope", "grade", "class_num"),
     )
 
 

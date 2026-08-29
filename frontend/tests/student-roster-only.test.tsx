@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-// 学生检索页 roster-only 呈现契约：仅有花名册、尚无成绩的高二学生也出现在
+// 学生管理页 roster-only 呈现契约：仅有花名册、尚无成绩的学生也出现在
 // 当前班名单里，成绩/名次/最近考试显示「—」，且可按姓名搜索。
 
 import * as React from 'react'
@@ -8,7 +8,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { HomeroomScopeProvider } from '../src/components/providers/HomeroomScopeProvider'
-import StudentSearchPage from '../src/app/student/page'
+import StudentManagePage from '../src/app/student/page'
 
 const teacher = {
   id: 1,
@@ -23,9 +23,16 @@ const students = [
   {
     student_id: '20250201',
     name: '张三',
-    current_grade: 2,
-    class_num: 6,
-    history: [],
+    name_source: 'roster',
+    gender: '男',
+    seat_no: 1,
+    note: null,
+    excluded: 0,
+    status: null,
+    in_roster: true,
+    identity_id: null,
+    aliases: [],
+    counts: { subject_score: 4, total_score: 2, homework: 1, special: 0, note: 0 },
     latest_exam_name: '高二开学测',
     latest_main_score: 261,
     latest_main_rank: 12,
@@ -33,9 +40,16 @@ const students = [
   {
     student_id: 'TMP-2-6-赵六',
     name: '赵六',
-    current_grade: 2,
-    class_num: 6,
-    history: [],
+    name_source: 'roster',
+    gender: null,
+    seat_no: null,
+    note: null,
+    excluded: 0,
+    status: null,
+    in_roster: true,
+    identity_id: null,
+    aliases: [],
+    counts: { subject_score: 0, total_score: 0, homework: 0, special: 0, note: 0 },
     latest_exam_name: null,
     latest_main_score: null,
     latest_main_rank: null,
@@ -54,19 +68,20 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('StudentSearchPage roster-only students', () => {
+describe('StudentManagePage roster-only students', () => {
   it('显示仅有花名册的学生，空成绩字段用「—」且不显示为 0', async () => {
     const fetchMock = vi.fn<typeof fetch>((input: RequestInfo | URL) => {
       const url = String(input)
       if (url.startsWith('/api/teacher')) return Promise.resolve(jsonResponse(teacher))
-      if (url.startsWith('/api/students')) return Promise.resolve(jsonResponse(students))
+      if (url.startsWith('/api/manage/students')) return Promise.resolve(jsonResponse(students))
+      if (url.startsWith('/api/manage/change-log')) return Promise.resolve(jsonResponse([]))
       return Promise.resolve(jsonResponse({}))
     })
     vi.stubGlobal('fetch', fetchMock)
 
     render(
       <HomeroomScopeProvider>
-        <StudentSearchPage />
+        <StudentManagePage />
       </HomeroomScopeProvider>
     )
 

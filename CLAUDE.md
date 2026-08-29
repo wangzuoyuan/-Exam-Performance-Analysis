@@ -42,13 +42,13 @@ tail -f ~/.exam-tracker/frontend.log
 
 ## 架构概览
 
-**后端**：FastAPI + SQLite（`~/.exam-tracker/db.sqlite`），通过 SQLAlchemy 访问。路由模块挂载在 `/api` 前缀下：`ingest`（上传）/ `analysis`（查询）/ `chat`（SSE 流式对话）/ `homework`（作业）/ `notes`（档案）/ `backup`（备份恢复）/ `rollover`（升级换届，跨学年身份接续）。
+**后端**：FastAPI + SQLite（`~/.exam-tracker/db.sqlite`），通过 SQLAlchemy 访问。路由模块挂载在 `/api` 前缀下：`ingest`（上传）/ `analysis`（查询）/ `chat`（SSE 流式对话）/ `homework`（作业）/ `notes`（档案）/ `backup`（备份恢复）/ `rollover`（升级换届，跨学年身份接续）/ `student_management`（学生管理）。
 
 **前端**：Next.js 14 App Router + shadcn/ui + Recharts + Tailwind。全局布局由 `Shell.tsx`（侧边栏 + Topbar）管理，`ChatDrawer` 在 `layout.tsx` 全局挂载。页面：`/`(仪表盘，含「本周关注」「数据备份」卡) `/upload` `/compare` `/exam` `/student`（学生页含作业卡片、成长/谈话档案、「导出家长会一页纸」入口）`/student/[id]/report`(打印友好一页纸) `/homework`(作业，含 `/manage` `/warnings` `/correlation` `/settings` 子页)。
 
-**数据库**：成绩相关 6 张表——`teacher`、`exam`、`upload`、`subject_score`、`total_score`、`class_average`；另有 `analysis_config`（段位阈值，单行 id=1）。作业相关 4 张表（原 Flask「作业跟踪」合并而来）——`class_roster`（花名册，主键真实学号 `student_id`，含座号/性别/`excluded`）、`homework_record`、`special_record`、`homework_setting`。档案 1 张表——`student_note`（成长/谈话档案：category 谈话/观察/家访/家长沟通/奖惩、content、follow_up 跟进项）。作业与档案均按真实学号 `student_id` 与成绩表关联。
+**数据库**：成绩相关 6 张表——`teacher`、`exam`、`upload`、`subject_score`、`total_score`、`class_average`；另有 `analysis_config`（段位阈值，单行 id=1）。作业相关 4 张表（原 Flask「作业跟踪」合并而来）——`class_roster`（花名册，主键真实学号 `student_id`，含座号/性别/`excluded`/`status` 在班状态：NULL/active=在班、transferred=转班、graduated=毕业，归档不删数据）、`homework_record`、`special_record`、`homework_setting`。档案 1 张表——`student_note`（成长/谈话档案：category 谈话/观察/家访/家长沟通/奖惩、content、follow_up 跟进项）。变更审计 1 张表——`student_change_log`（学生管理操作：op_type、identity、字段级前后摘要、写入时的 `grade`/`class_num` 作用域——列表只回当前绑定作用域，不含任何凭据）。作业与档案均按真实学号 `student_id` 与成绩表关联。
 
-**身份层（跨学年身份接续，升级换届后引入）**：3 张新表——`student_identity`（「人」聚合根，含 `display_name`/`gender`/`ext_key`，后者预留身份证/全国学籍号，默认不用）、`student_alias`（学号→identity 映射，`grade` 区分学年，一人可多号，唯一约束 `uq_alias_student`）、`imported_history`（手工导入的历史分数，**与全年级排名/班均/段位计算完全隔离**，仅个人画像展示）；另有 `rollover_confirm_batch`（同名批量确认的批次快照，undo 只删本批事务实际新建的 alias/identity，绝不触碰提交前已有关联）。新列 `class_roster.grade`（名册行所属年级 1/2/3，支持换届后高一/高二名册并存）；`homework_setting.active_grade` 是一行 KV（key=`active_grade`，缺省回落库内最大年级）。`analysis/identity.py` 是身份子系统对外唯一契约：`identity_of` / `person_ids` / `ensure_identity` / `link_aliases`（二者支持 `commit=False`，供批量确认单事务组合写）/ `unlink_alias` / `name_candidates` / `import_crosswalk`。**核心不变式**：`person_ids(db, sid)` 在学号未链接时退化为 `{sid}`——单学年分析仍按 `class_num` 过滤，只有以学生为中心的跨学年读侧才解析 identity，因此零回归。`db/migrate_homeroom.py` 在启动时跑（`main.py` 调用），PRAGMA 门控、幂等可重跑；遗留的教学版残留（孤立的 `teaching_class*` 表、`class_roster.class_label` 列）原样保留不动。
+**身份层（跨学年身份接续，升级换届后引入）**：3 张新表——`student_identity`（「人」聚合根，含 `display_name`/`gender`/`ext_key`，后者预留身份证/全国学籍号，默认不用）、`student_alias`（学号→identity 映射，`grade` 区分学年，一人可多号，唯一约束 `uq_alias_student`）、`imported_history`（手工导入的历史分数，**与全年级排名/班均/段位计算完全隔离**，仅个人画像展示）；另有 `rollover_confirm_batch`（同名批量确认的批次快照，undo 只删本批事务实际新建的 alias/identity，绝不触碰提交前已有关联）。新列 `class_roster.grade`（名册行所属年级 1/2/3，支持换届后高一/高二名册并存）；`homework_setting.active_grade` 是一行 KV（key=`active_grade`，缺省回落库内最大年级）。`analysis/identity.py` 是身份子系统对外唯一契约：`identity_of` / `person_ids` / `ensure_identity` / `link_aliases`（二者支持 `commit=False`，供批量确认单事务组合写）/ `unlink_alias` / `name_candidates` / `import_crosswalk`。**核心不变式**：`person_ids(db, sid)` 在学号未链接时退化为 `{sid}`——单学年分析仍按 `class_num` 过滤，只有以学生为中心的跨学年读侧才解析 identity，因此零回归。`db/migrate_homeroom.py` 在启动时跑（`main.py` 调用），PRAGMA 门控、幂等可重跑（给 `class_roster` 补 `grade` 与 `status` 列）；遗留的教学版残留（孤立的 `teaching_class*` 表、`class_roster.class_label` 列）原样保留不动。
 
 **临时学号（先建册后出分）**：换届向导粘贴名单支持仅「姓名」行，`rollover/service.py` 生成稳定临时学号 `TMP-{grade}-{class}-{name}`（同班同名幂等、跨班不冲突，绝不拿姓名直接当主键），立即可用于作业花名册/录入；之后在同一输入框粘贴「学号,姓名」即可把占位行事务性替换为正式学号（homework_record / special_record / student_note / student_alias 随迁，excluded/座号/性别保留），后续成绩上传用正式学号自然接续。占位判定**精确等于** `temp_sid(grade, class, name)`——任何以 `TMP-` 开头的真实学号都不是占位行，绝不被替换/删除。所有带学号的导入行（含直接建册与「从成绩派生」）统一走 `_validate_official_sid`：成绩库姓名、目标年级班级、已挂 `StudentAlias` 与本行学生不符即整批拒绝（同名且作用域一致可安全接续）。`from_scores=true` 从成绩派生复用同一条替换事务，先建册后出分的学生自动换成正式学号并迁移全部依赖，不再 merge 出第二条重复行。旧版缺陷行（`student_id=姓名`、`class_num/name` 为空、grade=目标年级）在再次粘贴同名时被严格匹配收编（收编前比对两侧身份别名：不同 identity 整批拒绝，同 identity 收编且删除缺陷学号别名不留孤儿），绝不触碰高一年级数据。`/api/students` 与 `/api/students/{id}` 已并入 roster-only 学生（成绩/名次字段为 null，前端显示「—」）：列表只纳入教师绑定年级班级的 roster-only 行；已关联身份的 roster-only 学号与旧成绩学号并入同一「人」，以高二学号为当前代表（`current_grade`/`class_num` = 高二目标班，旧学号进 `history`）；详情把合法花名册年级并入 `grades`/`class_by_grade`（顶层 `class_num` 取最高年级作用域），仅凭花名册可见时须属教师绑定班，他班 404。
 
@@ -129,6 +129,25 @@ tail -f ~/.exam-tracker/frontend.log
 | GET  | `/api/backup/{name}/download` | 下载备份 |
 | POST | `/api/restore` | 恢复（先自动备份当前库，再覆盖，建议重启） |
 
+### student_management router（`/api/manage`，`student_management/router.py`，学生管理）
+作用域由服务端强制为教师当前绑定的 grade+class_num（active_grade 驱动），端点不接收裸 class_num；身份层复用 `analysis/identity.py`，学号校验复用 `rollover/service.py`，绝不按姓名自动合并。
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/manage/students` | 管理列表（花名册 ∪ 本班成绩学号），含主档字段/关联计数/最近主三门；`?search=&include_archived=` |
+| GET | `/api/manage/students/{id}` | 单生详情：主档 + 花名册 + 别名 + 计数 |
+| POST | `/api/manage/students` | 新建学生（花名册行+主档+alias 一次建齐；不填学号生成临时学号 temp_sid，同名拒绝、学号占用拒绝） |
+| PUT | `/api/manage/students/{id}` | 编辑：规范姓名/性别/备注写主档并同步该身份全部花名册展示名，座号与在班状态（`status`，与基本信息同一请求单事务落库）写花名册；`SubjectScore.name` 快照不改写；只转发显式提交的字段（`model_fields_set` 区分「未提交」与「显式 null 清空」，UNSET 哨兵） |
+| POST | `/api/manage/students/{id}/correct-sid` | 纠正录错学号：单事务迁移 SubjectScore/TotalScore/HomeworkRecord/SpecialRecord/StudentNote/花名册/alias；目标被占、同场考试双方有成绩、跨班越权 → 422 整体回滚 |
+| POST | `/api/manage/students/{id}/new-year-sid` | 新增学年学号：只加同身份 alias + 目标学年花名册行，旧号与历史保留；目标 grade+class 必须与教师绑定一致（409）；目标班已有同号行时先验身份与姓名——同身份才幂等，无 alias 且规范姓名一致的既有行才安全挂接，异名/他身份一律拒绝（422），绝不提前返回成功掩盖占用 |
+| GET | `/api/manage/students/{id}/delete-preview` | 删除影响预览：各业务表计数 + 身份影响 |
+| DELETE | `/api/manage/students/{id}` | 删除：与 delete-preview 的 `requires_confirm` 契约一致——干净误建学生（无业务引用/其他 alias/导入历史）`confirm=false` 直删；有任一风险时需 `{"confirm":true}`，有业务数据时先复用 `backup.router.create_backup` 自动备份再单事务删除；身份有其他 alias/导入历史则保留主档 |
+| POST | `/api/manage/students/{id}/archive` | 在班状态：transferred/graduated/active（归档只改状态绝不删数据，默认列表隐藏） |
+| POST | `/api/manage/students/merge-preview` | 合并预览：迁入计数 + 同场考试冲突清单 |
+| POST | `/api/manage/students/merge` | 事务性合并：需 confirm 且自动备份；同场考试冲突（双方都有成绩）409 拒绝绝不自动裁决；双方都无主档时以主学号规范姓名建主档，primary 与 duplicate 两个学号都保留为 alias（重复学号即历史学号，绝不丢号） |
+| GET | `/api/manage/backfill-preview` | 当前班还没有主档的学生预览 |
+| POST | `/api/manage/backfill-identities` | 幂等回填主档：逐人建 identity+alias（source=manual），同名各建独立主档 |
+| GET | `/api/manage/change-log` | 变更日志（op_type/前后摘要/备份文件名），只返回当前绑定 grade+class_num 的留痕（每条日志写入时记 `grade`/`class_num`，`migrate_homeroom` 为旧表 PRAGMA 幂等补列），`?student_id=&limit=` 同受作用域约束 |
+
 ### rollover router（`/api/rollover`，`rollover/router.py`，升级换届）
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -207,6 +226,6 @@ OPENAI_MODEL=gpt-4o-mini
 
 ## 测试覆盖
 
-有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser`（学科解析）/ `homework_router`（看板/相关性/花名册/学期端点 + 皮尔逊单测）/ `notes_router`（档案增删改 + 跟进）/ `roster_import`（换届粘贴名册：双格式解析、临时学号、正式学号替换迁移、直接建册冲突校验、从成绩派生、旧缺陷行收编含别名冲突、作用域校验、roster-only 学生与代表学号）/ `rollover_confirm_batch`（同名批量确认：安全批量成功含 roster-only、多候选拒绝/显式选择、候选占用、批内重复、越权班级、非同名候选、事务回滚零落库、仅撤销本批新增链接）/ `backup_weekly`（备份/恢复/本周关注）。前端 `tests/rollover-batch-*.test.*`（无 Dialog、安全项默认勾选、行内多候选、新学生/稍后、一键提交载荷、错误保留选择、结果与撤销、页面接线），挂在 `npm run test:ui` 链（`test:rollover-batch`）
+有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser`（学科解析）/ `homework_router`（看板/相关性/花名册/学期端点 + 皮尔逊单测）/ `notes_router`（档案增删改 + 跟进）/ `roster_import`（换届粘贴名册：双格式解析、临时学号、正式学号替换迁移、直接建册冲突校验、从成绩派生、旧缺陷行收编含别名冲突、作用域校验、roster-only 学生与代表学号）/ `rollover_confirm_batch`（同名批量确认：安全批量成功含 roster-only、多候选拒绝/显式选择、候选占用、批内重复、越权班级、非同名候选、事务回滚零落库、仅撤销本批新增链接）/ `student_management`（学生管理：作用域与归档隐藏、创建同名/学号占用拒绝、编辑改主档同步花名册且 SubjectScore 快照不动 + 区分「未提交/显式 null」与在班状态单事务 + 列表回显主档 note/gender + 无主档只编辑 note 不炸、纠正学号全量迁移与冲突零落库回滚、跨年学号保留历史 + 目标班既有同号行的身份校验三态、删除预览/确认门控与契约一致/自动备份/身份按需保留/干净学生 confirm=false 直删、合并冲突阻止与事务合并 + 双方无主档建主档保双号、回填幂等与同名不合并、变更日志只回当前作用域）/ `backup_weekly`（备份/恢复/本周关注）。前端 `tests/rollover-batch-*.test.*`（无 Dialog、安全项默认勾选、行内多候选、新学生/稍后、一键提交载荷、错误保留选择、结果与撤销、页面接线）与 `tests/student-management*.test.*`（管理页契约：作用域请求、新增/编辑/学号载荷、删除影响计数与 confirm 门控、合并冲突阻止、回填横幅、移动卡片操作、纯逻辑摘要），挂在 `npm run test:ui` 链（`test:rollover-batch` / `test:student-management`）
 
 **无测试**：`analysis/router.py` 的计算逻辑（`trends` / `class_compare` / `focus_list` / `cross_year` / `rank_metrics` 模块同样无测试）。
