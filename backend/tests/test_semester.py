@@ -48,20 +48,16 @@ def test_derive_january_belongs_to_previous_autumn():
 def test_derive_spring():
     d = service.derive_semester(date(2026, 3, 10))
     assert d["semester_start"] == "2026-02-01"
-    assert d["semester_end"] == "2026-07-31"
+    assert d["semester_end"] == "2026-06-30"
     assert d["semester_name"] == "2025学年第二学期"
 
 
-def test_derive_july_edge_still_spring():
-    d = service.derive_semester(date(2026, 7, 31))
-    assert d["semester_start"] == "2026-02-01"
-    assert d["semester_end"] == "2026-07-31"
-
-
-def test_derive_august_rolls_to_new_year():
-    d = service.derive_semester(date(2026, 8, 20))
-    assert d["semester_start"] == "2026-09-01"
-    assert d["semester_end"] == "2027-01-31"
+def test_derive_summer_vacation_keeps_ended_spring():
+    for day in (date(2026, 7, 5), date(2026, 8, 20)):
+        d = service.derive_semester(day)
+        assert d["semester_start"] == "2026-02-01"
+        assert d["semester_end"] == "2026-06-30"
+        assert d["semester_name"] == "2025学年第二学期"
 
 
 # === get_semester 回落与切换 ===

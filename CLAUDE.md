@@ -186,7 +186,7 @@ tail -f ~/.exam-tracker/frontend.log
 
 **段位阈值**：所有段位计算（`rank_bands`、`focus-list`、`band-trend`、AI 工具）必须调用 `analysis/config.py` 的 `get_band_config()`，不能硬编码默认值。用户在前端修改后，页面展示与 AI 问答口径同步。
 
-**作业模块**：聚合查询集中在 `homework/service.py`（看板/排行/预警/相关性/`weekly_focus`），被 `homework/router.py` 与 `chat/tools.py` 共用；学科归类与录入文本解析在 `homework/parser.py`；Excel 导出在 `homework/export.py`。缺交看板默认口径：过滤 `remark` 非空（请假当天不算缺交）、`subject='全科'`、`excluded=1` 学生。一次性数据迁移脚本 `homework/migrate.py`（按姓名把旧 `homework.db` 的座号映射到成绩库真实学号，幂等可重跑）。多学期管理：`homework_semester` 表存全部学期（is_current 标记当前，服务层事务保证唯一），`db/migrate_semester.py` 启动时把旧 KV 单学期配置迁为**历史**学期（不设当前）；`service.derive_semester()` 在未配置当前学期时按日期推算（9~1 月第一学期、2~7 月第二学期、8 月归新学年），只算不落库。所有统计的学期区间都经 `get_semester()` 一个入口。
+**作业模块**：聚合查询集中在 `homework/service.py`（看板/排行/预警/相关性/`weekly_focus`），被 `homework/router.py` 与 `chat/tools.py` 共用；学科归类与录入文本解析在 `homework/parser.py`；Excel 导出在 `homework/export.py`。缺交看板默认口径：过滤 `remark` 非空（请假当天不算缺交）、`subject='全科'`、`excluded=1` 学生。一次性数据迁移脚本 `homework/migrate.py`（按姓名把旧 `homework.db` 的座号映射到成绩库真实学号，幂等可重跑）。多学期管理：`homework_semester` 表存全部学期（is_current 标记当前，服务层事务保证唯一），`db/migrate_semester.py` 启动时把旧 KV 单学期配置迁为**历史**学期（不设当前）；`service.derive_semester()` 在未配置当前学期时按日期推算（9~1 月第一学期、2~6 月第二学期、7~8 月暑假沿用刚结束的第二学期），只算不落库。所有统计的学期区间都经 `get_semester()` 一个入口。
 
 **档案 / 主动提醒 / 备份**：`notes/router.py` 管理 `student_note`（成长/谈话档案），AI 工具 `student_notes` 可读取。`homework/service.weekly_focus()` 合成「本周关注」，复用 `warnings` 与 `chat/tools.focus_list`（懒导入避免循环）。`backup/router.py` 与 `run.py` 的 `backup/restore` 子命令共用同一备份目录 `~/.exam-tracker-backups`；`run.py init` 清空前自动快照。
 

@@ -231,7 +231,7 @@ export default function HomeworkSettingsPage() {
             </FilterBar>
           </SectionCard>
 
-          <SectionCard title="历史学期" description="保存往期学期后可随时切换查看；未配置时按日期自动推算当前学期（9~1 月为第一学期，2~7 月为第二学期）。">
+          <SectionCard title="历史学期" description="保存往期学期后可随时切换查看；未配置时按日期自动推算当前学期（9~1 月为第一学期，2~6 月为第二学期，7~8 月暑假沿用刚结束的第二学期）。">
             <FilterBar className="mb-4">
               <label className="min-w-0 flex-1 text-xs font-bold text-muted-foreground sm:max-w-56">
                 学期名称
