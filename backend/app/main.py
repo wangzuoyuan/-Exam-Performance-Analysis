@@ -29,7 +29,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
 
 
-app = FastAPI(title="成绩分析（班主任版）API", version="2.2.2", lifespan=_lifespan)
+app = FastAPI(title="成绩分析（班主任版）API", version="2.2.3", lifespan=_lifespan)
 
 if _MCP_MOUNT is not None:
     app.mount(MCP_MOUNT_PATH, _MCP_MOUNT.app)
@@ -73,7 +73,7 @@ os.makedirs(f"{EXAM_TRACKER_DIR}/raw", exist_ok=True)
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "version": "2.2.2"}
+    return {"ok": True, "version": "2.2.3"}
 
 @app.get("/")
 def root():
