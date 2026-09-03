@@ -2,15 +2,16 @@
 # 群晖 NAS 一键更新：备份数据库 → 拉取 GitHub 最新代码 → 重建容器 → 重启 caddy → 健康检查。
 #
 # 用法（在 NAS 上，普通用户即可，docker 步骤会自动 sudo 提权，按提示输密码）：
-#   sh /volume1/docker/成绩分析docker/nas-update.sh
-# 或先 chmod +x 后：
-#   /volume1/docker/成绩分析docker/nas-update.sh
+#   sh /你的项目目录/nas-update.sh
+# 或先进入项目目录后执行：
+#   ./nas-update.sh
 #
 # 前提：该目录已是本仓库的 git 检出（origin=GitHub，分支 main）。
 
 set -e
 
-PROJECT_DIR="/volume1/docker/成绩分析docker"
+# 以脚本自身位置作为项目目录，不依赖 NAS 文件夹名称或当前工作目录。
+PROJECT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 PROJECT_NAME="grade_tracker"
 DOCKER="/usr/local/bin/docker"
 
