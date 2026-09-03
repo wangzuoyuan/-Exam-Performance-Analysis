@@ -169,11 +169,29 @@ class SpecialRecord(Base):
 
 
 class HomeworkSetting(Base):
-    """作业模块键值配置（学期起止 semester_start / semester_end /
-    semester_name）。对应原 settings 表。"""
+    """作业模块键值配置（旧单学期配置 semester_start / semester_end /
+    semester_name）。已被 homework_semester 表取代，仅保留旧数据。"""
     __tablename__ = "homework_setting"
     key = Column(String, primary_key=True)
     value = Column(String, nullable=True)
+
+
+class HomeworkSemester(Base):
+    """作业模块的历史学期配置；同一时间只允许一个当前学期（服务层
+    事务保证，无 DB 级约束）。日期用字符串与 HomeworkRecord.date 的
+    字符串比较过滤保持一致。"""
+    __tablename__ = "homework_semester"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    start_date = Column(String, nullable=False)  # YYYY-MM-DD
+    end_date = Column(String, nullable=False)    # YYYY-MM-DD
+    is_current = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_hw_semester_current", "is_current"),
+        UniqueConstraint("name", "start_date", "end_date", name="uq_hw_semester_range"),
+    )
 
 
 # ────────────────────────────── 学生身份与历史档案（班主任版） ──────────────────────────────

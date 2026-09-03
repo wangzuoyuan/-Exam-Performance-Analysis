@@ -22,7 +22,14 @@ interface Semester {
   semester_end: string
   semester_name: string
 }
-
+interface SemesterHistory {
+  id: number | null
+  name: string
+  start_date: string
+  end_date: string
+  is_current: boolean
+  auto: boolean
+}
 interface RosterRow {
   student_id: string
   name: string
@@ -35,6 +42,8 @@ interface RosterRow {
 export default function HomeworkSettingsPage() {
   const { activeScope, loading: scopeLoading } = useHomeroomScope()
   const [semester, setSemester] = useState<Semester>({ semester_start: '', semester_end: '', semester_name: '' })
+  const [semesters, setSemesters] = useState<SemesterHistory[]>([])
+  const [newSemester, setNewSemester] = useState({ name: '', start_date: '', end_date: '' })
   const [roster, setRoster] = useState<RosterRow[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -54,19 +63,25 @@ export default function HomeworkSettingsPage() {
     Promise.all([
       fetch(`/api/homework/semester?class_num=${activeScope.classNum}`, { cache: 'no-store', signal: controller.signal }),
       fetch(`/api/homework/roster?class_num=${activeScope.classNum}`, { cache: 'no-store', signal: controller.signal }),
+      fetch('/api/homework/semesters', { cache: 'no-store', signal: controller.signal }),
     ])
-      .then(async ([semesterResponse, rosterResponse]) => {
-        if (!semesterResponse.ok || !rosterResponse.ok) {
-          const failed = !semesterResponse.ok ? semesterResponse : rosterResponse
+      .then(async ([semesterResponse, rosterResponse, semestersResponse]) => {
+        if (!semesterResponse.ok || !rosterResponse.ok || !semestersResponse.ok) {
+          const failed = !semesterResponse.ok ? semesterResponse : !rosterResponse.ok ? rosterResponse : semestersResponse
           const body = await failed.json().catch(() => ({}))
           throw new Error(body.detail || '设置加载失败')
         }
-        return Promise.all([semesterResponse.json() as Promise<Semester>, rosterResponse.json() as Promise<RosterRow[]>])
+        return Promise.all([
+          semesterResponse.json() as Promise<Semester>,
+          rosterResponse.json() as Promise<RosterRow[]>,
+          semestersResponse.json() as Promise<SemesterHistory[]>,
+        ])
       })
-      .then(([semesterResult, rosterResult]) => {
+      .then(([semesterResult, rosterResult, semestersResult]) => {
         if (controller.signal.aborted) return
         setSemester(semesterResult)
         setRoster(rosterResult)
+        setSemesters(semestersResult)
       })
       .catch((cause) => {
         if (cause instanceof Error && cause.name === 'AbortError') return
@@ -97,6 +112,28 @@ export default function HomeworkSettingsPage() {
       }, '学期配置已保存')
     } catch (cause) {
       setNotice({ tone: 'error', text: cause instanceof Error ? cause.message : '保存失败' })
+    }
+  }
+
+  const addSemester = async () => {
+    if (!newSemester.start_date || !newSemester.end_date) return
+    try {
+      await mutate('/api/homework/semesters', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...newSemester, make_current: false }),
+      }, '已添加历史学期')
+      setNewSemester({ name: '', start_date: '', end_date: '' })
+    } catch (cause) {
+      setNotice({ tone: 'error', text: cause instanceof Error ? cause.message : '添加失败' })
+    }
+  }
+
+  const makeCurrent = async (id: number) => {
+    try {
+      await mutate(`/api/homework/semesters/${id}/current`, { method: 'PUT' }, '已切换当前学期')
+    } catch (cause) {
+      setNotice({ tone: 'error', text: cause instanceof Error ? cause.message : '切换失败' })
     }
   }
 
@@ -192,6 +229,47 @@ export default function HomeworkSettingsPage() {
               </label>
               <Button className="min-h-11" onClick={() => void saveSemester()}><Save className="h-4 w-4" />保存</Button>
             </FilterBar>
+          </SectionCard>
+
+          <SectionCard title="历史学期" description="保存往期学期后可随时切换查看；未配置时按日期自动推算当前学期（9~1 月为第一学期，2~7 月为第二学期）。">
+            <FilterBar className="mb-4">
+              <label className="min-w-0 flex-1 text-xs font-bold text-muted-foreground sm:max-w-56">
+                学期名称
+                <Input value={newSemester.name} onChange={(event) => setNewSemester((current) => ({ ...current, name: event.target.value }))} placeholder="如 2025学年第一学期" className="mt-1 min-h-11" />
+              </label>
+              <label className="text-xs font-bold text-muted-foreground">
+                起始日期
+                <Input type="date" value={newSemester.start_date} onChange={(event) => setNewSemester((current) => ({ ...current, start_date: event.target.value }))} className="mt-1 min-h-11" />
+              </label>
+              <label className="text-xs font-bold text-muted-foreground">
+                结束日期
+                <Input type="date" value={newSemester.end_date} onChange={(event) => setNewSemester((current) => ({ ...current, end_date: event.target.value }))} className="mt-1 min-h-11" />
+              </label>
+              <Button variant="outline" className="min-h-11" onClick={() => void addSemester()} disabled={!newSemester.start_date || !newSemester.end_date}>
+                <Plus className="h-4 w-4" />添加历史学期
+              </Button>
+            </FilterBar>
+            {semesters.length === 0 ? (
+              <StatePanel tone="empty" title="暂无历史学期" description="未配置时按日期自动推算当前学期，添加后可手动切换。" />
+            ) : (
+              <div className="space-y-2">
+                {semesters.map((item) => (
+                  <div key={item.id ?? item.name} className="flex flex-col justify-between gap-2 rounded-lg border border-border bg-white p-3 sm:flex-row sm:items-center">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-extrabold text-foreground">{item.name}</span>
+                        {item.is_current && <Badge>当前</Badge>}
+                        {item.auto && <Badge variant="secondary">自动推算</Badge>}
+                      </div>
+                      <p className="text-xs text-muted-foreground">{item.start_date} 至 {item.end_date}</p>
+                    </div>
+                    {!item.is_current && (
+                      <Button variant="outline" className="min-h-11 sm:min-h-9" onClick={() => void makeCurrent(item.id!)}>设为当前学期</Button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </SectionCard>
 
           <SectionCard

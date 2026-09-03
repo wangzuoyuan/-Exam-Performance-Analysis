@@ -7,31 +7,57 @@ excluded=1 的学生（指定具体学生查询时不排除）。
 """
 
 from collections import defaultdict
+from datetime import date
 
 from app.db.models import (
     ClassRoster,
     HomeworkRecord,
+    HomeworkSemester,
     SpecialRecord,
-    HomeworkSetting,
 )
 from app.homework.parser import SUBJECT_GROUPS, normalize_subject
 
-DEFAULT_SEMESTER = {
-    "semester_start": "2026-02-17",
-    "semester_end": "2026-07-04",
-    "semester_name": "",
-}
+
+def derive_semester(today=None):
+    """未配置当前学期时按日期自动推算：9~1 月为第一学期，2~7 月为第二
+    学期，8 月归入即将开始的第一学期。只计算不落库，跨年自动滚动。"""
+    d = today or date.today()
+    y, m = d.year, d.month
+    if m >= 8:
+        start, end, name = f"{y}-09-01", f"{y + 1}-01-31", f"{y}学年第一学期"
+    elif m == 1:
+        start, end, name = f"{y - 1}-09-01", f"{y}-01-31", f"{y - 1}学年第一学期"
+    else:
+        start, end, name = f"{y}-02-01", f"{y}-07-31", f"{y - 1}学年第二学期"
+    return {
+        "semester_id": None,
+        "semester_start": start,
+        "semester_end": end,
+        "semester_name": name,
+        "auto": True,
+    }
+
+
+def _current_semester_row(db):
+    return (
+        db.query(HomeworkSemester)
+        .filter(HomeworkSemester.is_current == 1)
+        .order_by(HomeworkSemester.id.desc())
+        .first()
+    )
 
 
 def get_semester(db):
-    rows = db.query(HomeworkSetting).filter(
-        HomeworkSetting.key.in_(["semester_start", "semester_end", "semester_name"])
-    ).all()
-    cfg = dict(DEFAULT_SEMESTER)
-    for row in rows:
-        if row.value is not None:
-            cfg[row.key] = row.value
-    return cfg
+    current = _current_semester_row(db)
+    if current:
+        return {
+            "semester_id": current.id,
+            "semester_start": current.start_date,
+            "semester_end": current.end_date,
+            "semester_name": current.name,
+            "auto": False,
+        }
+    return derive_semester()
 
 
 def get_active_grade(db) -> int:
@@ -60,11 +86,80 @@ def get_active_class_num(db, grade=None):
 
 
 def set_semester(db, data):
-    for key in ("semester_start", "semester_end", "semester_name"):
-        if key in data and data[key] is not None:
-            db.merge(HomeworkSetting(key=key, value=str(data[key])))
+    current = _current_semester_row(db)
+    derived = derive_semester()
+    start = str(data.get("semester_start") or (current.start_date if current else derived["semester_start"]))
+    end = str(data.get("semester_end") or (current.end_date if current else derived["semester_end"]))
+    name = str(data.get("semester_name") or (current.name if current else "") or derived["semester_name"])
+    if start > end:
+        raise ValueError("学期开始日期不能晚于结束日期")
+    if current:
+        current.start_date, current.end_date, current.name = start, end, name
+    else:
+        current = HomeworkSemester(name=name, start_date=start, end_date=end, is_current=1)
+        db.add(current)
     db.commit()
     return get_semester(db)
+
+
+def list_semesters(db):
+    items = [
+        {
+            "id": row.id,
+            "name": row.name,
+            "start_date": row.start_date,
+            "end_date": row.end_date,
+            "is_current": bool(row.is_current),
+            "auto": False,
+        }
+        for row in db.query(HomeworkSemester)
+        .order_by(HomeworkSemester.start_date.desc(), HomeworkSemester.id.desc()).all()
+    ]
+    if not any(item["is_current"] for item in items):
+        derived = derive_semester()
+        items.insert(0, {
+            "id": None,
+            "name": derived["semester_name"],
+            "start_date": derived["semester_start"],
+            "end_date": derived["semester_end"],
+            "is_current": True,
+            "auto": True,
+        })
+    return items
+
+
+def add_semester(db, name, start_date, end_date, make_current=False):
+    if start_date > end_date:
+        raise ValueError("学期开始日期不能晚于结束日期")
+    final_name = name.strip() or f"{start_date} 至 {end_date}"
+    duplicate = db.query(HomeworkSemester).filter(
+        HomeworkSemester.name == final_name,
+        HomeworkSemester.start_date == start_date,
+        HomeworkSemester.end_date == end_date,
+    ).first()
+    if duplicate:
+        raise ValueError("同名同起止日期的学期已存在")
+    if make_current:
+        db.query(HomeworkSemester).update({HomeworkSemester.is_current: 0})
+    row = HomeworkSemester(
+        name=final_name,
+        start_date=start_date,
+        end_date=end_date,
+        is_current=1 if make_current else 0,
+    )
+    db.add(row)
+    db.commit()
+    return list_semesters(db)
+
+
+def set_current_semester(db, semester_id):
+    row = db.query(HomeworkSemester).filter(HomeworkSemester.id == semester_id).first()
+    if not row:
+        return False
+    db.query(HomeworkSemester).update({HomeworkSemester.is_current: 0})
+    row.is_current = 1
+    db.commit()
+    return True
 
 
 def excluded_names(db):

@@ -226,6 +226,8 @@ async def bind_class(request: Request, class_num: Optional[int] = None, grade: i
 # 路由模块导入
 from app.db.models import Base, engine  # noqa
 Base.metadata.create_all(bind=engine)
+from app.db.migrate_semester import migrate_semester_table  # noqa
+migrate_semester_table()
 
 try:
     from app.db.migrate_homeroom import migrate as _migrate_homeroom  # noqa

@@ -45,6 +45,7 @@ from app.db.models import (
     Teacher,
     ClassRoster,
     HomeworkRecord,
+    HomeworkSemester,
     HomeworkSetting,
     ImportedHistory,
     StudentNote,
@@ -383,8 +384,9 @@ def _seed_hw_rosters_and_records():
     s.merge(ClassRoster(student_id="g1_102", name="李四", class_num=6, grade=1, excluded=0))
     s.merge(ClassRoster(student_id="g2_201", name="陈一", class_num=3, grade=2, excluded=0))
     s.merge(ClassRoster(student_id="g2_202", name="王五", class_num=3, grade=2, excluded=0))
-    # 缺交记录：日期落在默认学期区间（2026-02-17 ~ 2026-07-04）内，
-    # 否则看板按学期过滤会把它们排除；高一 / 高二各记
+    # 显式种入当前学期，避免测试依赖 get_semester 的按日推算窗口；
+    # 缺交记录日期必须落在该学期区间内，否则看板按学期过滤会排除它们
+    s.merge(HomeworkSemester(name="测试学期", start_date="2026-02-17", end_date="2026-07-04", is_current=1))
     s.add(HomeworkRecord(student_id="g1_101", date="2026-03-10", subject="数学", content="缺"))
     s.add(HomeworkRecord(student_id="g2_201", date="2026-03-10", subject="英语", content="缺"))
     s.add(HomeworkRecord(student_id="g2_202", date="2026-03-10", subject="英语", content="缺"))

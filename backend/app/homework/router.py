@@ -639,6 +639,50 @@ async def hw_set_semester(payload: SemesterPayload, class_num: Optional[int] = N
     db = next(get_db())
     try:
         _validated_scope(db, class_num)
-        return service.set_semester(db, payload.model_dump(exclude_none=True))
+        try:
+            return service.set_semester(db, payload.model_dump(exclude_none=True))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+    finally:
+        db.close()
+
+
+class NewSemesterPayload(BaseModel):
+    name: str
+    start_date: str
+    end_date: str
+    make_current: bool = False
+
+
+@router.get("/homework/semesters")
+async def hw_list_semesters():
+    db = next(get_db())
+    try:
+        return service.list_semesters(db)
+    finally:
+        db.close()
+
+
+@router.post("/homework/semesters")
+async def hw_add_semester(payload: NewSemesterPayload):
+    db = next(get_db())
+    try:
+        try:
+            return service.add_semester(
+                db, payload.name, payload.start_date, payload.end_date, payload.make_current
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+    finally:
+        db.close()
+
+
+@router.put("/homework/semesters/{semester_id}/current")
+async def hw_set_current_semester(semester_id: int):
+    db = next(get_db())
+    try:
+        if not service.set_current_semester(db, semester_id):
+            raise HTTPException(404, "学期不存在")
+        return service.get_semester(db)
     finally:
         db.close()
