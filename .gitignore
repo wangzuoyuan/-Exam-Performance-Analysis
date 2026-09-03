@@ -16,3 +16,7 @@ raw/
 .DS_Store
 ._*
 */._*
+
+# 本地笔记（不入库）
+部署与排障记录.md
+.playwright-mcp/
