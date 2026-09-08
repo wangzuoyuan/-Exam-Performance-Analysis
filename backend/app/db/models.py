@@ -154,6 +154,24 @@ class HomeworkRecord(Base):
     )
 
 
+class HomeworkCollection(Base):
+    """收交台账：某班某天某学科收过作业（「数学：全交」这类行）。
+
+    只有缺交记录时，「全交日」在库里不可见，连续缺交预警会把
+    缺-交-缺误判为连续；本表补上完整时间轴。"""
+    __tablename__ = "homework_collection"
+    id = Column(Integer, primary_key=True)
+    date = Column(String, nullable=False)  # YYYY-MM-DD
+    subject = Column(String, nullable=False)  # 规范学科名
+    grade = Column(Integer, nullable=False)
+    class_num = Column(Integer, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("date", "subject", "grade", "class_num", name="uq_collection_day"),
+        Index("idx_collection_date_subject", "date", "subject"),
+    )
+
+
 class SpecialRecord(Base):
     """特殊情况记录（对应原 special_records 表）：请假/迟到/早退等。"""
     __tablename__ = "special_record"

@@ -11,6 +11,7 @@ from datetime import date
 
 from app.db.models import (
     ClassRoster,
+    HomeworkCollection,
     HomeworkRecord,
     HomeworkSemester,
     SpecialRecord,
@@ -292,8 +293,9 @@ def rankings(db, start, end, student=None, subject=None, limit=10, class_num=Non
 def warnings(db, start, end, class_num=None):
     """同一学科「当前正在进行」的连续缺交预警。
 
-    时间轴 = 该学科全班有人缺交的去重日期；从最近一次收交向前回溯，统计
-    某学生连续缺交了最近几次（必须含最后一次收交，否则视为已结束）。
+    时间轴 = 该学科有缺交记录的日期 ∪ 收交台账日期（「数学：全交」这类
+    全交日也进时间轴，缺-交-缺不再被误判为连续）；从最近一次收交向前回溯，
+    统计某学生连续缺交了最近几次（必须含最后一次收交，否则视为已结束）。
     连续 2 次 → warning（黄），≥3 次 → serious（红）。排除 excluded 学生。
     """
     rows = _base_miss_query(
@@ -308,6 +310,19 @@ def warnings(db, start, end, class_num=None):
         timeline[subj].add(rec.date)
         missed[(subj, roster.student_id)].add(rec.date)
         student_names[roster.student_id] = roster.name
+
+    # 收交台账并入时间轴，与缺交记录同 scope（active_grade / class_num）
+    active_grade = get_active_grade(db)
+    coll_q = db.query(HomeworkCollection).filter(
+        HomeworkCollection.date >= start,
+        HomeworkCollection.date <= end,
+    )
+    if active_grade:
+        coll_q = coll_q.filter(HomeworkCollection.grade == active_grade)
+    if class_num is not None:
+        coll_q = coll_q.filter(HomeworkCollection.class_num == int(class_num))
+    for coll in coll_q.all():
+        timeline[normalize_subject(coll.subject)].add(coll.date)
 
     serious, warning = [], []
     for (subj, student_id), miss_dates in missed.items():

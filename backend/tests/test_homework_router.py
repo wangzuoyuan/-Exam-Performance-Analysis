@@ -159,6 +159,49 @@ def test_all_class_scoped_reads_reject_other_class(client):
         assert response.status_code == 409, path
 
 
+def test_full_submission_breaks_streak(client, db_session):
+    """回归「缺-交-缺被误判连续」：全交台账日进时间轴后应打断 streak。
+    放在文件末尾：本用例会设置固定学期区间。"""
+    from app.db.models import HomeworkCollection
+
+    r = client.put("/api/homework/semester", json={
+        "semester_start": "2026-03-01", "semester_end": "2026-03-31"})
+    assert r.status_code == 200
+
+    db = db_session
+    db.query(HomeworkRecord).filter(HomeworkRecord.student_id == "TEST-001").delete()
+    db.query(HomeworkCollection).delete()
+    for d in ("2026-03-02", "2026-03-04"):
+        db.add(HomeworkRecord(student_id="TEST-001", date=d, subject="数学"))
+    db.commit()
+
+    def _find(body):
+        return [w for w in body["serious"] + body["warning"] if w["student_id"] == "TEST-001"]
+
+    # 无台账（旧行为）：时间轴只见两次缺交 → 误判连续 2 次
+    body = client.get("/api/homework/warnings").json()
+    assert any(w["streak"] == 2 for w in _find(body))
+
+    # 台账：03-03 全交 → streak 打断为 1，不进预警
+    r = client.post("/api/homework/records",
+                    json={"raw_text": "数学：全交", "date": "2026-03-03", "mode": "by_subject"})
+    assert r.status_code == 200
+    assert r.json()["added_count"] == 1
+    body = client.get("/api/homework/warnings").json()
+    assert not _find(body)
+
+    # 幂等：同一收交日换说法重复录入不重复计数
+    r1 = client.post("/api/homework/records",
+                     json={"raw_text": "数学：齐了", "date": "2026-03-03", "mode": "by_subject"})
+    assert r1.json()["added_count"] == 0
+
+    # 修复后台账反向验证：删台账回到误判，重录恢复打断
+    db.query(HomeworkCollection).delete()
+    db.commit()
+    body = client.get("/api/homework/warnings").json()
+    assert any(w["streak"] == 2 for w in _find(body))
+
+
 def test_same_name_input_and_writes_are_isolated_to_bound_class(client):
     db = SessionLocal()
     try:

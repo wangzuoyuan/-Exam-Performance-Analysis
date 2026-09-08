@@ -12,6 +12,7 @@ from typing import Optional
 
 from app.db.models import (
     ClassRoster,
+    HomeworkCollection,
     HomeworkRecord,
     SpecialRecord,
     get_db,
@@ -19,6 +20,7 @@ from app.db.models import (
 from app.homework import service
 from app.homework.export import export_daily_report
 from app.homework.parser import (
+    is_full_submission,
     is_subject_item,
     parse_homework_item,
     split_colon,
@@ -260,6 +262,20 @@ async def hw_add_records(payload: RecordsPayload, class_num: Optional[int] = Non
                         errors.append(f"无法识别科目: {left}")
                         continue
                     subj, content, remark = parsed
+                    if is_full_submission(right):
+                        # 收交台账：「数学：全交」记一条收交事件（幂等），
+                        # 供连续缺交预警构建完整时间轴
+                        existing = db.query(HomeworkCollection).filter(
+                            HomeworkCollection.date == date,
+                            HomeworkCollection.subject == subj,
+                            HomeworkCollection.grade == grade,
+                            HomeworkCollection.class_num == class_num,
+                        ).first()
+                        if not existing:
+                            db.add(HomeworkCollection(date=date, subject=subj,
+                                                      grade=grade, class_num=class_num))
+                            added += 1
+                        continue
                     for name in names:
                         sid = _find_student_id(db, name, grade, class_num)
                         if not sid:

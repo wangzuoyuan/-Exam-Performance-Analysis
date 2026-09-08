@@ -76,6 +76,16 @@ def is_subject_item(item):
     return False
 
 
+# 「全班都交了」的表达：右侧整体匹配才算（如「数学：全交」「英语：齐了」）
+_FULL_SUBMIT_TOKENS = {"全交", "齐", "全齐", "交齐", "都交", "全交齐", "都交齐"}
+
+
+def is_full_submission(text):
+    """右侧列表是否为「全交/齐」类表达（忽略 了/嘛/吗/标点/空白）。"""
+    normalized = re.sub(r"[了嘛吗！!。，,、\s]", "", str(text or ""))
+    return normalized in _FULL_SUBMIT_TOKENS
+
+
 def split_names(raw):
     """把「卜一轩、张曦 吴辰轩」这类列表拆成姓名数组。"""
     return [n.strip() for n in NAME_SPLIT_RE.split(raw) if n.strip()]

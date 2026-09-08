@@ -1,4 +1,5 @@
 from app.homework.parser import (
+    is_full_submission,
     is_subject_item,
     normalize_subject,
     parse_homework_item,
@@ -33,3 +34,16 @@ def test_split_helpers():
     assert split_colon("卜一轩：英语、数学") == ("卜一轩", "英语、数学")
     assert split_colon("没有冒号") is None
     assert split_names("卜一轩、张曦 吴辰轩，徐晨") == ["卜一轩", "张曦", "吴辰轩", "徐晨"]
+
+
+def test_is_full_submission():
+    assert is_full_submission("全交") is True
+    assert is_full_submission("齐") is True
+    assert is_full_submission("齐了") is True
+    assert is_full_submission("全齐") is True
+    assert is_full_submission("交齐！") is True
+    assert is_full_submission("都交齐") is True
+    # 整体匹配才算：混了姓名不是全交
+    assert is_full_submission("全交、卜一轩") is False
+    assert is_full_submission("卜一轩") is False
+    assert is_full_submission("") is False

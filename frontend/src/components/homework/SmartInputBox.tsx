@@ -97,7 +97,7 @@ export function SmartInputBox({
           placeholder={
             mode === 'by_student'
               ? '每行一名学生，例如：\n卜一轩：英语粉书、数学\n吴辰轩：请假、英语'
-              : '每行一种作业，例如：\n数学：卜一轩、张曦\n请假：卜一轩、吴辰轩'
+              : '每行一种作业，例如：\n数学：卜一轩、张曦\n请假：卜一轩、吴辰轩\n数学：全交'
           }
           className="w-full resize-y rounded-lg border border-strong-border bg-white px-3 py-3 font-mono text-[13px] leading-6 text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         />
