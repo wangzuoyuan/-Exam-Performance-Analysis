@@ -29,6 +29,7 @@ import {
   type ManageStudent,
   type MergePreview,
 } from '@/lib/student-management'
+import { displaySid } from '@/lib/sid'
 
 async function requestJson(url: string, init?: RequestInit): Promise<unknown> {
   const response = await fetch(url, {
@@ -340,9 +341,9 @@ export function SidDialog({ student, onOpenChange, onDone }: SidDialogProps) {
         <DialogHeader>
           <DialogTitle>学号管理：{student.name}</DialogTitle>
           <DialogDescription>
-            当前学号 <span className="font-mono">{student.student_id}</span>
+            当前学号 <span className="font-mono">{displaySid(student.student_id)}</span>
             {student.aliases.length > 0 && (
-              <>；历史学号：{student.aliases.map((alias) => alias.student_id).join('、')}</>
+              <>；历史学号：{student.aliases.map((alias) => displaySid(alias.student_id)).join('、')}</>
             )}
           </DialogDescription>
         </DialogHeader>
@@ -493,7 +494,7 @@ export function DeleteStudentDialog({ student, onOpenChange, onDone }: DeleteStu
                     <div className="mt-1 rounded-md border border-border bg-background/70 p-2 text-xs text-muted-foreground" data-testid="delete-retention">
                       <div className="font-extrabold text-foreground">删除后仍保留（不会随之删除）</div>
                       {kept.length > 0 && (
-                        <p className="mt-0.5">其他历史学号：{kept.join('、')}（主档继续沿用）</p>
+                        <p className="mt-0.5">其他历史学号：{kept.map((sid) => displaySid(sid)).join('、')}（主档继续沿用）</p>
                       )}
                       {history > 0 && (
                         <p className="mt-0.5">手工导入的历史成绩 {history} 条（挂在主档下）</p>
@@ -612,7 +613,7 @@ export function MergeDialog({ open, students, onOpenChange, onDone }: MergeDialo
               <SelectContent>
                 {students.map((student) => (
                   <SelectItem key={student.student_id} value={student.student_id}>
-                    {student.name} · {student.student_id}
+                    {student.name} · {displaySid(student.student_id)}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -625,7 +626,7 @@ export function MergeDialog({ open, students, onOpenChange, onDone }: MergeDialo
               <SelectContent>
                 {students.filter((student) => student.student_id !== primaryId).map((student) => (
                   <SelectItem key={student.student_id} value={student.student_id}>
-                    {student.name} · {student.student_id}
+                    {student.name} · {displaySid(student.student_id)}
                   </SelectItem>
                 ))}
               </SelectContent>

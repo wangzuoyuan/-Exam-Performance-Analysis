@@ -9,6 +9,7 @@ import { useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight, Loader2, ShieldCheck, Undo2 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
+import { displaySid } from '@/lib/sid'
 import { formatClassLabel } from '@/lib/labels'
 import {
   buildSubmitItems,
@@ -335,7 +336,7 @@ function CandidateInfo({ candidate, grade }: { candidate: AmbiguousCandidate; gr
         )}
       </div>
       <div className="font-mono text-xs text-slate-500">
-        高{grade - 1}学号 {candidate.student_id}
+        高{grade - 1}学号 {displaySid(candidate.student_id)}
       </div>
       <div className="text-xs text-slate-500">
         原行政班：{formatClassLabel(grade - 1, candidate.class_num) ?? DASH}
@@ -432,7 +433,7 @@ function AmbiguousRowDesktop({
       <TableRow className="hover:bg-slate-50">
         <TableCell>
           <div className="font-medium">{row.name ?? DASH}</div>
-          <div className="font-mono text-xs text-slate-500">{row.student_id}</div>
+          <div className="font-mono text-xs text-slate-500">{displaySid(row.student_id)}</div>
           {safe && (
             <Badge variant="success" className="mt-1">
               安全项
@@ -522,7 +523,7 @@ function AmbiguousRowMobile({
             <span className="font-medium">{row.name ?? DASH}</span>
             {safe && <Badge variant="success">安全项</Badge>}
           </div>
-          <div className="mt-0.5 font-mono text-xs text-slate-500">{row.student_id}</div>
+          <div className="mt-0.5 font-mono text-xs text-slate-500">{displaySid(row.student_id)}</div>
         </div>
       </div>
       {multi ? (
@@ -613,12 +614,12 @@ export function BatchResultCard({
         <ul className="space-y-1 text-sm">
           {result.results.map((r) => (
             <li key={r.g2_student_id} className="flex flex-wrap items-baseline gap-1">
-              <span className="font-medium">{r.name ?? r.g2_student_id}</span>
+              <span className="font-medium">{r.name ?? displaySid(r.g2_student_id)}</span>
               <span className="text-slate-500">
                 {r.status === 'linked' ? (
                   <>
                     同一人 · 高{result.grade - 1}学号{' '}
-                    <span className="font-mono">{r.g1_student_id}</span>
+                    <span className="font-mono">{displaySid(r.g1_student_id)}</span>
                   </>
                 ) : (
                   '新学生（独立身份）'

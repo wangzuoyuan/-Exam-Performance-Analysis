@@ -1,6 +1,8 @@
 // 学生管理页的纯逻辑与类型：字段标签、状态文案、影响计数摘要、变更日志摘要。
 // 只放可独立单测的纯函数；接口调用与状态流转在页面组件里。
 
+import { displaySid } from '@/lib/sid'
+
 export interface ManageStudentCounts {
   subject_score: number
   total_score: number
@@ -117,12 +119,15 @@ function pickText(summary: Record<string, unknown> | null | undefined, keys: str
   return null
 }
 
-/** 变更日志条目 → 一句人话摘要（只取业务字段，日志本身不含任何凭据） */
+/** 变更日志条目 → 一句人话摘要（只取业务字段，日志本身不含任何凭据）。
+ * 摘要是纯展示文本，学号统一剥届前缀；原始值仍以日志存储为准。 */
 export function formatChangeSummary(entry: ChangeLogEntry): string {
   const before = entry.before_summary ?? {}
   const after = entry.after_summary ?? {}
   const name = pickText(after, ['name', 'primary_name']) ?? pickText(before, ['name']) ?? ''
-  const sid = (after.student_id as string) || (after.added_student_id as string) || entry.student_id || ''
+  const sid = displaySid(
+    (after.student_id as string) || (after.added_student_id as string) || entry.student_id || ''
+  )
   switch (entry.op_type) {
     case 'create':
       return `新建 ${name || sid || ''}（${sid}）`
@@ -140,9 +145,9 @@ export function formatChangeSummary(entry: ChangeLogEntry): string {
       return changes.length ? `${name || sid}：${changes.join('，')}` : `${name || sid}：信息更新`
     }
     case 'correct_sid':
-      return `${name || ''}：学号 ${before.student_id ?? '—'} → ${after.student_id ?? '—'}`
+      return `${name || ''}：学号 ${displaySid(before.student_id as string) || '—'} → ${displaySid(after.student_id as string) || '—'}`
     case 'new_year_sid':
-      return `${name || sid}：新增学号 ${after.added_student_id ?? '—'}`
+      return `${name || sid}：新增学号 ${displaySid(after.added_student_id as string) || '—'}`
     case 'archive':
       return `${name || sid}：${after.status === 'graduated' ? '毕业离校' : '转班离班'}`
     case 'restore':
@@ -157,7 +162,7 @@ export function formatChangeSummary(entry: ChangeLogEntry): string {
       const detail = entry.detail ?? {}
       const moved = detail.moved as Record<string, number> | undefined
       const total = moved ? Object.values(moved).reduce((a, b) => a + (b || 0), 0) : 0
-      return `合并 ${before.duplicate_name ?? ''}（${before.duplicate_student_id ?? '—'}）→ ${after.primary_name ?? ''}（${after.primary_student_id ?? '—'}），迁入 ${total} 条数据`
+      return `合并 ${before.duplicate_name ?? ''}（${displaySid(before.duplicate_student_id as string) || '—'}）→ ${after.primary_name ?? ''}（${displaySid(after.primary_student_id as string) || '—'}），迁入 ${total} 条数据`
     }
     case 'backfill': {
       const detail = entry.detail ?? {}

@@ -19,6 +19,7 @@ from app.db.models import (
     SpecialRecord,
     get_db,
 )
+from app.db.sid_space import display_sid
 from app.paths import DATA_DIR
 
 EXPORT_DIR = os.environ.get(
@@ -97,8 +98,9 @@ def export_daily_report(target_date, db=None):
             rows.append(
                 {
                     "seat": seat if seat is not None else 10**9,
-                    "学号": (str(seat) if seat is not None else (sid or "")),
-                    "姓名": r.name if r else sid,
+                    # Excel 是给人看的：学号/姓名兜底剥掉届前缀（聚合 key 仍用原值）
+                    "学号": (str(seat) if seat is not None else display_sid(sid)),
+                    "姓名": r.name if r else display_sid(sid),
                     "缺交科目": _unique_join(data["subjects"]),
                     "说明": _unique_join(data["contents"]),
                     "特殊情况": _unique_join(data["specials"]),

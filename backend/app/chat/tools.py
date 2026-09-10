@@ -3,6 +3,7 @@ from typing import Any
 from typing import Optional
 
 from app.chat.config import ChatConfig, get_chat_config
+from app.db.sid_space import display_sid, is_namespaced, namespaced_sid
 
 BASE_SUBJECTS = ("语文", "数学", "英语")
 ELECTIVE_SUBJECTS = ("物理", "化学", "生物", "政治", "历史", "地理")
@@ -99,6 +100,24 @@ def student_lookup(name: Optional[str] = None, student_id: Optional[str] = None)
             query = query.filter(SubjectScore.name.like(f"%{name}%"))
         results = query.all()
 
+        # 跨届撞车后，历史届的同号学号在库内已带 G{g}:: 前缀；裸学号精确未命中
+        # 时逐届补查一次（命中即用，查不到仍返回空）。
+        if not results and student_id and not is_namespaced(str(student_id)):
+            for grade in (1, 2, 3):
+                retry = (
+                    db.query(SubjectScore.student_id, SubjectScore.name)
+                    .filter(
+                        SubjectScore.student_id.in_(
+                            person_ids(db, namespaced_sid(grade, str(student_id)))
+                        )
+                    )
+                )
+                if name:
+                    retry = retry.filter(SubjectScore.name.like(f"%{name}%"))
+                results = retry.all()
+                if results:
+                    break
+
         if not results:
             return []
 
@@ -108,7 +127,8 @@ def student_lookup(name: Optional[str] = None, student_id: Optional[str] = None)
             iid = identity_of(db, sid)
             bucket = person_buckets.get(iid)
             if bucket is None:
-                bucket = {"student_ids": set(), "name": nm or sid}
+                # name 是给人看的展示字段：学号兜底时剥掉届前缀
+                bucket = {"student_ids": set(), "name": nm or display_sid(sid)}
                 person_buckets[iid] = bucket
             bucket["student_ids"].add(sid)
             if nm and (not bucket["name"] or bucket["name"] == sid):
@@ -195,7 +215,8 @@ def student_identity_lookup(name: Optional[str] = None, student_id: Optional[str
                 .order_by(Exam.exam_date.desc().nullslast(), Exam.id.desc())
                 .first()
             )
-            display_name = (nm_row[0] if nm_row else None) or resolved_sid
+            # 展示名兜底到学号时剥前缀（resolved_sid 保持原值用于后续查询）
+            display_name = (nm_row[0] if nm_row else None) or display_sid(resolved_sid)
 
         # ── 组装学号履历 ──
         aliases = aliases_of(db, iid) if iid is not None else []
@@ -328,7 +349,8 @@ def student_learning_profile(
         }
 
     resolved_student_id = students[0][0]
-    resolved_name = students[0][1] or resolved_student_id
+    # 展示名兜底到学号时剥前缀；student_id 字段本身保持存储原值
+    resolved_name = students[0][1] or display_sid(resolved_student_id)
     # 同一人的全部学号（跨学年合并）；未链接时退化为单学号集合
     ids = person_ids(db, resolved_student_id)
     person_identity = identity_of(db, resolved_student_id)
@@ -627,7 +649,8 @@ def focus_list(exam_id: int, category: Optional[str] = None) -> list[dict[str, A
             SubjectScore.exam_id == exam_id,
             SubjectScore.student_id == total.student_id,
         ).all()
-        name = next((s.name for s in subjects if s.name), total.student_id)
+        # 展示名兜底到学号时剥前缀；student_id 字段保持原值供回传查询
+        name = next((s.name for s in subjects if s.name), display_sid(total.student_id))
         issues = []
         if band_cfg["critical_min"] <= rank <= band_cfg["critical_max"]:
             issues.append("临界段")
@@ -888,7 +911,8 @@ def multi_exam_progress_ranking(
         regression_steps = sum(1 for value in step_changes if value < 0)
         return {
             "student_id": student_id,
-            "name": profile.get("name") or student_id,
+            # name 展示字段兜底剥前缀；student_id 保持原值
+            "name": profile.get("name") or display_sid(student_id),
             "class_num": profile.get("class_num"),
             "metric": metric,
             "metric_kind": metric_kind,

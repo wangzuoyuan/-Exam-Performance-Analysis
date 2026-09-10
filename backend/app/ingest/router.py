@@ -130,6 +130,19 @@ def parse_and_store(file_path: str, filename: str, parsed: dict, grade: int) -> 
             out["detected_class"] = detect_class_from_students(students)
             out["detected_grade"] = grade
 
+            # 跨届学号守门：本届成绩学号若与旧届裸学号撞车（每学年重新
+            # 编学号的学校），先把旧届整体 G{g}:: 前缀化让位再写裸号；
+            # 与本次写入同一事务，解析失败整体回滚。
+            from app.db.sid_space import ensure_sid_space
+
+            incoming_sids = {
+                ss["student_id"] for ss in subject_scores if ss.get("student_id")
+            }
+            if incoming_sids:
+                ensure_sid_space(
+                    db, incoming_sids, grade, commit=False, auto_backup=True
+                )
+
             exam = get_or_create_exam(db, parsed, grade, file_path)
             upload_record.exam_id = exam.id
 

@@ -26,6 +26,7 @@ import TrendLineChart from '@/components/TrendLineChart'
 import HomeworkCard from '@/components/HomeworkCard'
 import StudentNotes from '@/components/StudentNotes'
 import { cn } from '@/lib/utils'
+import { displaySid } from '@/lib/sid'
 import { formatStageHistory, type StageAlias } from '@/lib/labels'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
@@ -840,7 +841,7 @@ export default function StudentPage() {
         <PageHeader
           eyebrow="Student profile"
           title={profile.name || DASH}
-          description={`学号 ${profile.student_id || DASH} · ${classNum !== null ? `${classNum}班` : DASH} · ${latestGrade ? `高${latestGrade}` : DASH}`}
+          description={`学号 ${displaySid(profile.student_id) || DASH} · ${classNum !== null ? `${classNum}班` : DASH} · ${latestGrade ? `高${latestGrade}` : DASH}`}
           actions={
             <div className="flex flex-wrap gap-2">
               <Button asChild variant="outline" className="min-h-11"><Link href="/student"><ChevronLeft className="h-4 w-4" />学生名单</Link></Button>

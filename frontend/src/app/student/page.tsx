@@ -30,6 +30,7 @@ import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { formatGradeLabel } from '@/lib/labels'
+import { displaySid } from '@/lib/sid'
 import {
   formatChangeSummary,
   formatOpLabel,
@@ -246,7 +247,7 @@ export default function StudentManagePage() {
                                 <Link href={`/student/${student.student_id}`} className="inline-flex min-h-11 min-w-11 items-center justify-center px-2 font-extrabold text-foreground hover:text-primary">{student.name}</Link>
                                 {!student.in_roster && <Badge variant="outline" className="ml-1 text-[10px]">未建册</Badge>}
                               </TableCell>
-                              <TableCell className="font-mono text-xs text-muted-foreground">{student.student_id}</TableCell>
+                              <TableCell className="font-mono text-xs text-muted-foreground">{displaySid(student.student_id)}</TableCell>
                               <TableCell>
                                 <Badge variant={isArchived(student.status) ? 'outline' : 'secondary'}>{formatStatusLabel(student.status)}</Badge>
                               </TableCell>
@@ -261,7 +262,7 @@ export default function StudentManagePage() {
                                   <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
                                     {history.map((alias) => (
                                       <Badge key={alias.student_id} variant="outline" className="font-mono">
-                                        {formatGradeLabel(alias.grade)} · {alias.class_num ?? '—'}班 · {alias.student_id}
+                                        {formatGradeLabel(alias.grade)} · {alias.class_num ?? '—'}班 · {displaySid(alias.student_id)}
                                       </Badge>
                                     ))}
                                   </div>
@@ -282,7 +283,7 @@ export default function StudentManagePage() {
                         <div className="min-w-0">
                           {/* 画像入口只在底部「画像」按钮一处，避免同一卡片多个重复入口 */}
                           <span className="inline-flex min-h-11 min-w-11 items-center justify-center px-2 text-base font-extrabold text-foreground">{student.name}</span>
-                          <p className="break-all font-mono text-xs text-muted-foreground">{student.student_id}</p>
+                          <p className="break-all font-mono text-xs text-muted-foreground">{displaySid(student.student_id)}</p>
                         </div>
                         <div className="flex shrink-0 flex-col items-end gap-1">
                           <Badge variant="secondary">{activeScope?.label ?? '—'}</Badge>

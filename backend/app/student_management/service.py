@@ -21,7 +21,9 @@ ClassRoster 为唯一花名册（绝不另建第二套名册）。
 
 所有写操作写入 StudentChangeLog（同事务，字段级前后摘要，不含任何凭据）。
 身份层复用 app.analysis.identity；学号校验复用 rollover.service 的
-_validate_official_sid / temp_sid / _norm_name，保持全站同一口径。
+_validate_official_sid / temp_sid / _norm_name，保持全站同一口径；显式学号
+写入前统一经 app.db.sid_space.ensure_sid_space 跨届撞车守门（与换届名册
+导入 / 成绩上传同一口径）。
 """
 
 from datetime import datetime
@@ -597,6 +599,12 @@ def create_student(db, *, name, student_id=None, gender=None, seat_no=None, note
                 raise ValueError(f"学号 {sid} 已存在于花名册，不能重复使用")
             if identity_of(db, sid) is not None:
                 raise ValueError(f"学号 {sid} 已关联跨学年身份，不能重复建档")
+            # 跨届学号守门：显式学号若与其他年级的裸学号撞车，先把撞车旧届
+            # 整体 G{g}:: 前缀化让位，本届再写裸号；与下方落库同一事务，
+            # 任一步失败整体回滚（自动备份与删除/合并的安全口径一致）。
+            from app.db.sid_space import ensure_sid_space
+
+            ensure_sid_space(db, {sid}, grade, commit=False, auto_backup=True)
             _validate_official_sid(db, sid, name, grade, class_num)
         else:
             if same_name is not None:
@@ -846,9 +854,14 @@ def correct_student_id(db, student_id: str, new_student_id: str) -> dict:
             "纠正会造成同场考试数据冲突，请先核对成绩归属"
         )
 
-    _validate_official_sid(db, new_sid, name, grade, class_num, expect_iid=iid)
-
     try:
+        # 跨届学号守门：新学号若与其他年级的裸学号撞车，先把撞车旧届整体
+        # G{g}:: 前缀化让位，再过学号校验、迁移引用——守门、校验与下方写
+        # 操作同一事务，任一步失败整体回滚（自动备份与删除/合并口径一致）。
+        from app.db.sid_space import ensure_sid_space
+
+        ensure_sid_space(db, {new_sid}, grade, commit=False, auto_backup=True)
+        _validate_official_sid(db, new_sid, name, grade, class_num, expect_iid=iid)
         moved = _migrate_refs(db, sid, new_sid)
         # 身份别名随迁：新学号已有本生 alias 则删旧 alias（目标侧保留），
         # 否则把旧 alias 原位改成新学号
@@ -935,9 +948,14 @@ def add_new_year_student_id(db, student_id: str, new_student_id: str, grade: int
             f"与本学生「{name}」不一致，已拒绝"
         )
 
-    _validate_official_sid(db, new_sid, name, grade, class_num, expect_iid=iid)
-
     try:
+        # 跨届学号守门：目标学年新学号若与其他年级的裸学号撞车，先把撞车
+        # 旧届整体 G{g}:: 前缀化让位，本届再写裸号；守门、校验与下方写
+        # 操作同一事务，任一步失败整体回滚。
+        from app.db.sid_space import ensure_sid_space
+
+        ensure_sid_space(db, {new_sid}, grade, commit=False, auto_backup=True)
+        _validate_official_sid(db, new_sid, name, grade, class_num, expect_iid=iid)
         if iid is None:
             iid = ensure_identity(db, display_name=name, commit=False)
             link_aliases(db, iid, [(sid, current_grade)], "manual", commit=False)

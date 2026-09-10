@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
+import { displaySid } from '@/lib/sid'
 import { parseRosterText } from '@/lib/roster-parser'
 import {
   buildDefaultDecisions,
@@ -382,7 +383,7 @@ export default function RolloverWizardPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ g2_student_id: g2_sid, g1_student_id: g1_sid, name: name ?? null, grade: Number(targetGrade) }),
       }, '关联失败')
-      setMsg(`已关联 ${name ?? g2_sid} → 高${Number(targetGrade) - 1} ${g1_sid}`)
+      setMsg(`已关联 ${name ?? displaySid(g2_sid)} → 高${Number(targetGrade) - 1} ${displaySid(g1_sid)}`)
       await loadPreview()
     } catch (cause) {
       setMsg(displayError(cause, '关联失败'))
@@ -443,11 +444,12 @@ export default function RolloverWizardPage() {
   }
 
   async function unlink(student_id: string) {
-    if (!confirm(`解除 ${student_id} 的跨学年关联？`)) return
+    // 提示文案剥届前缀给人看；DELETE 路径仍用存储原值
+    if (!confirm(`解除 ${displaySid(student_id)} 的跨学年关联？`)) return
     setMsg(null)
     try {
       await requestJson(`/api/rollover/link/${student_id}`, { method: 'DELETE' }, '解除失败')
-      setMsg(`已解除关联 ${student_id}`)
+      setMsg(`已解除关联 ${displaySid(student_id)}`)
       await loadPreview()
     } catch (cause) {
       setMsg(displayError(cause, '解除失败'))
@@ -835,7 +837,7 @@ function PreviewStep({
               extra:
                 r.prev_aliases.length > 0
                   ? r.prev_aliases
-                      .map((a) => `高${a.grade}${a.class_num ?? '-'}班·${a.student_id}`)
+                      .map((a) => `高${a.grade}${a.class_num ?? '-'}班·${displaySid(a.student_id)}`)
                       .join(' / ')
                   : null,
               actions: (
@@ -895,7 +897,7 @@ function PreviewStep({
                 <div className="flex flex-wrap gap-2">
                   {preview.left_class.map((s) => (
                     <Badge key={s.student_id} variant="outline">
-                      {s.name ?? s.student_id}
+                      {s.name ?? displaySid(s.student_id)}
                       <span className="ml-1 text-slate-400">高{grade - 1}{s.class_num}班</span>
                     </Badge>
                   ))}
@@ -976,7 +978,7 @@ function BucketCard({
                 <TableBody>
                   {rows.map((r) => (
                     <TableRow key={r.key} className="hover:bg-slate-50">
-                      <TableCell className="font-mono text-slate-500">{r.student_id}</TableCell>
+                      <TableCell className="font-mono text-slate-500">{displaySid(r.student_id)}</TableCell>
                       <TableCell className="font-medium">{r.name ?? DASH}</TableCell>
                       <TableCell className="text-slate-500">{r.extra ?? DASH}</TableCell>
                       <TableCell className="text-right">{r.actions}</TableCell>
@@ -993,7 +995,7 @@ function BucketCard({
                     <span className="font-medium">{r.name ?? DASH}</span>
                     {r.actions}
                   </div>
-                  <div className="mt-1 font-mono text-xs text-slate-500">{r.student_id}</div>
+                  <div className="mt-1 font-mono text-xs text-slate-500">{displaySid(r.student_id)}</div>
                   {r.extra && <div className="mt-1 text-xs text-slate-500">{r.extra}</div>}
                 </div>
               ))}
@@ -1050,7 +1052,7 @@ function NewBucket({
                 <TableBody>
                   {rows.map((r) => (
                     <TableRow key={r.student_id} className="hover:bg-slate-50">
-                      <TableCell className="font-mono text-slate-500">{r.student_id}</TableCell>
+                      <TableCell className="font-mono text-slate-500">{displaySid(r.student_id)}</TableCell>
                       <TableCell className="font-medium">{r.name ?? DASH}</TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">
@@ -1075,7 +1077,7 @@ function NewBucket({
                   <div className="flex items-center justify-between">
                     <span className="font-medium">{r.name ?? DASH}</span>
                   </div>
-                  <div className="font-mono text-xs text-slate-500">{r.student_id}</div>
+                  <div className="font-mono text-xs text-slate-500">{displaySid(r.student_id)}</div>
                   <div className="flex flex-wrap gap-2">
                     <Button variant="outline" size="sm" onClick={() => setImportFor(r)}>
                       <Upload className="mr-1 h-3.5 w-3.5" />

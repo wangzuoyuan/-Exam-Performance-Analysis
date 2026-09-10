@@ -34,6 +34,8 @@ pytest tests/test_excel_parser.py::test_xxx  # 单个用例
 # 换届/身份子系统用例：test_identity / test_rollover / test_roster_import（粘贴名册双格式 +
 #   临时学号/正式学号替换/旧缺陷行收编）/ test_rollover_leftclass / test_student_union /
 #   test_migrate_homeroom / test_chat_tools_union（按人合并口径）
+# 跨届学号命名空间：test_sid_space（整届前缀化迁移/幂等/同号新人不继承/学号不变老人跨届继承/
+#   JSON 快照重映射与 undo 兼容/守门入口与自动备份/classify 撞车预告）
 
 # 日志
 tail -f ~/.exam-tracker/backend.log
@@ -51,6 +53,8 @@ tail -f ~/.exam-tracker/frontend.log
 **身份层（跨学年身份接续，升级换届后引入）**：3 张新表——`student_identity`（「人」聚合根，含 `display_name`/`gender`/`ext_key`，后者预留身份证/全国学籍号，默认不用）、`student_alias`（学号→identity 映射，`grade` 区分学年，一人可多号，唯一约束 `uq_alias_student`）、`imported_history`（手工导入的历史分数，**与全年级排名/班均/段位计算完全隔离**，仅个人画像展示）；另有 `rollover_confirm_batch`（同名批量确认的批次快照，undo 只删本批事务实际新建的 alias/identity，绝不触碰提交前已有关联）。新列 `class_roster.grade`（名册行所属年级 1/2/3，支持换届后高一/高二名册并存）；`homework_setting.active_grade` 是一行 KV（key=`active_grade`，缺省回落库内最大年级）。`analysis/identity.py` 是身份子系统对外唯一契约：`identity_of` / `person_ids` / `ensure_identity` / `link_aliases`（二者支持 `commit=False`，供批量确认单事务组合写）/ `unlink_alias` / `name_candidates` / `import_crosswalk`。**核心不变式**：`person_ids(db, sid)` 在学号未链接时退化为 `{sid}`——单学年分析仍按 `class_num` 过滤，只有以学生为中心的跨学年读侧才解析 identity，因此零回归。`db/migrate_homeroom.py` 在启动时跑（`main.py` 调用），PRAGMA 门控、幂等可重跑（给 `class_roster` 补 `grade` 与 `status` 列）；遗留的教学版残留（孤立的 `teaching_class*` 表、`class_roster.class_label` 列）原样保留不动。
 
 **临时学号（先建册后出分）**：换届向导粘贴名单支持仅「姓名」行，`rollover/service.py` 生成稳定临时学号 `TMP-{grade}-{class}-{name}`（同班同名幂等、跨班不冲突，绝不拿姓名直接当主键），立即可用于作业花名册/录入；之后在同一输入框粘贴「学号,姓名」即可把占位行事务性替换为正式学号（homework_record / special_record / student_note / student_alias 随迁，excluded/座号/性别保留），后续成绩上传用正式学号自然接续。占位判定**精确等于** `temp_sid(grade, class, name)`——任何以 `TMP-` 开头的真实学号都不是占位行，绝不被替换/删除。所有带学号的导入行（含直接建册与「从成绩派生」）统一走 `_validate_official_sid`：成绩库姓名、目标年级班级、已挂 `StudentAlias` 与本行学生不符即整批拒绝（同名且作用域一致可安全接续）。`from_scores=true` 从成绩派生复用同一条替换事务，先建册后出分的学生自动换成正式学号并迁移全部依赖，不再 merge 出第二条重复行。旧版缺陷行（`student_id=姓名`、`class_num/name` 为空、grade=目标年级）在再次粘贴同名时被严格匹配收编（收编前比对两侧身份别名：不同 identity 整批拒绝，同 identity 收编且删除缺陷学号别名不留孤儿），绝不触碰高一年级数据。`/api/students` 与 `/api/students/{id}` 已并入 roster-only 学生（成绩/名次字段为 null，前端显示「—」）：列表只纳入教师绑定年级班级的 roster-only 行；已关联身份的 roster-only 学号与旧成绩学号并入同一「人」，以高二学号为当前代表（`current_grade`/`class_num` = 高二目标班，旧学号进 `history`）；详情把合法花名册年级并入 `grades`/`class_by_grade`（顶层 `class_num` 取最高年级作用域），仅凭花名册可见时须属教师绑定班，他班 404。
+
+**跨届学号命名空间（同号跨届并存）**：部分学校每学年重新编学号，高二新学号可能与高一旧学号相同（同号不同人）；而库层 `class_roster.student_id` 是全局主键、`student_alias` 有 UNIQUE(student_id)、作业/档案按裸学号关联——`db/sid_space.py` 是所有跨届写入的统一守门：`ensure_sid_space(db, incoming, grade)` 发现本届要写入的学号与其他年级裸学号撞车时，把撞车旧届的**全部**裸学号整体改写为 `G{届}::原学号`（如 `G1::7250601`，覆盖 subject_score/total_score/class_roster/student_alias/homework_record/special_record/student_note 及 rollover_confirm_batch、student_change_log 的 JSON 快照——整值替换绝不做子串替换），当前活跃届永远保持裸学号。接线点：名册导入（`_import_rows`）、成绩上传（`parse_and_store`）、学生管理 create/correct-sid/new-year-sid、confirm_batch 与 link/link-batch/crosswalk（后两者需用返回的 `renamed` 映射把请求里的旧届裸学号改写后再落库）。均与调用方同一事务、`auto_backup=True` 触发迁移前自动备份。**不变式**：`G{g}::` 学号必属第 g 届；`_validate_official_sid` 的成绩姓名校验只看目标年级（跨届同号是合法重号，不是冲突）；`person_ids` 对裸号/前缀号天然隔离——同号新人绝不继承旧生数据，老生 link 两个学号到同一 identity 即完成继承。**展示纪律**：API/JSON 里的 student_id 一律返回存储原值（前端回传依赖），只有 chat 工具的自然语言文本（`display_sid`）、作业 Excel 导出、前端渲染层（`frontend/src/lib/sid.ts` 的 `displaySid`）剥前缀给人看。
 
 ## 部署（Docker / 群晖 NAS）
 

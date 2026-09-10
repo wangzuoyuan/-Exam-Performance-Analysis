@@ -125,6 +125,16 @@ def _link_one(db, item: LinkPayload) -> dict:
     if g2_grade not in (2, 3):
         raise HTTPException(422, "目标年级必须为高二或高三")
 
+    # 跨届学号守门：本届（g2）学号若与其他年级的裸学号撞车，先把撞车旧届
+    # 整体 G{g}:: 前缀化让位；请求里的旧届学号（g1）可能还是裸号，迁移
+    # 发生后库里已是 G1::x，必须用 renamed 改写为新值再落库，否则别名与
+    # 已迁移的高一成绩对不上；g2 属本届，永不改写。
+    from app.db.sid_space import ensure_sid_space
+
+    renamed = ensure_sid_space(
+        db, {g2}, g2_grade, commit=False, auto_backup=True
+    )["renamed"]
+
     iid = identity.identity_of(db, g2)
     if iid is None:
         # 无 alias：新建 identity（display_name/name, gender）
@@ -134,7 +144,8 @@ def _link_one(db, item: LinkPayload) -> dict:
 
     items = [(g2, g2_grade)]
     if item.g1_student_id is not None:
-        items.append((str(item.g1_student_id), g2_grade - 1))
+        g1 = renamed.get(str(item.g1_student_id), str(item.g1_student_id))
+        items.append((g1, g2_grade - 1))
 
     identity.link_aliases(db, iid, items, "name_confirmed")
 
@@ -262,9 +273,24 @@ class CrosswalkPayload(BaseModel):
 async def rollover_crosswalk(payload: CrosswalkPayload):
     db = next(get_db())
     try:
-        return identity.import_crosswalk(
-            db, [r.model_dump() for r in payload.rows], payload.target_grade
-        )
+        # 跨届学号守门：本届（g2）学号若与其他年级的裸学号撞车，先把撞车
+        # 旧届整体 G{g}:: 前缀化让位；行内 g1_sid 用 renamed 改写为新值再
+        # 导入（g2_sid 属本届，永不改写），与 link / confirm-batch 同一理由。
+        from app.db.sid_space import ensure_sid_space
+
+        renamed = ensure_sid_space(
+            db,
+            {r.g2_sid for r in payload.rows},
+            payload.target_grade,
+            commit=False,
+            auto_backup=True,
+        )["renamed"]
+        rows = []
+        for r in payload.rows:
+            d = r.model_dump()
+            d["g1_sid"] = renamed.get(d["g1_sid"], d["g1_sid"])
+            rows.append(d)
+        return identity.import_crosswalk(db, rows, payload.target_grade)
     finally:
         db.close()
 

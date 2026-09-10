@@ -1,3 +1,5 @@
+import { displaySid } from '@/lib/sid'
+
 const GRADE_LABELS: Record<number, string> = {
   1: '高一',
   2: '高二',
@@ -25,9 +27,10 @@ export interface StageAlias {
 
 export function formatStageHistory(aliases: StageAlias[]): string {
   if (!aliases || aliases.length === 0) return '—'
+  // 产出的是给人看的履历文本；学号展示时剥届前缀
   const segments = aliases.map(
     (a) =>
-      `${formatGradeLabel(a.grade)}(${a.class_num ?? '-'})班·${a.student_id}`,
+      `${formatGradeLabel(a.grade)}(${a.class_num ?? '-'})班·${displaySid(a.student_id)}`,
   )
   if (segments.length === 1) return segments[0]
   return segments.join(' -> ')

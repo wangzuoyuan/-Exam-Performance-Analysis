@@ -245,12 +245,30 @@ def classify(db, target_grade, class_num) -> dict:
                     }
                 )
 
+    # 撞车预告：目标班学生的裸学号若与其他年级的裸学号空间重号，向导页
+    # 据此提示「写入本届时会把整个旧届前缀化」。这里只统计、不迁移——
+    # 真正的迁移发生在各写入入口的 ensure_sid_space 守门。
+    from app.db.sid_space import bare_sid_spaces, is_namespaced
+
+    spaces = bare_sid_spaces(db)
+    bare_target = {sid for sid in sid_set if not is_namespaced(sid)}
+    other_spaces = {g: sids for g, sids in spaces.items() if g != target_grade}
+    sid_clash = {
+        "would_namespace": sorted(
+            g for g, sids in other_spaces.items() if sids & bare_target
+        ),
+        "clash_count": len(
+            bare_target & {s for sids in other_spaces.values() for s in sids}
+        ),
+    }
+
     return {
         "inherited": inherited,
         "ambiguous": ambiguous,
         "new": new,
         "unmatched": unmatched,
         "left_class": left_class,
+        "sid_clash": sid_clash,
         "summary": {
             "inherited": len(inherited),
             "ambiguous": len(ambiguous),
@@ -359,7 +377,10 @@ def _absorb_legacy_row(db, legacy, target_sid) -> None:
 def _validate_official_sid(db, sid, name, target_grade, class_num, expect_iid=None) -> None:
     """所有带学号的导入行统一过闸（无论是否命中占位行）：
 
-    1. 成绩库姓名：该学号在任一年级的成绩姓名与导入姓名不符 → 拒绝；
+    1. 成绩库姓名：该学号在【目标年级】的成绩姓名与导入姓名不符 → 拒绝。
+       其他年级的同号记录是合法的跨届重号（每学年重新编学号的学校，高二
+       新号可与高一旧号相同），不参与本校验——届间隔离由调用方先行
+       ensure_sid_space（G{g}:: 前缀化）保证；
     2. 目标年级班级：该学号在目标年级的成绩属于他班 → 拒绝；
     3. 身份别名：学号已挂 StudentAlias 时必须仍属于「本行学生」——
        expect_iid（占位行的 identity）给定且不一致 → 直接拒绝；
@@ -371,7 +392,12 @@ def _validate_official_sid(db, sid, name, target_grade, class_num, expect_iid=No
 
     score_name = (
         db.query(SubjectScore.name)
-        .filter(SubjectScore.student_id == sid, SubjectScore.name.isnot(None))
+        .join(Exam, Exam.id == SubjectScore.exam_id)
+        .filter(
+            Exam.grade == target_grade,
+            SubjectScore.student_id == sid,
+            SubjectScore.name.isnot(None),
+        )
         .first()
     )
     if score_name is not None and score_name[0] != name:
@@ -518,6 +544,18 @@ def _import_rows(db, target_grade, class_num, rows, *, allow_dup_names=False) ->
         )
     if errors:
         raise ValueError("；".join(errors))
+
+    # 跨届学号守门：正式学号若与其他年级的裸学号撞车（每学年重新编学号
+    # 的学校，高二新号可与高一旧号同号），先把撞车旧届整体 G{g}:: 前缀化
+    # 让位，本届写入裸号。与下面的落库同一事务（出错整体回滚），自动备份
+    # 与删除/合并的安全口径一致。
+    from app.db.sid_space import ensure_sid_space
+
+    official_sids = {p["sid"] for p in plans if p["sid"]}
+    if official_sids:
+        ensure_sid_space(
+            db, official_sids, target_grade, commit=False, auto_backup=True
+        )
 
     created = updated = replaced = repaired = 0
     batch_created: set[str] = set()  # 本批新建的学号（供派生时同名多号互不拦）
@@ -933,6 +971,24 @@ def confirm_batch(db, target_grade, class_num, items) -> dict:
     created_identities: list[int] = []
     results = []
     try:
+        # 跨届学号守门：本届（g2）学号若与其他年级的裸学号撞车，先把撞车
+        # 旧届整体 G{g}:: 前缀化让位。预检阶段 name_candidates 返回的 g1
+        # 可能还是裸号，迁移发生后库里已是 G1::x，必须用 renamed 重写
+        # plan 的 g1 再落库，否则新别名与已迁移的高一成绩对不上；g2 属
+        # 本届，永不改写（renamed 为空时无操作）。
+        from app.db.sid_space import ensure_sid_space
+
+        renamed = ensure_sid_space(
+            db,
+            {p["g2"] for p in plans},
+            target_grade,
+            commit=False,
+            auto_backup=True,
+        )["renamed"]
+        if renamed:
+            for p in plans:
+                if p["g1"] and p["g1"] in renamed:
+                    p["g1"] = renamed[p["g1"]]
         for p in plans:
             iid = ensure_identity(db, display_name=p["name"], commit=False)
             created_identities.append(iid)
@@ -1106,6 +1162,24 @@ def import_history(
     """
     from app.db.models import ImportedHistory
     from app.analysis.identity import identity_of, ensure_identity, link_aliases
+
+    # 跨届学号守门：本入口也会经 link_aliases 写学号，与 link / crosswalk
+    # 同一口径——本届学号撞车时先前缀化旧届，请求里的旧届裸学号（含
+    # link_g1_student_id）用 renamed 改写后再落库。target_grade 缺省时无
+    # 届上下文可判定，跳过守门（此时也不写跨届 alias）。
+    from app.db.sid_space import ensure_sid_space
+
+    renamed = {}
+    if target_grade in (1, 2, 3):
+        incoming = {str(s) for s in (student_id,) if s is not None}
+        if incoming:
+            renamed = ensure_sid_space(
+                db, incoming, target_grade, commit=False, auto_backup=True
+            )["renamed"]
+    if student_id is not None and str(student_id) in renamed:
+        student_id = renamed[str(student_id)]
+    if link_g1_student_id is not None and str(link_g1_student_id) in renamed:
+        link_g1_student_id = renamed[str(link_g1_student_id)]
 
     # 1) 解析 identity_id
     if identity_id is None:

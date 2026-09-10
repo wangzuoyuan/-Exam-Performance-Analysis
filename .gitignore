@@ -20,3 +20,6 @@ raw/
 # 本地笔记（不入库）
 部署与排障记录.md
 .playwright-mcp/
+
+# Claude Code 本地会话配置（个人权限/本机 agent 定义，不入库）
+.claude/
