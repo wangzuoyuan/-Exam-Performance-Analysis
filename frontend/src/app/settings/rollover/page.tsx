@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
+import { displayStudentId } from '@/lib/student-id'
 import { parseRosterText } from '@/lib/roster-parser'
 import {
   buildDefaultDecisions,
@@ -835,7 +836,7 @@ function PreviewStep({
               extra:
                 r.prev_aliases.length > 0
                   ? r.prev_aliases
-                      .map((a) => `高${a.grade}${a.class_num ?? '-'}班·${a.student_id}`)
+                      .map((a) => `高${a.grade}${a.class_num ?? '-'}班·${displayStudentId(a.student_id)}`)
                       .join(' / ')
                   : null,
               actions: (
@@ -976,7 +977,7 @@ function BucketCard({
                 <TableBody>
                   {rows.map((r) => (
                     <TableRow key={r.key} className="hover:bg-slate-50">
-                      <TableCell className="font-mono text-slate-500">{r.student_id}</TableCell>
+                      <TableCell className="font-mono text-slate-500">{displayStudentId(r.student_id)}</TableCell>
                       <TableCell className="font-medium">{r.name ?? DASH}</TableCell>
                       <TableCell className="text-slate-500">{r.extra ?? DASH}</TableCell>
                       <TableCell className="text-right">{r.actions}</TableCell>
@@ -993,7 +994,7 @@ function BucketCard({
                     <span className="font-medium">{r.name ?? DASH}</span>
                     {r.actions}
                   </div>
-                  <div className="mt-1 font-mono text-xs text-slate-500">{r.student_id}</div>
+                  <div className="mt-1 font-mono text-xs text-slate-500">{displayStudentId(r.student_id)}</div>
                   {r.extra && <div className="mt-1 text-xs text-slate-500">{r.extra}</div>}
                 </div>
               ))}
@@ -1050,7 +1051,7 @@ function NewBucket({
                 <TableBody>
                   {rows.map((r) => (
                     <TableRow key={r.student_id} className="hover:bg-slate-50">
-                      <TableCell className="font-mono text-slate-500">{r.student_id}</TableCell>
+                      <TableCell className="font-mono text-slate-500">{displayStudentId(r.student_id)}</TableCell>
                       <TableCell className="font-medium">{r.name ?? DASH}</TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">
@@ -1075,7 +1076,7 @@ function NewBucket({
                   <div className="flex items-center justify-between">
                     <span className="font-medium">{r.name ?? DASH}</span>
                   </div>
-                  <div className="font-mono text-xs text-slate-500">{r.student_id}</div>
+                  <div className="font-mono text-xs text-slate-500">{displayStudentId(r.student_id)}</div>
                   <div className="flex flex-wrap gap-2">
                     <Button variant="outline" size="sm" onClick={() => setImportFor(r)}>
                       <Upload className="mr-1 h-3.5 w-3.5" />

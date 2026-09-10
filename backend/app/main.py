@@ -235,6 +235,23 @@ try:
 except Exception as _e:  # noqa
     print(f"[migrate_homeroom] skipped: {_e}")
 
+# 跨届撞号迁移：高二重新编号撞历史旧学号时，改写死号并按姓名建身份链（幂等）。
+try:
+    from app.db.migrate_student_ids import migrate_colliding_student_ids  # noqa
+
+    def _run_collision_migration():
+        from app.db.models import SessionLocal
+
+        db = SessionLocal()
+        try:
+            migrate_colliding_student_ids(db)
+        finally:
+            db.close()
+
+    _run_collision_migration()
+except Exception as _e:  # noqa
+    print(f"[migrate_student_ids] skipped: {_e}")
+
 from app.ingest.router import router as ingest_router  # noqa
 from app.analysis.router import router as analysis_router  # noqa
 from app.chat.session import router as chat_router  # noqa

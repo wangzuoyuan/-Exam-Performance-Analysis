@@ -6,6 +6,7 @@ import { useParams } from 'next/navigation'
 import { ChevronLeft, Printer } from 'lucide-react'
 
 import { useHomeroomScope } from '@/components/providers/HomeroomScopeProvider'
+import { displayStudentId } from '@/lib/student-id'
 
 const DASH = '—'
 
@@ -210,7 +211,7 @@ export default function StudentReportPage() {
       <div className="border-b border-slate-300 pb-3 print:pb-2">
         <h1 className="text-xl font-bold">家长会学生情况表</h1>
         <p className="mt-1 text-sm text-slate-600">
-          {profile.name} · 学号 {profile.student_id}
+          {profile.name} · 学号 {displayStudentId(profile.student_id)}
           {profile.class_num != null ? ` · ${profile.class_num}班` : ''}
           <span className="ml-3 text-slate-400">生成日期 {new Date().toISOString().slice(0, 10)}</span>
         </p>

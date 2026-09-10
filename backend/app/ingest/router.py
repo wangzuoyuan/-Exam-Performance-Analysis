@@ -55,6 +55,60 @@ def split_sort_key(sort_key: Optional[str]) -> tuple[Optional[int], Optional[int
     except (ValueError, TypeError):
         return None, None
 
+def _detect_sid_name_conflicts(db, subject_scores: list) -> Optional[str]:
+    """学号-姓名冲突检测：本文件内同学号多姓名，或与库内已有姓名不一致。
+
+    返回 None 表示无冲突；有冲突返回可直接展示给老师的报错文案。
+    """
+    from app.db.models import SubjectScore
+
+    incoming: dict[str, set[str]] = {}
+    for ss in subject_scores:
+        sid = (ss.get("student_id") or "").strip()
+        nm = (ss.get("name") or "").strip()
+        if sid and nm:
+            incoming.setdefault(sid, set()).add(nm)
+
+    # 本文件内：同学号多姓名（Excel 错行/两班混排）
+    internal = [
+        (sid, sorted(nms)) for sid, nms in incoming.items() if len(nms) > 1
+    ]
+    if internal:
+        detail = "；".join(f"{sid}：{'、'.join(nms)}" for sid, nms in internal[:5])
+        return (
+            f"文件内同一学号对应多个姓名（{detail}），已拒绝写入。"
+            "请检查 Excel 是否混入其他班级的数据。"
+        )
+
+    # 与库内：已入库的该学号姓名与本次不同（跨届撞号的典型形态）
+    sids = [sid for sid, nms in incoming.items() if len(nms) == 1]
+    conflicts = []
+    if sids:
+        rows = (
+            db.query(SubjectScore.student_id, SubjectScore.name)
+            .filter(
+                SubjectScore.student_id.in_(sids),
+                SubjectScore.name.isnot(None),
+            )
+            .distinct()
+            .all()
+        )
+        for sid, nm in rows:
+            nm = (nm or "").strip()
+            if nm and nm not in incoming.get(sid, set()):
+                conflicts.append((sid, nm, next(iter(incoming[sid]))))
+    if conflicts:
+        detail = "；".join(
+            f"{sid} 库内=「{old}」 本次=「{new}」" for sid, old, new in conflicts[:5]
+        )
+        return (
+            f"学号与历史数据姓名不一致（{detail}），已拒绝写入。"
+            "分班重新编号后新学号可能撞上历史旧学号：请核对该学号是否属于本次考试学生；"
+            "确为同一人请先统一姓名后重传。"
+        )
+    return None
+
+
 def get_or_create_exam(db, parsed: dict, grade: int, file_path: str):
     from app.db.models import Exam
 
@@ -126,6 +180,19 @@ def parse_and_store(file_path: str, filename: str, parsed: dict, grade: int) -> 
             students = result.get("students", [])
             subject_scores = result.get("subject_scores", [])
             total_scores = result.get("total_scores", [])
+
+            # 撞号防呆：学号是「人」的全局标识，同学号不同姓名会把两个学生
+            # 的成绩/总分混到同一人名下（跨学年画像按人聚合）。写库前整文件
+            # 拒绝——分班重新编号后新学号撞历史旧号时明确报错，引导人工处理。
+            conflict = _detect_sid_name_conflicts(db, subject_scores)
+            if conflict:
+                db.rollback()
+                out["result"] = {
+                    "filename": filename,
+                    "parsed_ok": False,
+                    "message": conflict,
+                }
+                return out
 
             out["detected_class"] = detect_class_from_students(students)
             out["detected_grade"] = grade
