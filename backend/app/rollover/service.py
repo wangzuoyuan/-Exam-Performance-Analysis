@@ -617,8 +617,12 @@ def _import_rows(db, target_grade, class_num, rows, *, allow_dup_names=False) ->
                 official = (
                     db.query(ClassRoster).filter(ClassRoster.student_id == sid).first()
                 )
-                # 占位判定必须精确等于系统为该姓名/作用域生成的临时学号；
-                # 任何 TMP- 前缀的真实学号都不是占位行，绝不被替换/删除。
+                # 占位判定：优先精确等于系统为该姓名/作用域生成的临时学号。
+                # 回退：建册后改过名的学生，占位行学号里冻结着建册时的旧名
+                # （改名只更新 name 字段、不动学号），精确匹配会落空——按
+                # 「本班同名 + TMP- 前缀且唯一」识别。系统内 TMP- 学号只有
+                # temp_sid 一个生成源（真实学号绝不同形），回退不会误伤；
+                # 替换仍走 _replace_placeholder_sid 的完整校验与事务。
                 placeholder = next(
                     (
                         r
@@ -627,6 +631,16 @@ def _import_rows(db, target_grade, class_num, rows, *, allow_dup_names=False) ->
                     ),
                     None,
                 )
+                if placeholder is None:
+                    tmp_candidates = [
+                        r
+                        for r in same_name_rows
+                        if str(r.student_id).startswith(
+                            f"{TEMP_SID_PREFIX}{target_grade}-{class_num}-"
+                        )
+                    ]
+                    if len(tmp_candidates) == 1:
+                        placeholder = tmp_candidates[0]
                 if official is not None:
                     if official.name and official.name != name:
                         raise ValueError(

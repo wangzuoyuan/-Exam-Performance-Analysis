@@ -643,3 +643,72 @@ def test_roster_only_rows_scoped_to_bound_class(client, db):
     # 本班 roster-only 详情仍 200；有高一成绩的已关联学生（跨学年画像）不受影响
     assert client.get(f"/api/students/{TMP_ZHAO}").status_code == 200
     assert client.get(f"/api/students/{TMP_SUN}").status_code == 200
+
+
+# ─────────────────────────── 改名后的占位行替换 ───────────────────────────
+
+
+def test_renamed_placeholder_replaced_via_tmp_prefix_fallback(client, db):
+    """建册后改过名的学生：占位行学号里冻结着建册时的旧名（改名只更新
+    name 字段、不动学号），再粘「正式号,新名」时精确匹配必然落空——
+    按「本班同名 + TMP- 前缀且唯一」回退识别占位行并事务性替换。
+    （线上真实卡点：当初粘贴打成「吴承轩」，改名「吴辰轩」后无法补号。）"""
+    # 当初粘贴「吴承轩」建占位行
+    r = client.post("/api/rollover/roster", json={
+        "grade": 2, "class_num": 6,
+        "rows": [{"name": "吴承轩"}],
+    })
+    assert r.status_code == 200, r.text
+
+    # 老师后来改名（与 update_student 一致：只改 name、学号不变）
+    s = SessionLocal()
+    row = (
+        s.query(ClassRoster)
+        .filter(ClassRoster.student_id == "TMP-2-6-吴承轩")
+        .one()
+    )
+    row.name = "吴辰轩"
+    s.commit()
+    s.close()
+
+    # 粘贴「正式学号,新名字」→ 必须命中占位行并替换
+    r = client.post("/api/rollover/roster", json={
+        "grade": 2, "class_num": 6,
+        "rows": [{"student_id": "20250301", "name": "吴辰轩"}],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["replaced"] == 1, body
+    assert body["created"] == 0
+
+    s = SessionLocal()
+    assert (
+        s.query(ClassRoster)
+        .filter(ClassRoster.student_id == "TMP-2-6-吴承轩")
+        .count()
+        == 0
+    )
+    row = (
+        s.query(ClassRoster).filter(ClassRoster.student_id == "20250301").one()
+    )
+    assert (row.name, row.grade, row.class_num) == ("吴辰轩", 2, 6)
+    s.close()
+
+
+def test_renamed_placeholder_fallback_never_touches_real_sid(client, db):
+    """回退只认 TMP- 前缀：本班同名的**正式号**行绝不被回退替换
+    （多行歧义时保守拒绝，维持原有防重复建册语义）。"""
+    # 本班已有同名正式号行（非 TMP）
+    r = client.post("/api/rollover/roster", json={
+        "grade": 2, "class_num": 6,
+        "rows": [{"student_id": "20250302", "name": "钱多多"}],
+    })
+    assert r.status_code == 200, r.text
+
+    # 再粘同名的另一个正式号 → 无占位行可补，维持拒绝（防重复建册）
+    r = client.post("/api/rollover/roster", json={
+        "grade": 2, "class_num": 6,
+        "rows": [{"student_id": "20250303", "name": "钱多多"}],
+    })
+    assert r.status_code == 422, r.text
+    assert "未找到待补学号占位行" in r.text
