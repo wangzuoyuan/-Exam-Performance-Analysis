@@ -29,7 +29,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
 
 
-app = FastAPI(title="成绩分析（班主任版）API", version="2.2.3", lifespan=_lifespan)
+app = FastAPI(title="成绩分析（班主任版）API", version="2.2.4", lifespan=_lifespan)
 
 if _MCP_MOUNT is not None:
     app.mount(MCP_MOUNT_PATH, _MCP_MOUNT.app)
@@ -73,7 +73,7 @@ os.makedirs(f"{EXAM_TRACKER_DIR}/raw", exist_ok=True)
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "version": "2.2.3"}
+    return {"ok": True, "version": "2.2.4"}
 
 @app.get("/")
 def root():
@@ -234,6 +234,13 @@ try:
     _migrate_homeroom()
 except Exception as _e:  # noqa
     print(f"[migrate_homeroom] skipped: {_e}")
+
+# 跨届撞号迁移（db/migrate_student_ids.py）不再随启动自动执行：
+# 写入守门（db/sid_space.ensure_sid_space）已在所有跨届写入入口前置化解
+# 撞车，本迁移的检测永不命中；其「唯一同名自动挂链」按姓名合并身份，
+# 不适合在无人值守的启动路径静默发生。保留为手工救援工具——仅当出现
+# 守门无法覆盖的脏库（如手工导库造成既有撞号）时，由人决策后手动执行：
+#   python -m app.db.migrate_student_ids
 
 from app.ingest.router import router as ingest_router  # noqa
 from app.analysis.router import router as analysis_router  # noqa

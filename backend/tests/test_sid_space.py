@@ -47,7 +47,7 @@ from app.db.models import (
     Teacher,
     TotalScore,
 )
-from app.db.sid_space import ensure_sid_space
+from app.db.sid_space import display_sid, ensure_sid_space, is_namespaced
 from app.rollover import service as rollover_service
 
 
@@ -418,3 +418,50 @@ def test_classify_reports_sid_clash_without_migrating(fresh):
         SubjectScore.student_id == "7250601").count() == 1
     assert s.query(ClassRoster).filter(
         ClassRoster.student_id == "7250601").count() == 1
+
+
+# ─────────────────────────── 10. 与启动迁移的兼容契约 ───────────────────────────
+
+
+def test_startup_collision_migration_is_noop_after_ensure(fresh):
+    """守门先行后，启动迁移（db/migrate_student_ids.py，v2.2.4 引入）必须 no-op。
+
+    两套机制的共存契约：ensure_sid_space 在任何写入前已把撞车旧届整体
+    G{g}:: 前缀化，库内不再存在「同学号不同姓名」的撞号形态，启动迁移的
+    检测永远不命中——保证 g{g}- 历史前缀不会再产生，两层防御不打架。
+    """
+    from app.db.migrate_student_ids import migrate_colliding_student_ids
+
+    s = fresh
+    _seed_g1_class(s)
+    # 先守门：模拟高二写入前撞号被化解
+    ensure_sid_space(s, {"7250601"}, 2, commit=False, auto_backup=False)
+    s.expire_all()
+    # 高一全部带 G1:: 前缀，裸号空间已无跨届撞车
+    stats = migrate_colliding_student_ids(s)
+    assert stats["collisions"] == 0
+    assert stats["rekeyed_rows"] == 0
+    assert stats["linked"] == 0
+    # 且库内绝不产生 g{g}- 历史格式前缀
+    from app.db.models import SubjectScore
+
+    prefixed = [
+        r[0]
+        for r in s.query(SubjectScore.student_id).distinct().all()
+        if str(r[0]).startswith("g1-")
+    ]
+    assert prefixed == []
+
+
+def test_legacy_g_prefix_sids_are_namespaced_aware():
+    """历史 g{g}- 前缀学号（启动迁移产物，若有）被守门视为已命名空间：
+    不参与撞车检测、展示层剥一层即还原。两种前缀绝不叠加。"""
+    assert is_namespaced("g1-7250601") is True
+    assert is_namespaced("G1::7250601") is True
+    assert is_namespaced("7250601") is False
+    assert is_namespaced("TMP-2-6-张三") is False
+    # 展示：两种前缀各剥一层，不互相叠加
+    assert display_sid("g1-7250601") == "7250601"
+    assert display_sid("G1::7250601") == "7250601"
+    # 正常数据两种前缀不会叠加；即便脏数据叠加，展示层也剥净到原始学号
+    assert display_sid("G1::g1-7250601") == "7250601"

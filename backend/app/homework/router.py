@@ -583,6 +583,24 @@ async def hw_add_student(payload: AddStudentPayload):
             sid = payload.student_id.strip()
             if db.query(ClassRoster).filter(ClassRoster.student_id == sid).first():
                 raise HTTPException(400, f"学号 {sid} 已存在")
+            # 撞号防呆：该学号在历史成绩中已属另一位学生 → 拒绝，静默接受
+            # 会让跨学年画像串人（分班重新编号撞历史旧号的典型形态）
+            from app.db.models import SubjectScore
+
+            score_name = (
+                db.query(SubjectScore.name)
+                .filter(
+                    SubjectScore.student_id == sid,
+                    SubjectScore.name.isnot(None),
+                )
+                .first()
+            )
+            if score_name and (score_name[0] or "").strip() != name:
+                raise HTTPException(
+                    400,
+                    f"学号 {sid} 在历史成绩中属于「{score_name[0]}」，"
+                    f"与「{name}」不一致，请核对该学号",
+                )
         else:
             token = str(payload.seat_no) if payload.seat_no is not None else name
             base_sid = f"HW-{grade}-{class_num}-{token}"

@@ -55,6 +55,65 @@ def split_sort_key(sort_key: Optional[str]) -> tuple[Optional[int], Optional[int
     except (ValueError, TypeError):
         return None, None
 
+def _detect_sid_name_conflicts(db, subject_scores: list) -> Optional[str]:
+    """学号-姓名冲突检测：本文件内同学号多姓名，或与库内已有姓名不一致。
+
+    返回 None 表示无冲突；有冲突返回可直接展示给老师的报错文案。
+
+    调用顺序契约：必须在 sid_space.ensure_sid_space **之后**调用——跨届
+    撞号时守门已把旧届整体 G{g}:: 前缀化让位，此处查到的裸学号已全属
+    本届，剩下的「同学号不同姓名」才是真正需要人工核对的错误数据；
+    若放在守门之前，跨届合法重号会被误拒。
+    """
+    from app.db.models import SubjectScore
+
+    incoming: dict[str, set[str]] = {}
+    for ss in subject_scores:
+        sid = (ss.get("student_id") or "").strip()
+        nm = (ss.get("name") or "").strip()
+        if sid and nm:
+            incoming.setdefault(sid, set()).add(nm)
+
+    # 本文件内：同学号多姓名（Excel 错行/两班混排）
+    internal = [
+        (sid, sorted(nms)) for sid, nms in incoming.items() if len(nms) > 1
+    ]
+    if internal:
+        detail = "；".join(f"{sid}：{'、'.join(nms)}" for sid, nms in internal[:5])
+        return (
+            f"文件内同一学号对应多个姓名（{detail}），已拒绝写入。"
+            "请检查 Excel 是否混入其他班级的数据。"
+        )
+
+    # 与库内：已入库的该学号姓名与本次不同（守门后仍同名不同人 = 同届内录错学号）
+    sids = [sid for sid, nms in incoming.items() if len(nms) == 1]
+    conflicts = []
+    if sids:
+        rows = (
+            db.query(SubjectScore.student_id, SubjectScore.name)
+            .filter(
+                SubjectScore.student_id.in_(sids),
+                SubjectScore.name.isnot(None),
+            )
+            .distinct()
+            .all()
+        )
+        for sid, nm in rows:
+            nm = (nm or "").strip()
+            if nm and nm not in incoming.get(sid, set()):
+                conflicts.append((sid, nm, next(iter(incoming[sid]))))
+    if conflicts:
+        detail = "；".join(
+            f"{sid} 库内=「{old}」 本次=「{new}」" for sid, old, new in conflicts[:5]
+        )
+        return (
+            f"学号与历史数据姓名不一致（{detail}），已拒绝写入。"
+            "请核对该学号是否属于本次考试学生；"
+            "确为同一人请先统一姓名后重传。"
+        )
+    return None
+
+
 def get_or_create_exam(db, parsed: dict, grade: int, file_path: str):
     from app.db.models import Exam
 
@@ -130,9 +189,11 @@ def parse_and_store(file_path: str, filename: str, parsed: dict, grade: int) -> 
             out["detected_class"] = detect_class_from_students(students)
             out["detected_grade"] = grade
 
-            # 跨届学号守门：本届成绩学号若与旧届裸学号撞车（每学年重新
-            # 编学号的学校），先把旧届整体 G{g}:: 前缀化让位再写裸号；
-            # 与本次写入同一事务，解析失败整体回滚。
+            # 跨届学号守门（必须先于撞号防呆）：本届成绩学号若与旧届裸学号
+            # 撞车（每学年重新编学号的学校），先把旧届整体 G{g}:: 前缀化
+            # 让位再写裸号；与本次写入同一事务，解析失败整体回滚。守门之后
+            # 库内裸学号已全属本届，防呆的「与库内姓名不一致」只剩同届内
+            # 录错学号的真冲突，不会误拒跨届合法重号。
             from app.db.sid_space import ensure_sid_space
 
             incoming_sids = {
@@ -142,6 +203,19 @@ def parse_and_store(file_path: str, filename: str, parsed: dict, grade: int) -> 
                 ensure_sid_space(
                     db, incoming_sids, grade, commit=False, auto_backup=True
                 )
+
+            # 撞号防呆：学号是「人」的全局标识，同学号不同姓名会把两个学生
+            # 的成绩/总分混到同一人名下（跨学年画像按人聚合）。写库前整文件
+            # 拒绝并明确报错，引导人工核对。
+            conflict = _detect_sid_name_conflicts(db, subject_scores)
+            if conflict:
+                db.rollback()
+                out["result"] = {
+                    "filename": filename,
+                    "parsed_ok": False,
+                    "message": conflict,
+                }
+                return out
 
             exam = get_or_create_exam(db, parsed, grade, file_path)
             upload_record.exam_id = exam.id

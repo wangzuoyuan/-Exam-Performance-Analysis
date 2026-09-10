@@ -31,6 +31,12 @@ import re
 # 也与临时学号 TMP- 前缀互不干扰。
 _NS_RE = re.compile(r"^G([123])::")
 
+# 兼容历史格式：早期启动迁移（db/migrate_student_ids.py）曾把撞号死者的
+# 成绩行改写为 g<年级>-<原号>（如 g1-7250629）。两种前缀互不匹配、绝不
+# 二次叠加；本模块把两者都视为「已命名空间」——带任一前缀的学号不再
+# 参与撞车检测（g1- 号语义上已属该届，不该被再套 G{g}::）。
+_ANY_NS_RE = re.compile(r"^(?:G[123]::|g\d+-)")
+
 # SQLite 单条 IN 的安全块大小（远低于变量上限）
 _CHUNK = 400
 
@@ -41,7 +47,8 @@ def namespaced_sid(grade: int, sid: str) -> str:
 
 
 def is_namespaced(sid) -> bool:
-    return bool(_NS_RE.match(str(sid or "")))
+    """已带届命名空间前缀（G{g}:: 或历史格式 g{g}-）的学号。"""
+    return bool(_ANY_NS_RE.match(str(sid or "")))
 
 
 def strip_ns(sid: str):
@@ -54,8 +61,14 @@ def strip_ns(sid: str):
 
 
 def display_sid(sid) -> str:
-    """给人看的学号：剥掉 G{g}:: 前缀（chat 文本、Excel 导出、前端渲染）。"""
-    return strip_ns(sid)[0]
+    """给人看的学号：剥掉 G{g}:: 前缀（兼容剥历史格式 g{g}- 前缀）。
+
+    chat 文本、Excel 导出、前端渲染统一走这里；两种前缀不会叠加，
+    剥一层即得原始学号。
+    """
+    s = str(sid or "")
+    s = _NS_RE.sub("", s, count=1)
+    return re.sub(r"^g\d+-", "", s, count=1)
 
 
 def _chunks(seq):

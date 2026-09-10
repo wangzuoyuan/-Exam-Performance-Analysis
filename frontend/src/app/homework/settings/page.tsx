@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { Plus, Save, Trash2, UserRoundX } from 'lucide-react'
+import { Plus, Save, UserRoundX } from 'lucide-react'
 
 import { HomeworkNav } from '@/components/homework/HomeworkNav'
 import { DataTableShell } from '@/components/patterns/DataTableShell'
@@ -49,8 +49,6 @@ export default function HomeworkSettingsPage() {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
-  const [newName, setNewName] = useState('')
-  const [newSeat, setNewSeat] = useState('')
 
   useEffect(() => {
     if (!activeScope) {
@@ -137,41 +135,12 @@ export default function HomeworkSettingsPage() {
     }
   }
 
-  const addStudent = async () => {
-    if (!newName.trim() || !activeScope) return
-    try {
-      await mutate('/api/homework/roster', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: newName.trim(),
-          seat_no: newSeat ? Number(newSeat) : null,
-          class_num: activeScope.classNum,
-          grade: activeScope.grade,
-        }),
-      }, `已添加 ${newName.trim()}`)
-      setNewName('')
-      setNewSeat('')
-    } catch (cause) {
-      setNotice({ tone: 'error', text: cause instanceof Error ? cause.message : '添加失败' })
-    }
-  }
-
   const toggleExcluded = async (row: RosterRow) => {
     if (!activeScope) return
     try {
       await mutate(`/api/homework/roster/${row.student_id}/toggle-excluded?class_num=${activeScope.classNum}`, { method: 'PUT' }, `${row.name} 已${row.excluded ? '恢复计入' : '排除统计'}`)
     } catch (cause) {
       setNotice({ tone: 'error', text: cause instanceof Error ? cause.message : '操作失败' })
-    }
-  }
-
-  const removeStudent = async (row: RosterRow) => {
-    if (!activeScope || !confirm(`删除 ${row.name}？会同时删除其 ${row.record_count} 条作业记录。`)) return
-    try {
-      await mutate(`/api/homework/roster/${row.student_id}?class_num=${activeScope.classNum}`, { method: 'DELETE' }, `已删除 ${row.name}`)
-    } catch (cause) {
-      setNotice({ tone: 'error', text: cause instanceof Error ? cause.message : '删除失败' })
     }
   }
 
@@ -274,25 +243,17 @@ export default function HomeworkSettingsPage() {
 
           <SectionCard
             title={`花名册 · ${roster.length} 人`}
-            description="排除后，其缺交不进入看板、排行、预警和相关性；删除会同时清理该成员作业记录。"
+            description="排除后，其缺交不进入看板、排行、预警和相关性。成员的添加与移除统一在「学生管理」页维护。"
             action={<Badge variant="warning"><UserRoundX className="mr-1 h-3.5 w-3.5" />已排除 {roster.filter((row) => row.excluded).length} 人</Badge>}
           >
-            <FilterBar className="mb-4">
-              <label className="text-xs font-bold text-muted-foreground sm:w-24">
-                座号
-                <Input value={newSeat} onChange={(event) => setNewSeat(event.target.value)} inputMode="numeric" placeholder="可选" className="mt-1 min-h-11" />
-              </label>
-              <label className="min-w-0 flex-1 text-xs font-bold text-muted-foreground sm:max-w-56">
-                姓名
-                <Input value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="新增占位成员" className="mt-1 min-h-11" />
-              </label>
-              <Button variant="outline" className="min-h-11" onClick={() => void addStudent()} disabled={!newName.trim()}>
-                <Plus className="h-4 w-4" />添加学生
-              </Button>
-            </FilterBar>
+            <div className="mb-4 text-sm text-muted-foreground">
+              需要新增或删除学生？请前往
+              <Link href="/student" className="mx-1 font-bold text-primary underline-offset-4 hover:underline">学生管理</Link>
+              页操作（新增、编辑、学号变更、归档均有留痕）。
+            </div>
 
             {roster.length === 0 ? (
-              <StatePanel tone="empty" title="当前班级暂无花名册" description="可手动添加占位成员，或通过上传流程同步正式花名册。" />
+              <StatePanel tone="empty" title="当前班级暂无花名册" description="请到「学生管理」页新增学生，或通过上传成绩 / 换届粘贴名单建花名册。" />
             ) : (
               <>
                 <DataTableShell maxHeight className="hidden md:block">
@@ -304,7 +265,6 @@ export default function HomeworkSettingsPage() {
                         <TableHead>性别</TableHead>
                         <TableHead className="text-right">记录数</TableHead>
                         <TableHead className="text-center">排除统计</TableHead>
-                        <TableHead className="text-right">操作</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -328,9 +288,6 @@ export default function HomeworkSettingsPage() {
                               </span>
                             </button>
                           </TableCell>
-                          <TableCell className="text-right">
-                            <Button variant="ghost" size="icon" className="h-11 w-11 text-muted-foreground hover:text-danger-600" onClick={() => void removeStudent(row)} aria-label={`删除 ${row.name}`}><Trash2 className="h-4 w-4" /></Button>
-                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -345,7 +302,6 @@ export default function HomeworkSettingsPage() {
                           <div className="flex flex-wrap items-center gap-2"><h3 className="font-extrabold text-foreground">{row.name}</h3>{row.excluded === 1 && <Badge variant="secondary">不计入统计</Badge>}</div>
                           <p className="mt-1 text-xs text-muted-foreground">座号 {row.seat_no ?? '—'} · {row.gender ?? '性别未填'} · {row.record_count} 条记录</p>
                         </div>
-                        <Button variant="ghost" size="icon" className="h-11 w-11 shrink-0 text-muted-foreground hover:text-danger-600" onClick={() => void removeStudent(row)} aria-label={`删除 ${row.name}`}><Trash2 className="h-4 w-4" /></Button>
                       </div>
                       <button
                         type="button"
