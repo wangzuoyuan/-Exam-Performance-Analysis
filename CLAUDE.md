@@ -158,7 +158,9 @@ tail -f ~/.exam-tracker/frontend.log
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET  | `/api/rollover/preview` | 换届预览：检测高二候选名册、未链接学号四态分布、待办状态 |
-| POST | `/api/rollover/roster` | 建目标班名册：粘贴名单两种行——仅「姓名」（生成临时学号 `TMP-{grade}-{class}-{name}`，幂等，可先记作业）或「学号,姓名」（正式学号：统一冲突校验——成绩库姓名/目标年级班级/已挂身份别名不符整批拒绝；命中本班同名占位行【精确等于 temp_sid】时事务性替换并把作业/特殊/档案/身份别名迁到正式学号）；`from_scores=true` 从成绩派生复用同一替换逻辑；同时收编旧版缺陷行（`student_id=姓名`、`class_num/name` 为空的行，先比对两侧别名身份）；目标 grade+class 必须与教师绑定一致（409），行校验错误 422。响应 `{created, updated, replaced, repaired, total}` |
+| POST | `/api/rollover/roster` | 建目标班名册：粘贴名单两种行——仅「姓名」（生成临时学号 `TMP-{grade}-{class}-{name}`，幂等，可先记作业）或「学号,姓名」（正式学号：统一冲突校验——成绩库姓名/目标年级班级/已挂身份别名不符整批拒绝；命中本班同名占位行【精确等于 temp_sid，落空时回退「本班同名 + `TMP-{届}-{班}-` 前缀唯一」——改名后学号里冻结旧名】时事务性替换并把作业/特殊/档案/身份别名迁到正式学号）；`from_scores=true` 从成绩派生复用同一替换逻辑；同时收编旧版缺陷行（`student_id=姓名`、`class_num/name` 为空的行，先比对两侧别名身份）；目标 grade+class 必须与教师绑定一致（409），行校验错误 422。响应 `{batch_id, created, updated, replaced, repaired, total}` |
+| GET | `/api/rollover/roster/last-import` | 最近一次未撤销导入批次摘要（供页面恢复撤销按钮） |
+| POST | `/api/rollover/roster/{batch_id}/undo` | 撤销一次导入：按 `roster_import_batch` 快照单事务逆向还原——新建行删除（导入后已有身份/作业等关联则保留并说明）、替换/收编还原（记录迁回旧号、重建旧行、alias 还原）、届命名空间迁移反向改写；被后续操作改动过的行跳过并说明；重复撤销/越权班级 409，批次不存在 404 |
 | POST | `/api/rollover/link` | 逐人判定：把高一学号与高二学号链接为同一 identity |
 | POST | `/api/rollover/link-batch` | 批量链接（四态：已确认/待定/新增/无高一匹配） |
 | DELETE | `/api/rollover/link/{student_id}` | 解除某学号的 identity 链接 |

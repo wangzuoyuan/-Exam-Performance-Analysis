@@ -12,6 +12,7 @@ import {
   RefreshCw,
   Sparkles,
   Table as TableIcon,
+  Undo2,
   Upload,
 } from 'lucide-react'
 
@@ -111,6 +112,7 @@ interface Preview {
 }
 
 interface RosterResult {
+  batch_id?: string
   created: number
   updated: number
   replaced: number
@@ -170,6 +172,9 @@ export default function RolloverWizardPage() {
   const [rosterText, setRosterText] = useState('')
   const [rosterBusy, setRosterBusy] = useState(false)
   const [rosterMsg, setRosterMsg] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null)
+  // 最近一次未撤销的名册导入批次（撤销按钮数据源）
+  const [lastImport, setLastImport] = useState<{ batch_id: string; summary: Record<string, number> } | null>(null)
+  const [undoImportBusy, setUndoImportBusy] = useState(false)
 
   // Step 2
   const [preview, setPreview] = useState<Preview | null>(null)
@@ -207,6 +212,23 @@ export default function RolloverWizardPage() {
   useEffect(() => {
     loadTeacher().catch(() => {})
   }, [loadTeacher])
+
+  // 恢复「撤销导入」按钮：查询最近一次未撤销的导入批次（刷新页面不丢）
+  useEffect(() => {
+    let alive = true
+    requestJson<{ batch_id: string | null; summary?: Record<string, number> }>(
+      '/api/rollover/roster/last-import',
+    )
+      .then((data) => {
+        if (alive && data.batch_id) {
+          setLastImport({ batch_id: data.batch_id, summary: data.summary ?? {} })
+        }
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [])
 
   // 当目标年级变化时，按 target_class_high{2/3} 预填班号
   useEffect(() => {
@@ -269,6 +291,9 @@ export default function RolloverWizardPage() {
         tone: 'ok',
         text: `已从成绩派生名册：新增 ${data.created}、更新 ${data.updated}、本班共 ${data.total} 人`,
       })
+      if (data.batch_id) {
+        setLastImport({ batch_id: data.batch_id, summary: { created: data.created, replaced: data.replaced, repaired: data.repaired } })
+      }
     } catch (cause) {
       setRosterMsg({ tone: 'error', text: displayError(cause, '派生名册失败') })
     } finally {
@@ -308,11 +333,47 @@ export default function RolloverWizardPage() {
         `本班共 ${data.total} 人`,
       ].filter(Boolean)
       setRosterMsg({ tone: 'ok', text: `名册已写入：${parts.join('、')}` })
+      if (data.batch_id) {
+        setLastImport({ batch_id: data.batch_id, summary: { created: data.created, replaced: data.replaced, repaired: data.repaired } })
+      }
       setRosterText('')
     } catch (cause) {
       setRosterMsg({ tone: 'error', text: displayError(cause, '写入名册失败') })
     } finally {
       setRosterBusy(false)
+    }
+  }
+
+  // 撤销最近一次名册导入：按批次快照单事务逆向还原（新建行删除、
+  // 替换/收编还原、届命名空间迁移反向）。名册变化后强制第 2 步重新预览。
+  async function undoLastImport() {
+    if (!lastImport) return
+    const s = lastImport.summary
+    const what = [
+      s.created ? `新增 ${s.created}` : null,
+      s.replaced ? `补学号 ${s.replaced}` : null,
+      s.repaired ? `修复 ${s.repaired}` : null,
+    ]
+      .filter(Boolean)
+      .join('、')
+    if (!window.confirm(`撤销最近一次导入（${what || '无变更'}）？相关记录将还原到导入前状态。`)) return
+    setUndoImportBusy(true)
+    setRosterMsg(null)
+    try {
+      const data = await requestJson<{ removed_rows: string[]; restored_rows: string[]; moved_back_refs: number; skipped: unknown[] }>(
+        `/api/rollover/roster/${encodeURIComponent(lastImport.batch_id)}/undo`,
+        { method: 'POST' },
+        '撤销导入失败',
+      )
+      const restored = data.restored_rows.length + data.removed_rows.length
+      const skipNote = data.skipped.length > 0 ? `，${data.skipped.length} 项因已被后续操作改动而保留` : ''
+      setRosterMsg({ tone: 'ok', text: `已撤销导入：还原 ${restored} 行、迁回记录 ${data.moved_back_refs} 条${skipNote}` })
+      setLastImport(null)
+      setPreview(null)
+    } catch (cause) {
+      setRosterMsg({ tone: 'error', text: displayError(cause, '撤销导入失败') })
+    } finally {
+      setUndoImportBusy(false)
     }
   }
 
@@ -615,6 +676,18 @@ export default function RolloverWizardPage() {
                     >
                       {rosterMsg.text}
                     </span>
+                  )}
+                  {lastImport && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={undoLastImport}
+                      disabled={undoImportBusy || rosterBusy}
+                      className="shrink-0 text-muted-foreground"
+                    >
+                      <Undo2 className="mr-1 h-4 w-4" />
+                      {undoImportBusy ? '撤销中…' : '撤销本次导入'}
+                    </Button>
                   )}
                 </div>
               </div>

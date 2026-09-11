@@ -101,6 +101,32 @@ async def rollover_roster(payload: RosterPayload):
         db.close()
 
 
+@router.get("/rollover/roster/last-import")
+async def rollover_roster_last_import():
+    """最近一次未撤销的「写入名册」批次摘要（供页面恢复撤销按钮）。"""
+    db = next(get_db())
+    try:
+        return service.last_roster_import(db)
+    finally:
+        db.close()
+
+
+@router.post("/rollover/roster/{batch_id}/undo")
+async def rollover_roster_undo(batch_id: str):
+    """撤销一次「写入名册」导入：按批次快照单事务逆向还原。"""
+    db = next(get_db())
+    try:
+        return service.undo_roster_import(db, batch_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except service.RosterScopeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        db.close()
+
+
 # ─────────────────────────── 身份链接 ───────────────────────────
 
 

@@ -324,17 +324,42 @@ def _legacy_broken_rows(db, name, target_grade) -> list:
     )
 
 
-def _migrate_student_refs(db, old_sid, new_sid) -> None:
-    """把依赖学号的业务数据从 old_sid 迁到 new_sid（homework/special/note）。"""
+def _migrate_student_refs(db, old_sid, new_sid) -> dict:
+    """把依赖学号的业务数据从 old_sid 迁到 new_sid（homework/special/note）。
+
+    返回 {表名: [迁移的记录 id]}，供导入批次快照记录、撤销时逆向迁回。
+    """
     from app.db.models import HomeworkRecord, SpecialRecord, StudentNote
 
-    for model in (HomeworkRecord, SpecialRecord, StudentNote):
-        db.query(model).filter(model.student_id == old_sid).update(
-            {model.student_id: new_sid}, synchronize_session=False
-        )
+    moved: dict[str, list] = {}
+    for model, label in (
+        (HomeworkRecord, "homework_record"),
+        (SpecialRecord, "special_record"),
+        (StudentNote, "student_note"),
+    ):
+        rows = db.query(model).filter(model.student_id == old_sid).all()
+        if rows:
+            for r in rows:
+                r.student_id = new_sid
+            moved[label] = [r.id for r in rows]
+    return moved
 
 
-def _absorb_legacy_row(db, legacy, target_sid) -> None:
+def _snapshot_row(row) -> dict:
+    """花名册行全字段快照（撤销重建用）。"""
+    return {
+        "student_id": row.student_id,
+        "name": row.name,
+        "class_num": row.class_num,
+        "grade": row.grade,
+        "seat_no": row.seat_no,
+        "gender": row.gender,
+        "excluded": row.excluded,
+        "status": row.status,
+    }
+
+
+def _absorb_legacy_row(db, legacy, target_sid) -> dict:
     """收编旧缺陷行：其依赖数据迁到 target_sid 后删除该行。
 
     调用方已保证：legacy 形态严格匹配、姓名与本批明确对应、target_sid 是
@@ -343,6 +368,7 @@ def _absorb_legacy_row(db, legacy, target_sid) -> None:
       - 同一 identity -> 业务记录随迁，删除缺陷学号的 alias（目标侧已有，不留孤儿）；
       - 仅旧侧有 alias -> 随学号迁到 target_sid；
       - 仅目标侧有 alias -> 只迁业务记录。
+    返回快照 dict（撤销时逆向还原用）。
     """
     from app.db.models import StudentAlias
 
@@ -362,16 +388,38 @@ def _absorb_legacy_row(db, legacy, target_sid) -> None:
             "跨学年身份，无法自动收编，请先在逐人判定中处理"
         )
 
-    _migrate_student_refs(db, legacy.student_id, target_sid)
+    snapshot = {
+        "old_row": _snapshot_row(legacy),
+        "new_student_id": target_sid,
+        "moved_refs": {},
+        "alias_action": None,
+        "old_alias": None,
+    }
+    snapshot["moved_refs"] = _migrate_student_refs(db, legacy.student_id, target_sid)
     if old_alias is not None and new_alias is None:
+        snapshot["alias_action"] = "moved"
+        snapshot["old_alias"] = {
+            "student_id": old_alias.student_id,
+            "identity_id": old_alias.identity_id,
+            "grade": old_alias.grade,
+            "link_source": old_alias.link_source,
+        }
         db.query(StudentAlias).filter(
             StudentAlias.student_id == legacy.student_id
         ).update({"student_id": target_sid}, synchronize_session=False)
     elif old_alias is not None:
+        snapshot["alias_action"] = "deleted"
+        snapshot["old_alias"] = {
+            "student_id": old_alias.student_id,
+            "identity_id": old_alias.identity_id,
+            "grade": old_alias.grade,
+            "link_source": old_alias.link_source,
+        }
         db.query(StudentAlias).filter(
             StudentAlias.student_id == legacy.student_id
         ).delete(synchronize_session=False)
     db.delete(legacy)
+    return snapshot
 
 
 def _validate_official_sid(db, sid, name, target_grade, class_num, expect_iid=None) -> None:
@@ -459,13 +507,14 @@ def _validate_official_sid(db, sid, name, target_grade, class_num, expect_iid=No
             )
 
 
-def _replace_placeholder_sid(db, row, sid, name, target_grade, class_num, seat_no=None, gender=None) -> None:
+def _replace_placeholder_sid(db, row, sid, name, target_grade, class_num, seat_no=None, gender=None) -> dict:
     """把临时学号占位行替换为正式学号：插新行 → 迁移依赖 → 删旧行。
 
     全程在调用方的同一事务里（统一 commit，出错整体回滚）；保留
     excluded/seat_no/gender 与年级班级归属，StudentAlias 随学号迁移。
     统一走 _validate_official_sid（成绩库姓名 / 目标年级班级 / 别名冲突，
     expect_iid=占位行 identity：别名指向他人时整批拒绝）。
+    返回快照 dict（撤销时逆向还原用）。
     """
     from app.db.models import ClassRoster, StudentAlias
     from app.analysis.identity import identity_of
@@ -476,6 +525,14 @@ def _replace_placeholder_sid(db, row, sid, name, target_grade, class_num, seat_n
     _validate_official_sid(
         db, sid, name, target_grade, class_num, expect_iid=old_iid
     )
+
+    snapshot = {
+        "old_row": _snapshot_row(row),
+        "new_student_id": sid,
+        "moved_refs": {},
+        "alias_action": None,
+        "old_alias": None,
+    }
 
     db.add(
         ClassRoster(
@@ -490,16 +547,37 @@ def _replace_placeholder_sid(db, row, sid, name, target_grade, class_num, seat_n
     )
     db.flush()
 
-    _migrate_student_refs(db, old_sid, sid)
+    snapshot["moved_refs"] = _migrate_student_refs(db, old_sid, sid)
     new_alias = db.query(StudentAlias).filter(StudentAlias.student_id == sid).first()
     if new_alias is not None:
         # 学号的 alias 属于本人（校验已过）：保留，临时学号旧 alias 删除
+        snapshot["alias_action"] = "deleted"
+        old_alias_row = (
+            db.query(StudentAlias)
+            .filter(StudentAlias.student_id == old_sid)
+            .first()
+        )
+        if old_alias_row is not None:
+            snapshot["old_alias"] = {
+                "student_id": old_alias_row.student_id,
+                "identity_id": old_alias_row.identity_id,
+                "grade": old_alias_row.grade,
+                "link_source": old_alias_row.link_source,
+            }
         db.query(StudentAlias).filter(StudentAlias.student_id == old_sid).delete()
     elif old_iid is not None:
+        snapshot["alias_action"] = "moved"
+        snapshot["old_alias"] = {
+            "student_id": old_sid,
+            "identity_id": old_iid,
+            "grade": None,
+            "link_source": None,
+        }
         db.query(StudentAlias).filter(StudentAlias.student_id == old_sid).update(
             {"student_id": sid}, synchronize_session=False
         )
     db.delete(row)
+    return snapshot
 
 
 def _import_rows(db, target_grade, class_num, rows, *, allow_dup_names=False) -> dict:
@@ -511,7 +589,7 @@ def _import_rows(db, target_grade, class_num, rows, *, allow_dup_names=False) ->
     使用：同班同名多学号各自建行（成绩库本来就以学号区分），不走粘贴的
     同名互斥校验。
     """
-    from app.db.models import ClassRoster
+    from app.db.models import ClassRoster, RosterImportBatch
 
     plans, errors = [], []
     seen_sid: dict[str, int] = {}
@@ -548,17 +626,21 @@ def _import_rows(db, target_grade, class_num, rows, *, allow_dup_names=False) ->
     # 跨届学号守门：正式学号若与其他年级的裸学号撞车（每学年重新编学号
     # 的学校，高二新号可与高一旧号同号），先把撞车旧届整体 G{g}:: 前缀化
     # 让位，本届写入裸号。与下面的落库同一事务（出错整体回滚），自动备份
-    # 与删除/合并的安全口径一致。
+    # 与删除/合并的安全口径一致。renamed 记入批次快照，撤销时逆向还原。
     from app.db.sid_space import ensure_sid_space
 
     official_sids = {p["sid"] for p in plans if p["sid"]}
+    renamed_map: dict = {}
     if official_sids:
-        ensure_sid_space(
+        renamed_map = ensure_sid_space(
             db, official_sids, target_grade, commit=False, auto_backup=True
-        )
+        )["renamed"]
 
     created = updated = replaced = repaired = 0
     batch_created: set[str] = set()  # 本批新建的学号（供派生时同名多号互不拦）
+    snap_created: list[dict] = []
+    snap_replaced: list[dict] = []
+    snap_repaired: list[dict] = []
     try:
         for p in plans:
             sid, name = p["sid"], p["name"]
@@ -599,17 +681,18 @@ def _import_rows(db, target_grade, class_num, rows, *, allow_dup_names=False) ->
                     target_sid = same_name_rows[0].student_id
                     updated += 1
                 else:
-                    db.add(
-                        ClassRoster(
-                            student_id=target_sid,
-                            name=name,
-                            class_num=class_num,
-                            grade=target_grade,
-                            seat_no=p["seat_no"],
-                            gender=p["gender"],
-                            excluded=0,
-                        )
+                    new_row = ClassRoster(
+                        student_id=target_sid,
+                        name=name,
+                        class_num=class_num,
+                        grade=target_grade,
+                        seat_no=p["seat_no"],
+                        gender=p["gender"],
+                        excluded=0,
                     )
+                    db.add(new_row)
+                    db.flush()
+                    snap_created.append(_snapshot_row(new_row))
                     created += 1
             else:
                 # ── 学号+姓名：统一冲突校验（成绩库姓名 / 目标年级班级 / 别名）──
@@ -657,15 +740,17 @@ def _import_rows(db, target_grade, class_num, rows, *, allow_dup_names=False) ->
                     target_sid = sid
                     updated += 1
                 elif placeholder is not None:
-                    _replace_placeholder_sid(
-                        db,
-                        placeholder,
-                        sid,
-                        name,
-                        target_grade,
-                        class_num,
-                        p["seat_no"],
-                        p["gender"],
+                    snap_replaced.append(
+                        _replace_placeholder_sid(
+                            db,
+                            placeholder,
+                            sid,
+                            name,
+                            target_grade,
+                            class_num,
+                            p["seat_no"],
+                            p["gender"],
+                        )
                     )
                     target_sid = sid
                     replaced += 1
@@ -676,26 +761,51 @@ def _import_rows(db, target_grade, class_num, rows, *, allow_dup_names=False) ->
                         "未找到待补学号占位行，已拒绝重复建册"
                     )
                 else:
-                    db.add(
-                        ClassRoster(
-                            student_id=sid,
-                            name=name,
-                            class_num=class_num,
-                            grade=target_grade,
-                            seat_no=p["seat_no"],
-                            gender=p["gender"],
-                            excluded=0,
-                        )
+                    new_row = ClassRoster(
+                        student_id=sid,
+                        name=name,
+                        class_num=class_num,
+                        grade=target_grade,
+                        seat_no=p["seat_no"],
+                        gender=p["gender"],
+                        excluded=0,
                     )
+                    db.add(new_row)
+                    db.flush()
+                    snap_created.append(_snapshot_row(new_row))
                     target_sid = sid
                     created += 1
                     batch_created.add(sid)
 
             # 收编旧缺陷行（姓名明确对应 + 形态严格匹配 + 唯一）
             for lg in legacy:
-                _absorb_legacy_row(db, lg, target_sid)
+                snap_repaired.append(
+                    _absorb_legacy_row(db, lg, target_sid)
+                )
                 repaired += 1
 
+        # 导入批次快照（与行级变更同一事务）：撤销时按快照逆向还原
+        batch_id = uuid.uuid4().hex
+        db.add(
+            RosterImportBatch(
+                id=batch_id,
+                grade=target_grade,
+                class_num=class_num,
+                payload=[
+                    {"student_id": p["sid"], "name": p["name"]} for p in plans
+                ],
+                created_rows=snap_created,
+                replaced_rows=snap_replaced,
+                repaired_rows=snap_repaired,
+                renamed=renamed_map,
+                summary={
+                    "created": created,
+                    "updated": updated,
+                    "replaced": replaced,
+                    "repaired": repaired,
+                },
+            )
+        )
         db.commit()
     except Exception:
         db.rollback()
@@ -710,6 +820,7 @@ def _import_rows(db, target_grade, class_num, rows, *, allow_dup_names=False) ->
         .count()
     )
     return {
+        "batch_id": batch_id,
         "created": created,
         "updated": updated,
         "replaced": replaced,
@@ -1135,6 +1246,225 @@ def undo_confirm_batch(db, batch_id) -> dict:
         "removed_aliases": removed_aliases,
         "removed_identities": removed_identities,
         "skipped": skipped,
+    }
+
+
+def undo_roster_import(db, batch_id) -> dict:
+    """撤销一次「写入名册」导入：按批次快照单事务逆向还原。
+
+    安全口径（与 undo_confirm_batch 一致）：
+      - 批次不存在 -> KeyError（HTTP 404）；已撤销过 -> 409；
+      - 教师当前绑定的高{grade}班级与批次目标班不一致 -> 409（越权防呆）；
+      - 只逆本批事务实际做的变更，被后续操作改动过的行跳过并说明；
+      - 逆向顺序与导入相反：先逆行级变更（新建删除/替换还原/收编还原），
+        再逆届命名空间迁移（renamed 反向改写）。
+    """
+    from app.db.models import (
+        RosterImportBatch, ClassRoster, StudentAlias,
+        HomeworkRecord, SpecialRecord, StudentNote,
+        SubjectScore, TotalScore, Exam,
+        RolloverConfirmBatch, StudentChangeLog,
+    )
+
+    batch = (
+        db.query(RosterImportBatch).filter(RosterImportBatch.id == str(batch_id)).first()
+    )
+    if batch is None:
+        raise KeyError("找不到该导入批次")
+    if batch.undone:
+        raise ValueError("该导入批次已撤销过，不能重复撤销")
+    bound = _teacher_target_class(db, batch.grade)
+    if bound is None or int(bound) != int(batch.class_num):
+        raise RosterScopeError(
+            f"当前绑定的高{batch.grade}班级与该批次（{batch.class_num}班）不一致，拒绝撤销"
+        )
+
+    removed_rows: list[str] = []
+    restored_rows: list[str] = []
+    moved_back_refs: list[str] = []
+    skipped: list[dict] = []
+
+    # ── 1) 逆行级变更（与导入顺序相反）──
+
+    # 1a. 新建行：仅当行原样存在且无任何业务引用/别名时删除（导入后学生
+    # 已被使用——挂了身份/记了作业——则保留并说明，绝不破坏后续数据）
+    for snap in batch.created_rows or []:
+        sid = snap["student_id"]
+        row = (
+            db.query(ClassRoster).filter(ClassRoster.student_id == sid).first()
+        )
+        if row is None:
+            skipped.append({"student_id": sid, "reason": "该行已不存在（可能已被后续操作删除）"})
+            continue
+        if _snapshot_row(row) != snap:
+            skipped.append({"student_id": sid, "reason": "该行已被后续操作修改，保留现状"})
+            continue
+        used = (
+            db.query(StudentAlias).filter(StudentAlias.student_id == sid).count()
+            + db.query(HomeworkRecord).filter(HomeworkRecord.student_id == sid).count()
+            + db.query(SpecialRecord).filter(SpecialRecord.student_id == sid).count()
+            + db.query(StudentNote).filter(StudentNote.student_id == sid).count()
+            + db.query(SubjectScore).filter(SubjectScore.student_id == sid).count()
+        )
+        if used:
+            skipped.append(
+                {"student_id": sid, "reason": "导入后已有作业/档案/身份等关联，保留该行"}
+            )
+            continue
+        db.delete(row)
+        removed_rows.append(sid)
+
+    # 1b. 替换/收编逆向：记录迁回旧号 → 删新行 → 重建旧行 → alias 还原
+    def _restore_replace(snap: dict) -> None:
+        old_row, new_sid = snap["old_row"], snap["new_student_id"]
+        old_sid = old_row["student_id"]
+        new_row = (
+            db.query(ClassRoster).filter(ClassRoster.student_id == new_sid).first()
+        )
+        if new_row is None:
+            skipped.append({"student_id": old_sid, "reason": f"新学号 {new_sid} 的行已不存在，跳过"})
+            return
+        model_map = {
+            "homework_record": HomeworkRecord,
+            "special_record": SpecialRecord,
+            "student_note": StudentNote,
+        }
+        for label, ids in (snap.get("moved_refs") or {}).items():
+            model = model_map[label]
+            for rid in ids:
+                rec = db.query(model).filter(model.id == rid).first()
+                if rec is not None and rec.student_id == new_sid:
+                    rec.student_id = old_sid
+                    moved_back_refs.append(str(rid))
+        # 新行的身份三要素与替换时写入的不一致 = 已被后续操作改动 → 保守跳过
+        if (new_row.name, new_row.grade, new_row.class_num) != (
+            old_row["name"],
+            old_row["grade"],
+            old_row["class_num"],
+        ):
+            skipped.append(
+                {"student_id": old_sid, "reason": f"新学号 {new_sid} 的行已被后续操作修改，保留现状"}
+            )
+            return
+        db.delete(new_row)
+        # 旧号被占用（后续又建了同号行）→ 保守跳过，避免唯一键冲突
+        existing_old = (
+            db.query(ClassRoster)
+            .filter(ClassRoster.student_id == old_sid)
+            .first()
+        )
+        if existing_old is not None:
+            skipped.append(
+                {"student_id": old_sid, "reason": "旧学号已被其他行占用，无法重建旧行"}
+            )
+            return
+        db.add(ClassRoster(**old_row))
+        restored_rows.append(old_sid)
+
+        action = snap.get("alias_action")
+        old_alias = snap.get("old_alias")
+        if action == "moved" and old_alias:
+            cur = (
+                db.query(StudentAlias)
+                .filter(StudentAlias.student_id == new_sid)
+                .first()
+            )
+            if cur is not None and cur.identity_id == old_alias["identity_id"]:
+                cur.student_id = old_sid
+            else:
+                skipped.append(
+                    {"student_id": old_sid, "reason": "身份关联已被后续操作改动，保留现状"}
+                )
+        elif action == "deleted" and old_alias:
+            exists = (
+                db.query(StudentAlias)
+                .filter(StudentAlias.student_id == old_sid)
+                .count()
+            )
+            if exists:
+                skipped.append(
+                    {"student_id": old_sid, "reason": "旧学号已有新的身份关联，保留现状"}
+                )
+            else:
+                db.add(
+                    StudentAlias(
+                        identity_id=old_alias["identity_id"],
+                        student_id=old_sid,
+                        grade=old_alias["grade"],
+                        link_source=old_alias["link_source"],
+                    )
+                )
+
+    for snap in batch.replaced_rows or []:
+        _restore_replace(snap)
+    for snap in batch.repaired_rows or []:
+        _restore_replace(snap)
+
+    # ── 2) 逆届命名空间迁移（renamed 反向改写，与本批迁移同一表集合）──
+    renamed = batch.renamed or {}
+    if renamed:
+        reversed_map = {new: old for old, new in renamed.items()}
+        for model in (SubjectScore, TotalScore, ClassRoster, StudentAlias,
+                      HomeworkRecord, SpecialRecord, StudentNote):
+            rows = db.query(model).filter(model.student_id.in_(list(reversed_map))).all()
+            for r in rows:
+                r.student_id = reversed_map[r.student_id]
+        for b in db.query(RolloverConfirmBatch).all():
+            payload = _remap_json_local(b.payload, reversed_map)
+            aliases = _remap_json_local(b.created_aliases, reversed_map)
+            if payload != b.payload or aliases != b.created_aliases:
+                b.payload, b.created_aliases = payload, aliases
+        for lg in db.query(StudentChangeLog).all():
+            if lg.student_id and lg.student_id in reversed_map:
+                lg.student_id = reversed_map[lg.student_id]
+            for field in ("before_summary", "after_summary", "detail"):
+                old = getattr(lg, field)
+                new = _remap_json_local(old, reversed_map)
+                if new != old:
+                    setattr(lg, field, new)
+
+    batch.undone = 1
+    db.commit()
+    return {
+        "batch_id": batch.id,
+        "removed_rows": removed_rows,
+        "restored_rows": restored_rows,
+        "moved_back_refs": len(moved_back_refs),
+        "renamed_reversed": len(renamed),
+        "skipped": skipped,
+    }
+
+
+def _remap_json_local(node, mapping: dict):
+    """undo 用的 JSON 整值反向重写（与 sid_space._remap_json 同规则）。"""
+    if isinstance(node, dict):
+        return {k: _remap_json_local(v, mapping) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_remap_json_local(v, mapping) for v in node]
+    if isinstance(node, str):
+        return mapping.get(node, node)
+    return node
+
+
+def last_roster_import(db) -> dict:
+    """最近一次未撤销的导入批次摘要（供页面恢复撤销按钮显示）。"""
+    from app.db.models import RosterImportBatch
+
+    batch = (
+        db.query(RosterImportBatch)
+        .filter(RosterImportBatch.undone == 0)
+        .order_by(RosterImportBatch.created_at.desc(), RosterImportBatch.id.desc())
+        .first()
+    )
+    if batch is None:
+        return {"batch_id": None}
+    return {
+        "batch_id": batch.id,
+        "grade": batch.grade,
+        "class_num": batch.class_num,
+        "created_at": batch.created_at.isoformat() if batch.created_at else None,
+        "summary": batch.summary or {},
+        "renamed_count": len(batch.renamed or {}),
     }
 
 

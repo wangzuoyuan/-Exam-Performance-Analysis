@@ -265,6 +265,27 @@ class RolloverConfirmBatch(Base):
     created_identities = Column(JSON)  # 本批新建的 identity id 列表
 
 
+class RosterImportBatch(Base):
+    """换届向导「写入名册」的一次导入快照，供「撤销本次导入」逆向还原。
+
+    与 RolloverConfirmBatch 同一套快照模式：undo 只逆本批事务实际做的
+    行级变更（新建/占位替换/缺陷收编）与届命名空间迁移（renamed），被
+    后续操作改动过的行跳过并在结果中说明，绝不触碰其他批次或提交前
+    已存在的数据。"""
+    __tablename__ = "roster_import_batch"
+    id = Column(String, primary_key=True)  # uuid hex 批次令牌
+    grade = Column(Integer, nullable=False)          # 目标年级
+    class_num = Column(Integer, nullable=False)      # 目标行政班（=教师绑定）
+    created_at = Column(DateTime, default=datetime.utcnow)
+    undone = Column(Integer, nullable=False, default=0)
+    payload = Column(JSON)         # 本次粘贴的行（审计）
+    created_rows = Column(JSON)    # 新建行全字段
+    replaced_rows = Column(JSON)   # 占位替换：旧行全字段 + 新号 + 迁走的记录 id + alias 动作
+    repaired_rows = Column(JSON)   # 缺陷行收编：结构同 replaced_rows
+    renamed = Column(JSON)         # 届命名空间迁移 {旧学号: G{g}::新学号}
+    summary = Column(JSON)         # {created, updated, replaced, repaired, total}
+
+
 class ImportedHistory(Base):
     """班主任手工导入的历史成绩（从旧班主任本子/Excel 搬来的过往考试）。
     与 SubjectScore/TotalScore 完全隔离——不参与全年级排名、班均、段位
